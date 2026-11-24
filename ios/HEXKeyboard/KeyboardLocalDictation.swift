@@ -425,6 +425,7 @@ final class KeyboardLocalDictation {
             return nil
         }
         let jobID = UUID().uuidString
+        ForkDroplineRecognition.prepare()
         let requestedAt = Date()
         job = Job(id: jobID, document: currentDocument())
         lastProgressAt = requestedAt.timeIntervalSince1970

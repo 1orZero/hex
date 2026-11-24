@@ -254,6 +254,8 @@ struct ContentView: View {
                 }
                 .padding(.top, 8)
 
+                ForkDroplineSettingsCard()
+
                 SettingsCard {
                     Button {
                         if let url = URL(string: UIApplication.openSettingsURLString) {

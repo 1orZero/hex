@@ -776,6 +776,7 @@ final class DictationController {
             corrections: personalCorrections
         )
         let sharesHeard = typingJournalSettings.isEnabled
+        ForkDroplineRecognition.prepare()
 
         phase = .requestingPermission
         copied = false
@@ -902,7 +903,7 @@ final class DictationController {
             let transcribeStarted = Date()
 
             do {
-                let rawText = try await activeTranscriber.transcribe(
+                let rawText = try await activeTranscriber.transcribePreferringDropline(
                     captureURL,
                     vocabulary: session.recognitionHints
                 )
