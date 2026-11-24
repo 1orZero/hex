@@ -2,8 +2,8 @@
 """Keeps the front of Hex's vocabulary on the terms Derek used most in the last 30 days.
 
 Transcription reads only the front of the vocabulary (src/dictation/vocabulary.rs): Parakeet with
-Labs › Vocabulary biasing on biases toward the first 64 terms, and Whisper and Qwen3-ASR read the
-first terms that fit 500 and 1,000 characters joined by ", ". The rest still serves rewriting and
+Labs › Vocabulary biasing on biases toward the first 64 terms, and Whisper reads the first terms that
+fit 500 characters joined by ", ", and Qwen3-ASR and QwenCleo 1,000. The rest still serves rewriting and
 search. Each night the automation lists the new dictations, picks up to 5 new terms, and runs
 apply, which adds them and ranks the vocabulary:
 
@@ -112,8 +112,8 @@ def mention(term):
 def front_rule(model, biasing):
     """How much of the list the selected model reads; None when transcription reads none of it."""
     if model["vocabulary"] == "prompt":
-        qwen3 = "qwen3" in f"{model['id']} {model['name']}".lower()
-        return {"unit": "characters", "limit": 1_000 if qwen3 else 500}
+        qwen = "qwen" in f"{model['id']} {model['name']}".lower()
+        return {"unit": "characters", "limit": 1_000 if qwen else 500}
     if model["vocabulary"] == "bias" and biasing:
         return {"unit": "terms", "limit": PARAKEET_TERMS}
     return None
@@ -162,9 +162,9 @@ def build(additions_path, exclude_app):
     adds, spellings, skipped = [], [], []
     additions = load(additions_path, {}).get("add", []) if additions_path else []
     for index, item in enumerate(additions):
-        term = item["term"].strip()
+        term = " ".join(item["term"].split())
         key = term.casefold()
-        heard = [spelling.strip() for spelling in item.get("sounds_like", []) if spelling.strip()]
+        heard = [" ".join(spelling.split()) for spelling in item.get("sounds_like", []) if spelling.strip()]
         if index >= MAX_ADDS:
             skipped.append({"term": term, "reason": f"over the limit of {MAX_ADDS} per night"})
             continue
@@ -197,13 +197,14 @@ def build(additions_path, exclude_app):
                 counts[key] += found
                 latest[key] = max(latest.get(key, 0), entry["timestamp_ms"])
 
+    respelled = {change["term"].casefold() for change in spellings}
     seen = {}
     removes = []
     for key, (term, info) in own.items():
         last = max(filter(None, [info.get("last_seen"), day(latest[key]) if key in latest else None]), default=None)
         seen[key] = last
         since = date.fromisoformat(last or info["added"])
-        if key in listed and key not in pinned and today - since > timedelta(days=UNUSED_DAYS):
+        if key in listed and key not in pinned and key not in respelled and today - since > timedelta(days=UNUSED_DAYS):
             removes.append(listed[key]["term"])
 
     removed = {term.casefold() for term in removes}
@@ -277,7 +278,7 @@ def build(additions_path, exclude_app):
         "write": bool(moves or adds or spellings or removes),
         "_final": final,
         "_seen": seen,
-        "_latest": {key: day(value) for key, value in latest.items()},
+        "_latest": {**{key: day(value) for key, value in latest.items()}, **{key: today.isoformat() for key in respelled}},
     }
 
 
@@ -292,7 +293,11 @@ def snapshot(entries):
 def apply(args):
     plan = build(args.add, args.exclude_app)
     own_state = load(OWN, {"terms": {}})
-    backup = None
+
+    def add(entry):
+        run_hex("vocabulary", "add", entry["term"], *(["--sounds-like", ",".join(entry["sounds_like"])] if entry["sounds_like"] else []))
+
+    backup, stop, removed, added = None, None, [], []
     if plan["write"]:
         os.makedirs(BACKUPS, mode=0o700, exist_ok=True)
         backup = os.path.join(BACKUPS, f"settings-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
@@ -301,31 +306,37 @@ def apply(args):
         try:
             for term in plan["removes"]:
                 run_hex("vocabulary", "remove", term)
-            for entry in plan["adds"] + plan["spellings"]:
-                run_hex("vocabulary", "add", entry["term"], *(["--sounds-like", ",".join(entry["sounds_like"])] if entry["sounds_like"] else []))
+                removed.append(term)
+            for entry in plan["adds"]:
+                add(entry)
+                added.append(entry)
+            for entry in plan["spellings"]:
+                add(entry)
             for term in plan["moves"]:
-                entry = next(item for item in plan["_final"] if item["term"] == term)
                 run_hex("vocabulary", "remove", term)
-                run_hex("vocabulary", "add", term, *(["--sounds-like", ",".join(entry["sounds_like"])] if entry["sounds_like"] else []))
+                add(next(item for item in plan["_final"] if item["term"] == term))
+            after = entries_now()
         except HexError as error:
-            sys.exit(f"stopped: {error}; settings.json before tonight's changes is at {backup}")
-        after = entries_now()
-        rule = plan["front_rule"]
-        read = {entry["term"].casefold() for entry in after[: terms_read(rule, [entry["term"] for entry in after])]}
-        expected = {row["term"].casefold() for row in plan["front_planned"]}
-        problems = []
-        if snapshot(after) != snapshot(plan["_final"]):
-            problems.append("the terms or spellings differ from the plan")
-        if read != expected:
-            problems.append("the front differs from the plan")
-        if problems:
-            sys.exit(f"stopped: {'; '.join(problems)}; settings.json before tonight's changes is at {backup}")
+            stop = str(error)
+        else:
+            rule = plan["front_rule"]
+            read = {entry["term"].casefold() for entry in after[: terms_read(rule, [entry["term"] for entry in after])]}
+            expected = {row["term"].casefold() for row in plan["front_planned"]}
+            problems = []
+            if snapshot(after) != snapshot(plan["_final"]):
+                problems.append("the terms or spellings differ from the plan")
+            if read != expected:
+                problems.append("the front differs from the plan")
+            stop = "; ".join(problems) or None
 
     terms = own_state.setdefault("terms", {})
-    for term in plan["removes"]:
+    for term in removed:
         terms.pop(next(name for name in terms if name.casefold() == term.casefold()), None)
-    for entry in plan["adds"]:
+    for entry in added:
         terms[entry["term"]] = {"added": date.today().isoformat(), "last_seen": None}
+    if stop:
+        save(OWN, own_state)
+        sys.exit(f"stopped: {stop}; settings.json before tonight's changes is at {backup}")
     for name, info in terms.items():
         info["last_seen"] = max(filter(None, [info.get("last_seen"), plan["_latest"].get(name.casefold())]), default=None)
     listed_until = own_state.pop("listed_until_ms", None)
