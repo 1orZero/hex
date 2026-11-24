@@ -129,8 +129,8 @@ Hex must be running; otherwise the notification says so.
 
 ### Nightly vocabulary upkeep
 
-Transcription reads only the front of the vocabulary: Qwen3-ASR the first terms that fit 1,000
-characters (Whisper 500), Parakeet with Labs › Vocabulary biasing on the first 64 terms
+Transcription reads only the front of the vocabulary: Qwen3-ASR and QwenCleo the first terms that
+fit 1,000 characters (Whisper 500), Parakeet with Labs › Vocabulary biasing on the first 64 terms
 (`src/dictation/vocabulary.rs`). The rest still serves rewriting and search. The 22:00 automation
 runs `fork/vocabulary.py` from `~/.hex-fork/repo` after `fork/daily.sh` to keep the most used terms in front
 and to add new ones:
@@ -158,11 +158,12 @@ appends, so `apply` moves the fewest terms to the end (`remove`, then `add` with
 spellings) that leave the planned front first; terms inside the front keep their order. It writes
 only when the front changes or a term is added or removed, copies `settings.json` to
 `~/.hex-fork/backup/vocab/` first, and afterwards checks that every term and spelling is unchanged
-and the front matches the plan; otherwise it stops and names the backup. A model that reads no
+and the front matches the plan; otherwise it stops and names the backup, keeps the terms it already
+added as its own, and leaves the analyzed window for the next night. A model that reads no
 vocabulary (or Parakeet with biasing off) gets no reordering.
 
 Terms Derek added or imported are never removed and get no new spellings. A term the script added is
-removed after 90 days without a use. `~/.hex-fork/state/vocab/` holds `own.json` (the script's terms with
+removed after 90 days without a use or a new spelling. `~/.hex-fork/state/vocab/` holds `own.json` (the script's terms with
 their added and last-seen dates, and the end of the last analyzed window), `pinned.json`,
 `imported.json`, and `last-plan.json`; no dictation text is stored.
 
