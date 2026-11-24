@@ -147,6 +147,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        ForkMacVocabulary.apply()
         reportFullAccess(force: true)
         isRetired = false
         autoStartPending = true

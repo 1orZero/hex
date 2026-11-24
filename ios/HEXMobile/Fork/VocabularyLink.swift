@@ -42,15 +42,15 @@ struct VocabularyLink: Equatable {
         }
         guard terms.count < CustomVocabularySettings.maxTermCount else { return .full }
         settings.terms = terms + [term]
-        NotificationCenter.default.post(name: .forkVocabularyLinkAdded, object: nil)
+        NotificationCenter.default.post(name: .forkVocabularyChanged, object: nil)
         return .added(term)
     }
 }
 
 extension Notification.Name {
-    /// Posted after a link adds a term, so the editor on screen reloads its list before its next
-    /// edit writes the list back.
-    static let forkVocabularyLinkAdded = Notification.Name("HexForkVocabularyLinkAdded")
+    /// Posted after a link or the Mac's vocabulary changes the list, so the editor on screen
+    /// reloads its list before its next edit writes the list back.
+    static let forkVocabularyChanged = Notification.Name("HexForkVocabularyChanged")
 }
 
 extension VocabularyLink.Outcome {
@@ -95,11 +95,23 @@ enum VocabularyLinkAlert {
 }
 
 extension View {
-    /// Hex fork: handles `hex-dictation://vocabulary/add` links (FORK.md).
+    /// Hex fork: handles `hex-dictation://vocabulary/add` links and folds in the Mac's vocabulary
+    /// as Hex opens and each time it comes back (FORK.md).
     func forkVocabularyLinks() -> some View {
         onOpenURL { url in
             guard let link = VocabularyLink(url: url) else { return }
             VocabularyLinkAlert.present(link.apply(to: CustomVocabularySettings()))
         }
+        .task { applyMacVocabulary() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            applyMacVocabulary()
+        }
+    }
+}
+
+@MainActor
+private func applyMacVocabulary() {
+    if ForkMacVocabulary.apply() {
+        NotificationCenter.default.post(name: .forkVocabularyChanged, object: nil)
     }
 }

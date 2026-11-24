@@ -23,8 +23,9 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXMobile/ContentView.swift` | `homeView`: `ForkDroplineSettingsCard()` and a blank line after the Settings pages card (`.padding(.top, 8)`) | Adds, selects, and deletes the provider. |
 | `ios/HEXKeyboard/KeyboardParakeet.swift` | `KeyboardTranscription.transcribe(_:hints:audioSeconds:)`: `if let dropline = try await ForkKeyboardDropline.transcribe(url, hints: hints) { return dropline }` as its first line | The keyboard's own dictation: Dropline first, the keyboard's local engines when Dropline isn't selected or fails. |
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `begin(in:microphone:pressedAt:armed:)`: `ForkDroplineRecognition.prepare()` after `let jobID = UUID().uuidString` | Opens the Dropline session as the keyboard starts recording (best effort). |
-| `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links; upstream's handler ignores hosts other than `keyboard`. |
-| `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyLinkAdded)` after the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link adds a term; otherwise the editor's next add or remove writes its stale list back and drops the linked term. |
+| `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links, since upstream's handler ignores hosts other than `keyboard`, and folds in the Mac's vocabulary each time Hex becomes active. |
+| `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyChanged)` after the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link or the Mac's vocabulary changes it; otherwise the editor's next add or remove writes its stale list back. |
+| `ios/HEXKeyboard/KeyboardViewController.swift` | `viewWillAppear(_:)`: `ForkMacVocabulary.apply()` after `super.viewWillAppear(animated)` (1 line) | Folds in the Mac's vocabulary as the keyboard comes on screen, before the keys and dictation read the list, so the iPhone gets it without opening Hex. |
 
 ## Fork-only files
 
@@ -33,6 +34,8 @@ whoever resolves a tag merge knows what to keep.
   `ios/HEXMobileTests/ForkDropline*Tests.swift`: the Dropline private API provider.
 - `ios/HEXMobile/Fork/VocabularyLink.swift` and `ios/HEXMobileTests/Fork/VocabularyLinkTests.swift`: the
   vocabulary link.
+- `ios/HEXShared/Fork/ForkMacVocabulary.swift` and `ios/HEXMobileTests/Fork/ForkMacVocabularyTests.swift`:
+  the Mac's vocabulary on the iPhone.
 
 ## Dropline private API
 
@@ -97,6 +100,34 @@ Shortcuts app on the iPhone:
 2. **Text**: `hex-dictation://vocabulary/add?term=` followed by **URL Encoded Text**.
 3. **Open URLs** with that Text.
 4. Run it from the Home Screen, the Action button, or Settings › Accessibility › Touch › Back Tap.
+
+## The Mac's vocabulary on the iPhone
+
+One way, Mac to iPhone. Each night `fork/daily.sh` (on `stable`) reads the Mac's vocabulary in its
+order (`hex vocabulary list`) and copies the terms to the App Group as `fork-mac-vocabulary.json`
+(`{"terms": [...]}`) with `devicectl`. The copy holds names and email addresses, so it lives only in
+`~/.hex-fork/state/` on the Mac and in the App Group on the iPhone, never in a repository.
+
+`ForkMacVocabulary.apply()` folds a new copy into Hex's list (`CustomVocabularySettings`,
+`customVocabulary.terms` in the App Group) when the keyboard comes on screen and when Hex becomes active,
+so Derek doesn't have to open Hex. It runs once per copy:
+
+- The iPhone's own terms (added with a link, the editor, or the keyboard's add chip) stay, first and in
+  their order. A term counts as the Mac's only if an earlier copy added it
+  (`fork.macVocabulary.synced`), so a term added here that the Mac also has stays when the Mac drops it.
+- The Mac's terms follow in the Mac's order (its most used first), skipping terms the list refuses
+  (over 64 characters, fewer than two letters or digits, or a spelling already listed), until the list
+  holds 90 terms. The remaining 10 places take terms added on the iPhone before the next copy.
+- A term that came from the Mac and isn't in the new copy is removed. A Mac term deleted on the iPhone
+  comes back with the next changed copy; to drop it for good, remove it on the Mac.
+
+Why own terms first and 90: in 1.0.4 the list holds at most 100 terms (Apple's limit for contextual
+strings), and every reader takes the whole list: dictation's recognition hints (the list, then the words
+learned fixes mean, up to 100, for Apple's speech engines' contextual strings and Dropline's context;
+Parakeet takes none), the spelling of dictated text, and the full keyboard's autocorrect, completions, and
+swipe typing. Only the cap makes a position matter, and upstream's writers keep it by dropping the end of
+the list, so the iPhone's own terms go first. Dictation uses the list only while Settings › Dictation ›
+Custom vocabulary is on (off by default); the keys use it either way.
 
 ## Merging an App Store tag
 

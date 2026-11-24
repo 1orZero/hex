@@ -93,7 +93,7 @@ struct CustomVocabularyEditor: View {
         .onAppear {
             terms = settings.terms
         }
-        .onReceive(NotificationCenter.default.publisher(for: .forkVocabularyLinkAdded)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .forkVocabularyChanged)) { _ in
             terms = settings.terms
         }
     }

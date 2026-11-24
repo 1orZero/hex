@@ -58,7 +58,7 @@ final class VocabularyLinkTests: XCTestCase {
     func testAddsTheTermWhereTheKeyboardReadsIt() {
         let settings = CustomVocabularySettings(defaults: defaults)
         settings.terms = ["OpenCode"]
-        let reload = expectation(forNotification: .forkVocabularyLinkAdded, object: nil)
+        let reload = expectation(forNotification: .forkVocabularyChanged, object: nil)
 
         let outcome = link("hex-dictation://vocabulary/add?term=qa-Foo")?.apply(to: settings)
 
@@ -72,7 +72,7 @@ final class VocabularyLinkTests: XCTestCase {
     func testAnExistingTermSaysSoAndChangesNothing() {
         let settings = CustomVocabularySettings(defaults: defaults)
         settings.terms = ["qa-Foo"]
-        let reload = expectation(forNotification: .forkVocabularyLinkAdded, object: nil)
+        let reload = expectation(forNotification: .forkVocabularyChanged, object: nil)
         reload.isInverted = true
 
         let outcome = link("hex-dictation://vocabulary/add?term=QA%20FOO")?.apply(to: settings)
