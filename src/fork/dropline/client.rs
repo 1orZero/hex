@@ -287,8 +287,42 @@ fn final_text(body: &[u8]) -> Result<String, Failure> {
         serde_json::from_slice(body).map_err(|_| Failure::InvalidResponse)?;
     body["final_text"]
         .as_str()
-        .map(str::to_owned)
+        .map(traditional_chinese)
         .ok_or(Failure::InvalidResponse)
+}
+
+fn traditional_chinese(text: &str) -> String {
+    use objc2_foundation::{NSString, ns_string};
+    use std::sync::LazyLock;
+
+    static FORMS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"[恐恫威惊驚]吓|吓(?:[了我你]?一跳|[唬坏壞傻哭跑退死醒怕]|人[。！？，、.!?\s]|人$)|(吓|了解|明了|斗笠|[烟煙]斗|启|钵|钩)").unwrap()
+    });
+    let mut output = String::with_capacity(text.len());
+    let append = |output: &mut String, part: &str| {
+        if !part.is_ascii()
+            && let Some(converted) = NSString::from_str(part)
+                .stringByApplyingTransform_reverse(ns_string!("[[:Han:]] Hans-Hant"), false)
+        {
+            output.push_str(&converted.to_string());
+        } else {
+            output.push_str(part);
+        }
+    };
+    let mut start = 0;
+    for form in FORMS.captures_iter(text).filter_map(|m| m.get(1)) {
+        append(&mut output, &text[start..form.start()]);
+        output.push_str(match form.as_str() {
+            "启" => "啟",
+            "钵" => "缽",
+            "钩" => "鉤",
+            "烟斗" => "煙斗",
+            other => other,
+        });
+        start = form.end();
+    }
+    append(&mut output, &text[start..]);
+    output
 }
 
 /// `request` (JSON), `context` (JSON, left out when empty), and `audio`,
@@ -555,6 +589,35 @@ mod tests {
             Err(Failure::Token("HTTP 401".into()))
         );
         assert!(script.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn successful_dictation_converts_only_the_chinese_script() {
+        for (input, expected) in [
+            (
+                "qa-请打开软件，读取里面的文件。",
+                "qa-請打開軟件，讀取裡面的文件。",
+            ),
+            (
+                "qa-啟用后再启动 API_v2(42)：头发與发展\n\t请睇吓。",
+                "qa-啟用後再啟動 API_v2(42)：頭髮與發展\n\t請睇吓。",
+            ),
+            (
+                "qa-佢哋喺度試吓，已經了解斗笠點用。",
+                "qa-佢哋喺度試吓，已經了解斗笠點用。",
+            ),
+            (
+                "qa- e\u{301} / API_v2(42) 💻\r\n\t",
+                "qa- e\u{301} / API_v2(42) 💻\r\n\t",
+            ),
+            ("qa-吓了一跳，继续奋斗。", "qa-嚇了一跳，繼續奮鬥。"),
+        ] {
+            let body = json!({"final_text": input, "transcript": {"language": "en"}});
+            assert_eq!(
+                final_text(&serde_json::to_vec(&body).unwrap()).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

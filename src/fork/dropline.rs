@@ -372,6 +372,16 @@ mod tests {
     }
 
     #[test]
+    fn local_dictation_keeps_its_original_script() {
+        let engine =
+            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+        let local = engine
+            .foreground(vec![], Box::new(|_, _| Ok("qa-本机软件".into())))
+            .unwrap();
+        assert_eq!(wait(None, local).unwrap().text, "qa-本机软件");
+    }
+
+    #[test]
     fn the_context_joins_the_vocabulary() {
         let terms = vec![
             "qa-Hex".to_owned(),
