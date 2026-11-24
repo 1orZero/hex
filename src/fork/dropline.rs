@@ -12,6 +12,7 @@ mod audio;
 mod client;
 mod keychain;
 mod store;
+mod text;
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
@@ -369,6 +370,16 @@ mod tests {
         assert_eq!(&session[14..15], "4");
         assert!(matches!(&session[19..20], "8" | "9" | "a" | "b"));
         assert_ne!(session, new_session());
+    }
+
+    #[test]
+    fn local_dictation_keeps_its_original_script() {
+        let engine =
+            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+        let local = engine
+            .foreground(vec![], Box::new(|_, _| Ok("qa-本机软件".into())))
+            .unwrap();
+        assert_eq!(wait(None, local).unwrap().text, "qa-本机软件");
     }
 
     #[test]

@@ -287,7 +287,7 @@ fn final_text(body: &[u8]) -> Result<String, Failure> {
         serde_json::from_slice(body).map_err(|_| Failure::InvalidResponse)?;
     body["final_text"]
         .as_str()
-        .map(str::to_owned)
+        .map(super::text::traditional)
         .ok_or(Failure::InvalidResponse)
 }
 
@@ -555,6 +555,78 @@ mod tests {
             Err(Failure::Token("HTTP 401".into()))
         );
         assert!(script.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn successful_dictation_converts_only_the_chinese_script() {
+        for (input, expected) in [
+            (
+                "qa-请打开软件，读取里面的文件。",
+                "qa-請打開軟件，讀取裡面的文件。",
+            ),
+            (
+                "qa-啟用后再启动 API_v2(42)：头发與发展\n\t请睇吓。",
+                "qa-啟用後再啟動 API_v2(42)：頭髮與發展\n\t請睇吓。",
+            ),
+            (
+                "qa-佢哋喺度試吓，已經了解斗笠點用。",
+                "qa-佢哋喺度試吓，已經了解斗笠點用。",
+            ),
+            (
+                "qa- e\u{301} / API_v2(42) 💻\r\n\t",
+                "qa- e\u{301} / API_v2(42) 💻\r\n\t",
+            ),
+            ("qa-吓了一跳，继续奋斗。", "qa-嚇了一跳，繼續奮鬥。"),
+            ("qa-别干擾周杰倫的软件开发。", "qa-別干擾周杰倫的軟件開發。"),
+            ("qa-他吓了我一跳，吓得发抖。", "qa-他嚇了我一跳，嚇得發抖。"),
+            (
+                "qa-睇吓人哋點講。吓？我哋試吓先。",
+                "qa-睇吓人哋點講。吓？我哋試吓先。",
+            ),
+            (
+                "qa-你幫我查吓呢個地址，我去洗吓手先。",
+                "qa-你幫我查吓呢個地址，我去洗吓手先。",
+            ),
+            (
+                "qa-他想吓唬你，别用吓人的手段吓我一跳。",
+                "qa-他想嚇唬你，別用嚇人的手段嚇我一跳。",
+            ),
+            (
+                "qa-請保持干燥，這里很好，會后再说。",
+                "qa-請保持乾燥，這裡很好，會後再說。",
+            ),
+            (
+                "qa-读取_v2 和 foo_变量，`读取-v2`：请开门。",
+                "qa-读取_v2 和 foo_变量，`读取-v2`：請開門。",
+            ),
+            (
+                "qa-不要吓我，他吓你了吗？吓呆了，吓晕。",
+                "qa-不要嚇我，他嚇你了嗎？嚇呆了，嚇暈。",
+            ),
+            (
+                "qa-请打开API_v2并读取 foo_读取_变量 和 变量_读取。",
+                "qa-請打開API_v2並讀取 foo_读取_变量 和 变量_读取。",
+            ),
+            (
+                "qa-我去問吓人，睇吓人。好吓人，别用吓人的手段。",
+                "qa-我去問吓人，睇吓人。好嚇人，別用嚇人的手段。",
+            ),
+            ("qa-周杰倫的風采，別干擾他。", "qa-周杰倫的風采，別干擾他。"),
+            (
+                "qa-日本の国と学校、한국어、`读取_v2`：请开门。",
+                "qa-日本の国と学校、한국어、`读取_v2`：請開門。",
+            ),
+            (
+                "qa-启用铜钵和铁钩，保留原來的啓。",
+                "qa-啟用銅缽和鐵鉤，保留原來的啓。",
+            ),
+        ] {
+            let body = json!({"final_text": input, "transcript": {"language": "en"}});
+            assert_eq!(
+                final_text(&serde_json::to_vec(&body).unwrap()).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
