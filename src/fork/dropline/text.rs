@@ -7,8 +7,8 @@ pub(super) fn traditional(text: &str) -> String {
         Regex::new(
             r"(?x)
             \x60{3} [\s\S]*? \x60{3} | \x60 [^\x60\r\n]+ \x60
-            | [A-Za-z_][A-Za-z0-9_]* _ \p{sc=Han}+
-            | \p{sc=Han}+ _ [A-Za-z0-9_]+
+            | (?: [A-Za-z0-9]+ | \p{sc=Han}[\p{sc=Han}0-9]* )?
+              (?: _+ (?: [A-Za-z0-9]+ | \p{sc=Han}[\p{sc=Han}0-9]* ) )+
             | [A-Za-z0-9_]+
             | \p{sc=Han}* [\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}]
               [\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}ー]*
@@ -20,8 +20,9 @@ pub(super) fn traditional(text: &str) -> String {
     static FORMS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"(?x)
-            吓人哋 | [驚惊恐威恫別别被] (吓)
-            | (吓) (?: [得了到着著住破死醒坏壞哭跑傻出退走倒瘋疯人唬]
+            ^[吓嚇]+$ | 吓[呀喎啦嘛啫嘅㗎先] | 吓人哋
+            | (?: ^ | [驚惊恐威恫別别被受給给] | [我你他她][們们]? | 不要 ) (吓)
+            | (吓) (?: [得了到着著住破死醒坏壞哭跑傻出退走倒瘋疯人唬暈晕]
                 | 一(?:下|大?跳) | [我你他她](?:們|们)?一大?跳 )
             | 吓 | 了解 | 明了 | 杰倫 | 斗笠 | [烟煙]斗 | 启 | 钵 | 钩
         ",
