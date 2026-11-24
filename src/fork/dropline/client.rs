@@ -287,42 +287,8 @@ fn final_text(body: &[u8]) -> Result<String, Failure> {
         serde_json::from_slice(body).map_err(|_| Failure::InvalidResponse)?;
     body["final_text"]
         .as_str()
-        .map(traditional_chinese)
+        .map(super::text::traditional)
         .ok_or(Failure::InvalidResponse)
-}
-
-fn traditional_chinese(text: &str) -> String {
-    use objc2_foundation::{NSString, ns_string};
-    use std::sync::LazyLock;
-
-    static FORMS: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"[恐恫威惊驚]吓|吓(?:[了我你]?一跳|[唬坏壞傻哭跑退死醒怕]|人[。！？，、.!?\s]|人$)|(吓|了解|明了|斗笠|[烟煙]斗|启|钵|钩)").unwrap()
-    });
-    let mut output = String::with_capacity(text.len());
-    let append = |output: &mut String, part: &str| {
-        if !part.is_ascii()
-            && let Some(converted) = NSString::from_str(part)
-                .stringByApplyingTransform_reverse(ns_string!("[[:Han:]] Hans-Hant"), false)
-        {
-            output.push_str(&converted.to_string());
-        } else {
-            output.push_str(part);
-        }
-    };
-    let mut start = 0;
-    for form in FORMS.captures_iter(text).filter_map(|m| m.get(1)) {
-        append(&mut output, &text[start..form.start()]);
-        output.push_str(match form.as_str() {
-            "启" => "啟",
-            "钵" => "缽",
-            "钩" => "鉤",
-            "烟斗" => "煙斗",
-            other => other,
-        });
-        start = form.end();
-    }
-    append(&mut output, &text[start..]);
-    output
 }
 
 /// `request` (JSON), `context` (JSON, left out when empty), and `audio`,
@@ -611,6 +577,21 @@ mod tests {
                 "qa- e\u{301} / API_v2(42) 💻\r\n\t",
             ),
             ("qa-吓了一跳，继续奋斗。", "qa-嚇了一跳，繼續奮鬥。"),
+            ("qa-别干擾周杰倫的软件开发。", "qa-別干擾周杰倫的軟件開發。"),
+            ("qa-他吓了我一跳，吓得发抖。", "qa-他嚇了我一跳，嚇得發抖。"),
+            (
+                "qa-睇吓人哋點講。吓？我哋試吓先。",
+                "qa-睇吓人哋點講。吓？我哋試吓先。",
+            ),
+            ("qa-周杰倫的風采，別干擾他。", "qa-周杰倫的風采，別干擾他。"),
+            (
+                "qa-日本の国と学校、한국어、`读取_v2`：请开门。",
+                "qa-日本の国と学校、한국어、`读取_v2`：請開門。",
+            ),
+            (
+                "qa-启用铜钵和铁钩，保留原來的啓。",
+                "qa-啟用銅缽和鐵鉤，保留原來的啓。",
+            ),
         ] {
             let body = json!({"final_text": input, "transcript": {"language": "en"}});
             assert_eq!(

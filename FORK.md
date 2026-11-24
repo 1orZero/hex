@@ -63,11 +63,14 @@ heard no speech, so the dictation inserts nothing and does not fall back.
 
 ### Mac
 
-- `src/fork/dropline/client.rs` converts a successful `final_text` to Traditional Chinese before
+- `src/fork/dropline/client.rs` calls `src/fork/dropline/text.rs` on a successful `final_text` before
   the dictation worker receives it. Apple's offline `Hans-Hant` transform changes Han characters,
   not regional terms: `软件` becomes `軟件`, not `軟體`. The client keeps common existing spellings
   such as `了解` and the Cantonese particle `吓`, and uses Taiwan forms such as `啟` for `启`.
-  Ambiguous characters still depend on context. Local and fallback transcripts bypass this parser.
+  It leaves backtick-quoted identifiers and runs with kana or Hangul alone. Where a Han character
+  has two readings, Taiwan's exemplar character set and nearby traditional spellings help preserve
+  the original (for example, `干擾` rather than `乾擾`). They cannot resolve every name or reading.
+  Local and fallback transcripts bypass this parser.
 - The local model still transcribes every clip while Dropline runs, so a fallback needs no second
   transcription. When Dropline answers, the local transcript still finishes in the background under its own
   deadlines. General and the model picker show the last fallback.

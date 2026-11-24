@@ -12,6 +12,7 @@ mod audio;
 mod client;
 mod keychain;
 mod store;
+mod text;
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
