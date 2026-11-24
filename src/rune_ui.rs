@@ -225,10 +225,17 @@ fn managed_note() -> &'static str {
     tr("Managed by your organization")
 }
 
+#[cfg(target_os = "macos")]
+#[path = "fork/vocabulary_link.rs"]
+mod fork_vocabulary_link;
+
 /// A `hex://` link the system opened with Hex: a story link opens the window
 /// on that playground story; anything else is ignored.
 #[cfg(target_os = "macos")]
 fn on_open_url(ui: &mut Ui, link: &str, tx: &mut Tx) {
+    if fork_vocabulary_link::open(ui, link, tx) {
+        return;
+    }
     if let Some(target) = deep_link::parse(link, story_link::scheme()) {
         match target {
             Ok(target) => deep_link::open(ui, target, tx),

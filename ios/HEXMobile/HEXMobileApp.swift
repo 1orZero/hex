@@ -49,6 +49,7 @@ struct HEXMobileApp: App {
                     showSetup: $showSetup,
                     openPage: $openPage
                 )
+                .forkVocabularyLinks()
                 .onOpenURL { url in
                     guard let request = KeyboardLaunchRequest(url: url) else { return }
                     if case .setup = request {

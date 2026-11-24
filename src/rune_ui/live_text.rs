@@ -748,3 +748,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "../fork/live_text_notice.rs"]
+pub(crate) mod fork_notice;
