@@ -226,7 +226,7 @@ nonisolated struct ForkDroplineClient: Sendable {
             throw ForkDroplineFailure.invalidResponse
         }
         let language = (body["transcript"] as? [String: Any])?["language"] as? String
-        return ForkDroplineAnswer(text: text, language: language)
+        return ForkDroplineAnswer(text: traditionalChinese(text), language: language)
     }
 
     /// Sends within `limit`: URLRequest's own timeout is an idle timeout, not a deadline.

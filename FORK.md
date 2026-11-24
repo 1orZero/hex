@@ -62,6 +62,16 @@ nothing inserted, as when a local engine hears none, and doesn't fall back.
 
 ### Where dictations go through Dropline
 
+- The app and keyboard share `ios/HEXShared/Fork/ForkDroplineClient.swift`. Its answer parser calls
+  `ForkDroplineText.swift` in the same folder on a successful `final_text` before either caller receives it.
+  Apple's offline `Hans-Hant` transform changes Han characters, not regional terms: `软件` becomes
+  `軟件`, not `軟體`. The client keeps common existing spellings such as `了解` and the Cantonese
+  particle `吓`, and uses Taiwan forms such as `啟` for `启`. It skips backtick-quoted code, Han
+  identifiers marked by an underscore, and runs with kana or Hangul. For mixed Chinese text, it
+  uses a simplified copy to look up the whole phrase and keeps the input characters that were
+  already distinctly traditional. This distinguishes `干擾` from `干燥` without treating either
+  spelling as a rule for every name or phrase. Local and fallback transcripts and live words
+  bypass this parser.
 - In the app: dictations Hex records itself (the app's Dictate, the Action button, Control Center, Siri,
   and the keyboard's dictations handed to Hex) finish in `DictationController.finishRecording()`.
 - In the keyboard: from iOS 26 the keyboard records and transcribes by itself

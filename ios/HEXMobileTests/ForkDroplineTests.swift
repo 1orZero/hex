@@ -105,11 +105,40 @@ final class ForkDroplineTests: XCTestCase {
 
     // MARK: - Dictate
 
+    func testSuccessfulDictationConvertsOnlyTheChineseScript() async throws {
+        await storeToken()
+        for (input, expected) in [
+            ("qa-请打开软件，读取里面的文件。", "qa-請打開軟件，讀取裡面的文件。"),
+            ("qa-啟用后再启动 API_v2(42)：头发與发展\n\t请睇吓。", "qa-啟用後再啟動 API_v2(42)：頭髮與發展\n\t請睇吓。"),
+            ("qa-佢哋喺度試吓，已經了解斗笠點用。", "qa-佢哋喺度試吓，已經了解斗笠點用。"),
+            ("qa- e\u{301} / API_v2(42) 💻\r\n\t", "qa- e\u{301} / API_v2(42) 💻\r\n\t"),
+            ("qa-吓了一跳，继续奋斗。", "qa-嚇了一跳，繼續奮鬥。"),
+            ("qa-别干擾周杰倫的软件开发。", "qa-別干擾周杰倫的軟件開發。"),
+            ("qa-他吓了我一跳，吓得发抖。", "qa-他嚇了我一跳，嚇得發抖。"),
+            ("qa-睇吓人哋點講。吓？我哋試吓先。", "qa-睇吓人哋點講。吓？我哋試吓先。"),
+            ("qa-你幫我查吓呢個地址，我去洗吓手先。", "qa-你幫我查吓呢個地址，我去洗吓手先。"),
+            ("qa-他想吓唬你，别用吓人的手段吓我一跳。", "qa-他想嚇唬你，別用嚇人的手段嚇我一跳。"),
+            ("qa-請保持干燥，這里很好，會后再说。", "qa-請保持乾燥，這裡很好，會後再說。"),
+            ("qa-读取_v2 和 foo_变量，`读取-v2`：请开门。", "qa-读取_v2 和 foo_变量，`读取-v2`：請開門。"),
+            ("qa-不要吓我，他吓你了吗？吓呆了，吓晕。", "qa-不要嚇我，他嚇你了嗎？嚇呆了，嚇暈。"),
+            ("qa-请打开API_v2并读取 foo_读取_变量 和 变量_读取。", "qa-請打開API_v2並讀取 foo_读取_变量 和 变量_读取。"),
+            ("qa-我去問吓人，睇吓人。好吓人，别用吓人的手段。", "qa-我去問吓人，睇吓人。好嚇人，別用嚇人的手段。"),
+            ("qa-周杰倫的風采，別干擾他。", "qa-周杰倫的風采，別干擾他。"),
+            ("qa-日本の国と学校、한국어、`读取_v2`：请开门。", "qa-日本の国と学校、한국어、`读取_v2`：請開門。"),
+            ("qa-启用铜钵和铁钩，保留原來的啓。", "qa-啟用銅缽和鐵鉤，保留原來的啓。"),
+        ] {
+            http.enqueue(FakeDroplineHTTP.json(200, ["final_text": input, "transcript": ["language": "en"]]))
+            let answer = try await makeRecognition().answer(for: URL(fileURLWithPath: "/tmp/qa.wav"), hints: [])
+            let actual = try XCTUnwrap(answer).spokenText()
+            XCTAssertTrue(actual.utf8.elementsEqual(expected.utf8), "\(actual.debugDescription) != \(expected.debugDescription)")
+        }
+    }
+
     func testDictate401RefetchesTheTokenOnceAndSucceeds() async throws {
         http.enqueue(tokenResponse("qa-access-old"))
         http.enqueue(FakeDroplineHTTP.json(401, ["error": "qa-expired"]))
         http.enqueue(tokenResponse("qa-access-new"))
-        http.enqueue(FakeDroplineHTTP.json(200, ["final_text": "qa hello", "transcript": ["text": "qa hello", "language": "en"]]))
+        http.enqueue(FakeDroplineHTTP.json(200, ["final_text": "qa-听写", "transcript": ["text": "qa-preview", "language": "en"]]))
         let localCalls = ForkDroplineCounter()
 
         let result = try await makeRecognition().recognize(URL(fileURLWithPath: "/tmp/qa.wav"), hints: ["qa-term"]) {
@@ -118,7 +147,7 @@ final class ForkDroplineTests: XCTestCase {
         }
 
         guard case .dropline(let answer) = result else { return XCTFail("expected Dropline, got \(result)") }
-        XCTAssertEqual(answer, ForkDroplineAnswer(text: "qa hello", language: "en"))
+        XCTAssertEqual(answer, ForkDroplineAnswer(text: "qa-聽寫", language: "en"))
         XCTAssertEqual(localCalls.value, 0)
         let requests = http.requests
         XCTAssertEqual(requests.count, 4)
@@ -149,11 +178,11 @@ final class ForkDroplineTests: XCTestCase {
         let result = try await recognition.recognize(recording, hints: []) {
             let audio = try Data(contentsOf: recording)
             localReads.append(audio)
-            return "qa-local"
+            return "qa-本机软件"
         }
 
         guard case .local(let text, let fallback) = result else { return XCTFail("expected local, got \(result)") }
-        XCTAssertEqual(text, "qa-local")
+        XCTAssertEqual(text, "qa-本机软件")
         XCTAssertEqual(fallback, .unauthorized)
         XCTAssertEqual(encoded.values, [recording])
         XCTAssertEqual(localReads.values, [Data("qa-audio".utf8)])
@@ -289,10 +318,10 @@ final class ForkDroplineTests: XCTestCase {
         let recognition = makeRecognition()
         ForkDroplineSettings(defaults: defaults).isEnabled = false
 
-        let result = try await recognition.recognize(URL(fileURLWithPath: "/tmp/qa.wav"), hints: []) { "qa-local" }
+        let result = try await recognition.recognize(URL(fileURLWithPath: "/tmp/qa.wav"), hints: []) { "qa-本机软件" }
 
         guard case .local(let text, let fallback) = result else { return XCTFail("expected local, got \(result)") }
-        XCTAssertEqual(text, "qa-local")
+        XCTAssertEqual(text, "qa-本机软件")
         XCTAssertNil(fallback)
         XCTAssertTrue(http.requests.isEmpty)
         XCTAssertNil(ForkDroplineSettings(defaults: defaults).lastFallback)
