@@ -125,6 +125,7 @@ struct InferenceJob {
     language: String,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
+    dropline: Option<crate::fork::dropline::Job>,
 }
 
 struct ProcessorJob {
@@ -447,6 +448,7 @@ impl DictationWorker {
         let _capture = clip.take_capture_marker();
         let samples = clip.into_transcription_samples();
         crate::dictation::diagnostics::persist(&samples);
+        let dropline = crate::fork::dropline::job(&samples);
         let recording = match target {
             TranscriptionTarget::Service => None,
             _ => crate::history::Recording::keep(&samples),
@@ -482,6 +484,7 @@ impl DictationWorker {
             return_to,
             language,
             recording,
+            dropline,
         })
         .map(|()| {
             state.next_sequence += 1;
@@ -829,7 +832,7 @@ fn run_inference_worker(
         let queue_ms = total_started.elapsed().as_millis();
         let inference_started = Instant::now();
         let audio_ms = job.audio_ms;
-        let result = job.transcript.wait().map(|transcribed| {
+        let result = crate::fork::dropline::wait(job.dropline, job.transcript).map(|transcribed| {
             tracing::info!(
                 source = transcribed.source.label(),
                 finish_ms = transcribed.finish_ms,

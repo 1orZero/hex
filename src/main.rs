@@ -33,6 +33,8 @@ mod dictation;
 mod durable;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod feedback;
+#[cfg(target_os = "macos")]
+mod fork;
 mod history;
 #[cfg(target_os = "macos")]
 mod keyboard;

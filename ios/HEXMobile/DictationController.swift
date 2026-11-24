@@ -712,6 +712,7 @@ final class DictationController {
         let effectiveStyle = styleOverride ?? style
         let usesCleanup = cleanupSettings.isEnabled
         let vocabularyTerms = customVocabularySettings.activeTerms
+        ForkDroplineRecognition.prepare(hints: vocabularyTerms)
 
         phase = .requestingPermission
         copied = false
@@ -818,7 +819,7 @@ final class DictationController {
             }
 
             do {
-                let rawText = try await activeTranscriber.transcribe(
+                let rawText = try await activeTranscriber.transcribePreferringDropline(
                     captureURL,
                     vocabulary: session.vocabularyTerms
                 )

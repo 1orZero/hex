@@ -378,6 +378,7 @@ pub(super) fn cancel(ui: &mut Ui) {
 /// its default language, which Settings then names.
 pub(super) fn choose(ui: &mut Ui, model: &'static ModelDefinition) {
     ui.picker.clear_deletion();
+    super::fork_dropline::model_chosen();
     let current = &ui.settings.transcription;
     let installed = ui.picker.installed(model, &current.language);
     if transcription_selection_is_active(current, model, installed) {
@@ -565,6 +566,7 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
         content = content.child(panels);
     }
     let content = content.child(body);
+    let content = content.children(super::fork_dropline::section(ui, p));
     let mut panel = col()
         .key("transcription-picker")
         .role("dialog")

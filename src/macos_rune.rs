@@ -875,6 +875,7 @@ impl Pump {
             StatusItemAction::OpenSettings => show(&self.window, Destination::Settings),
             StatusItemAction::OpenModels => show(&self.window, Destination::Models),
             StatusItemAction::SelectModel(model) => {
+                crate::fork::dropline::deselect();
                 let _ = self.runtime.send(Request::SelectInstalledModel(model));
                 self.model_menu_at = Instant::now();
             }
