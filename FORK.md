@@ -23,12 +23,16 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXMobile/ContentView.swift` | `homeView`: `ForkDroplineSettingsCard()` and a blank line after the Settings pages card (`.padding(.top, 8)`) | Adds, selects, and deletes the provider. |
 | `ios/HEXKeyboard/KeyboardParakeet.swift` | `KeyboardTranscription.transcribe(_:hints:audioSeconds:)`: `if let dropline = try await ForkKeyboardDropline.transcribe(url, hints: hints) { return dropline }` as its first line | The keyboard's own dictation: Dropline first, the keyboard's local engines when Dropline isn't selected or fails. |
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `begin(in:microphone:pressedAt:armed:)`: `ForkDroplineRecognition.prepare()` after `let jobID = UUID().uuidString` | Opens the Dropline session as the keyboard starts recording (best effort). |
+| `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links; upstream's handler ignores hosts other than `keyboard`. |
+| `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyLinkAdded)` after the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link adds a term; otherwise the editor's next add or remove writes its stale list back and drops the linked term. |
 
 ## Fork-only files
 
 - `FORK.md`: this file.
 - `ios/HEXShared/Fork/`, `ios/HEXMobile/Fork/`, `ios/HEXKeyboard/Fork/`, and
   `ios/HEXMobileTests/ForkDropline*Tests.swift`: the Dropline private API provider.
+- `ios/HEXMobile/Fork/VocabularyLink.swift` and `ios/HEXMobileTests/Fork/VocabularyLinkTests.swift`: the
+  vocabulary link.
 
 ## Dropline private API
 
@@ -69,6 +73,30 @@ nothing inserted, as when a local engine hears none, and doesn't fall back.
   hasn't been measured on an iPhone. A local engine Hex hasn't already loaded loads only when Dropline
   fails. The keyboard's live words (Show what I say, Type as I speak) stay local; the final text is
   Dropline's.
+
+## Vocabulary link
+
+```text
+hex-dictation://vocabulary/add?term=<term>
+```
+
+- Adds the term to Hex's vocabulary list (`CustomVocabularySettings`, in the App Group
+  `KeyboardBridge.appGroup` that the app and the keyboard share): the list in Settings › Dictation ›
+  Custom vocabulary and Settings › Keyboard › Vocabulary. Dictation spells it while Custom vocabulary is
+  on, and the full keyboard never autocorrects it away.
+- Uses the list editor's checks: at most 64 characters, at least two letters or digits, no duplicate
+  spelling (case, spaces, and punctuation ignored), at most 100 terms.
+- Shows an alert over whatever is on screen: "Added to Vocabulary", "Already in the list", "Too long",
+  "Needs at least two letters or digits", "Up to 100 terms", or "No word in the link". The iPhone list has
+  no "sounds like" spellings, so `sounds_like` is ignored.
+- Query values are percent-decoded; `+` stays a plus (`term=C++`), so encode spaces as `%20`.
+
+Shortcuts app on the iPhone:
+
+1. New shortcut: **Ask for Input** (Text, prompt "Word"), then **URL Encode** (input: Provided Input).
+2. **Text**: `hex-dictation://vocabulary/add?term=` followed by **URL Encoded Text**.
+3. **Open URLs** with that Text.
+4. Run it from the Home Screen, the Action button, or Settings › Accessibility › Touch › Back Tap.
 
 ## Merging an App Store tag
 
