@@ -157,6 +157,7 @@ struct ContentView: View {
                 }
 
                 settingsCard
+                ForkDroplineSettingsCard()
                 ExperimentsCard()
                 practiceField
             }

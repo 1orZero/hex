@@ -1233,6 +1233,7 @@ fn handle_hotkey_action(
                 feedback::play_provisional_start();
             }
             worker.prepare_paste();
+            crate::fork::dropline::prepare();
             #[cfg(hex_capture)]
             crate::screenshots::narration::started();
             events.dictation(DictationPhase::Started, "")?;

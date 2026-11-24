@@ -70,6 +70,7 @@ mod speech_model;
 #[cfg(target_os = "macos")]
 pub(crate) mod story_link;
 mod vocabulary;
+mod fork_dropline;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -700,6 +701,7 @@ pub(crate) struct Ui {
     /// The person asked for an update check (the footer or the menu bar),
     /// so the footer says how it went.
     update_asked: bool,
+    fork_dropline: fork_dropline::Form,
 }
 
 /// Which of the window's text editors hold unsaved typing.
@@ -812,6 +814,7 @@ impl Ui {
             update_asked: false,
             window: None,
             tick_at: 0.0,
+            fork_dropline: Default::default(),
         }
     }
 

@@ -6,19 +6,70 @@
 
 ## Upstream files the fork changes
 
-None. Every fork change lives in files upstream does not have. When a fork change has to touch an
-upstream file, add a row here with the file, the hook (the function or line), and the purpose, so
-whoever resolves a release merge knows what to keep.
+Fork code lives in files upstream does not have; upstream files carry only the hooks below. When a
+fork change has to touch an upstream file, add a row here with the file, the hook (the function or
+line), and the purpose, so whoever resolves a release merge knows what to keep. Every hook today
+belongs to the Dropline private API provider (see "Dropline private API").
 
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
-| (none) | | |
+| `src/main.rs` | `mod fork;` (macOS) after `mod feedback;` | Compiles the fork module. |
+| `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/recognition.rs` | `fork::dropline::prepare()` after `worker.prepare_paste()` on capture start | Opens the Dropline session early (best effort). |
+| `src/macos_rune.rs` | `fork::dropline::deselect()` in `StatusItemAction::SelectModel` | Choosing a local model in the menu bar stops using Dropline. |
+| `src/rune_ui.rs` | `mod fork_dropline;`, `Ui.fork_dropline` field and its default | The picker section's form state. |
+| `src/rune_ui/picker.rs` | `fork_dropline::model_chosen()` at the top of `choose`; `content.children(fork_dropline::section(ui, p))` after the body in `modal` | Choosing a local model in the picker stops using Dropline; the picker's last section adds, uses, and deletes the provider. |
+| `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name)` in the Speech model button; `description.or_else(\|\| fork_dropline::status(ui, p))` after the description match | General names Dropline while it is in use and shows the last fallback. |
+| `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The iPhone dictation-finish point: Dropline first, the local engine on failure. |
+| `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: vocabularyTerms)` after `let vocabularyTerms = …` | Opens the Dropline session early (best effort). |
+| `ios/HEXMobile/ContentView.swift` | `standaloneView`: `ForkDroplineSettingsCard()` between `settingsCard` and `ExperimentsCard()` | Adds, selects, and deletes the provider. |
+
+The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
 
 ## Fork-only files
 
 - `FORK.md`: this file.
 - `fork/daily.sh`: the daily sync, build, and install pipeline. Its steps live in `fork/lib/sync.sh`,
   `fork/lib/mac.sh`, and `fork/lib/ios.sh`.
+- `src/fork.rs`, `src/fork/dropline.rs`, `src/fork/dropline/`, and `src/rune_ui/fork_dropline.rs`: the
+  Dropline private API provider in the Mac app.
+- `ios/HEXShared/Fork/`, `ios/HEXMobile/Fork/`, and `ios/HEXMobileTests/ForkDropline*Tests.swift`: the same
+  provider in the iPhone app.
+
+## Dropline private API
+
+A custom transcription provider, "Dropline 私人 API", in the Mac and iPhone apps. While it is selected, a
+finished dictation's recording is sent to Dropline's private API and its text replaces the local model's;
+the rest of the pipeline (corrections, modes, transformations, paste, History) is unchanged. When Dropline
+fails (network error, timeout, a second 401 after one token refetch, a bad answer), the dictation uses the
+local model's text of the same recording and says why.
+
+- The access token comes from a token endpoint (default `https://voice.veraze.io/v1/dropline-private/token`)
+  called with a bearer. Saving the provider fetches one token first and stores nothing if that fails.
+- Context: Hex's vocabulary terms go to Dropline as `context.text`.
+- Audio: long pauses shortened and edges trimmed per 20 ms block (Derek Voice's `keptPackets`), then
+  24 kbit/s Ogg Opus.
+
+### Mac
+
+- The local model still transcribes every clip while Dropline runs, so a fallback needs no second transcription.
+  General and the model picker show the last fallback.
+- The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data
+  folder); the endpoint and selection in `fork/dropline-private.json` in the data folder. Opus comes from
+  macOS's encoder.
+- Saving adds the provider; choosing it with 使用 selects it, and choosing a local model in the picker or
+  the menu bar stops using it.
+
+### iPhone
+
+- Keyboard dictation is recorded and transcribed by the app's `DictationController` (the keyboard only
+  sends start and stop through `KeyboardBridge`), so it takes the same path. The local engine
+  transcribes the same file only after Dropline fails (any failure other than cancellation).
+- Settings: endpoint, selection, and the last fallback in the App Group defaults; the bearer in the
+  Keychain (service `anomaly.hex.fork.dropline-private`, account `bearer`, access group
+  `KeyboardBridge.appGroup`, after first unlock). The daily pipeline's identity rewrite moves that group
+  with the app.
+- Saving the provider selects it.
 
 ## Daily pipeline
 

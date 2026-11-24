@@ -1,0 +1,116 @@
+import Foundation
+import os
+
+nonisolated enum ForkDroplineResult<Local: Sendable>: Sendable {
+    case dropline(ForkDroplineAnswer)
+    /// `fallback` is why Dropline wasn't used; nil when it isn't selected.
+    case local(Local, fallback: ForkDroplineFailure?)
+}
+
+/// The session `prepare` announced, reused by the dictation of that recording.
+actor ForkDroplineSessions {
+    static let shared = ForkDroplineSessions()
+    static let maxAge: TimeInterval = 200
+
+    private var prepared: (id: String, at: Date)?
+
+    func remember(_ id: String, at date: Date) {
+        prepared = (id, date)
+    }
+
+    func take(now: Date) -> String {
+        defer { prepared = nil }
+        if let prepared, now.timeIntervalSince(prepared.at) < Self.maxAge {
+            return prepared.id
+        }
+        return UUID().uuidString.lowercased()
+    }
+
+    func clear() {
+        prepared = nil
+    }
+}
+
+/// The Dropline private API as a transcription provider: when it is selected, a finished
+/// recording goes to Dropline, and any Dropline failure transcribes the same file with the
+/// local engine, recording why in the App Group.
+nonisolated struct ForkDroplineRecognition: Sendable {
+    var settings = ForkDroplineSettings()
+    var secrets: any ForkDroplineSecretStore = ForkDroplineKeychain()
+    var client = ForkDroplineClient()
+    var sessions: ForkDroplineSessions = .shared
+    var encode: @Sendable (URL) throws -> Data = { try ForkDroplineAudio.encodedRecording(at: $0) }
+
+    private static let log = Logger(subsystem: "anomaly.hex.mobile", category: "fork-dropline")
+
+    var credential: ForkDroplineCredential? {
+        guard let endpoint = settings.endpoint, let bearer = secrets.bearer() else { return nil }
+        return ForkDroplineCredential(endpoint: endpoint, bearer: bearer)
+    }
+
+    /// At the start of a recording; best effort and never waited for.
+    static func prepare(hints: [String]) {
+        Task.detached(priority: .utility) {
+            await ForkDroplineRecognition().prepare(hints: hints)
+        }
+    }
+
+    func prepare(hints: [String]) async {
+        guard settings.isEnabled, let credential else { return }
+        let session = UUID().uuidString.lowercased()
+        await sessions.remember(session, at: client.clock.now())
+        await client.prepare(credential, session: session, context: ForkDroplineClient.context(hints: hints))
+    }
+
+    /// Dropline when it is selected, else the local engine alone. Cancellation propagates;
+    /// every other Dropline failure falls back to `local` with the same recording.
+    @concurrent
+    func recognize<Local: Sendable>(
+        _ url: URL,
+        hints: [String],
+        local: @escaping @Sendable () async throws -> Local
+    ) async throws -> ForkDroplineResult<Local> {
+        guard settings.isEnabled, settings.endpoint != nil else {
+            return .local(try await local(), fallback: nil)
+        }
+        let started = client.clock.now()
+        do {
+            guard let credential else { throw ForkDroplineFailure.notConfigured }
+            let audio = try encode(url)
+            try Task.checkCancellation()
+            let session = await sessions.take(now: client.clock.now())
+            let answer = try await client.dictate(
+                credential,
+                audio: audio,
+                session: session,
+                context: ForkDroplineClient.context(hints: hints)
+            )
+            let elapsed = Int(client.clock.now().timeIntervalSince(started) * 1000)
+            Self.log.info("Dropline answered in \(elapsed) ms for \(audio.count) bytes of audio")
+            return .dropline(answer)
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            let failure = error as? ForkDroplineFailure ?? .network
+            settings.recordFallback(failure.reason, at: client.clock.now())
+            Self.log.error("Dropline failed (\(failure.reason, privacy: .public)); using the local engine")
+            return .local(try await local(), fallback: failure)
+        }
+    }
+
+    /// Saves the provider only after its endpoint hands out a token for this bearer.
+    func save(endpoint: URL, bearer: String) async throws {
+        let credential = ForkDroplineCredential(endpoint: endpoint, bearer: bearer)
+        let token = try await client.fetchToken(credential)
+        try secrets.saveBearer(bearer)
+        settings.endpoint = endpoint
+        settings.isEnabled = true
+        await client.tokens.store(token, for: credential)
+    }
+
+    func remove() async {
+        secrets.deleteBearer()
+        settings.clear()
+        await client.tokens.invalidate()
+        await sessions.clear()
+    }
+}

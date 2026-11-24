@@ -135,7 +135,7 @@ pub(super) fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>, query: &str) -> Opt
         p,
         "transcription-control",
         tr("Speech model"),
-        model.name,
+        super::fork_dropline::model_name(ui, model.name),
         &rune_theme_opencode::icons::CHEVRON_RIGHT,
         super::picker::open,
     );
@@ -189,6 +189,7 @@ pub(super) fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>, query: &str) -> Opt
         }
         None => (s::transcription_status(ui, p), picker_button),
     };
+    let description = description.or_else(|| super::fork_dropline::status(ui, p));
     let description_text = description.as_ref().map(|(text, _)| text.clone());
     rows.push_described(
         tr("Speech model"),
