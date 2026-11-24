@@ -226,7 +226,31 @@ nonisolated struct ForkDroplineClient: Sendable {
             throw ForkDroplineFailure.invalidResponse
         }
         let language = (body["transcript"] as? [String: Any])?["language"] as? String
-        return ForkDroplineAnswer(text: text, language: language)
+        return ForkDroplineAnswer(text: traditionalChinese(text), language: language)
+    }
+
+    private static func traditionalChinese(_ text: String) -> String {
+        let forms = #/[恐恫威惊驚]吓|吓(?:[了我你]?一跳|[唬坏壞傻哭跑退死醒怕]|人[。！？，、.!?\s]|人$)|(吓|了解|明了|斗笠|[烟煙]斗|启|钵|钩)/#
+        func convert(_ part: Substring) -> String {
+            let string = String(part)
+            guard !part.utf8.allSatisfy({ $0 < 128 }) else { return string }
+            return string.applyingTransform(StringTransform("[[:Han:]] Hans-Hant"), reverse: false) ?? string
+        }
+        var output = ""
+        var start = text.startIndex
+        for match in text.matches(of: forms) {
+            guard let form = match.1 else { continue }
+            output += convert(text[start..<form.startIndex])
+            switch form {
+            case "启": output += "啟"
+            case "钵": output += "缽"
+            case "钩": output += "鉤"
+            case "烟斗": output += "煙斗"
+            default: output += form
+            }
+            start = form.endIndex
+        }
+        return output + convert(text[start...])
     }
 
     /// Sends within `limit`: URLRequest's own timeout is an idle timeout, not a deadline.
