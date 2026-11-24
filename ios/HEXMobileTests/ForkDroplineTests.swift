@@ -113,6 +113,12 @@ final class ForkDroplineTests: XCTestCase {
             ("qa-佢哋喺度試吓，已經了解斗笠點用。", "qa-佢哋喺度試吓，已經了解斗笠點用。"),
             ("qa- e\u{301} / API_v2(42) 💻\r\n\t", "qa- e\u{301} / API_v2(42) 💻\r\n\t"),
             ("qa-吓了一跳，继续奋斗。", "qa-嚇了一跳，繼續奮鬥。"),
+            ("qa-别干擾周杰倫的软件开发。", "qa-別干擾周杰倫的軟件開發。"),
+            ("qa-他吓了我一跳，吓得发抖。", "qa-他嚇了我一跳，嚇得發抖。"),
+            ("qa-睇吓人哋點講。吓？我哋試吓先。", "qa-睇吓人哋點講。吓？我哋試吓先。"),
+            ("qa-周杰倫的風采，別干擾他。", "qa-周杰倫的風采，別干擾他。"),
+            ("qa-日本の国と学校、한국어、`读取_v2`：请开门。", "qa-日本の国と学校、한국어、`读取_v2`：請開門。"),
+            ("qa-启用铜钵和铁钩，保留原來的啓。", "qa-啟用銅缽和鐵鉤，保留原來的啓。"),
         ] {
             http.enqueue(FakeDroplineHTTP.json(200, ["final_text": input, "transcript": ["language": "en"]]))
             let answer = try await makeRecognition().answer(for: URL(fileURLWithPath: "/tmp/qa.wav"), hints: [])
