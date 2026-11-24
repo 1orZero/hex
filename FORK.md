@@ -104,8 +104,9 @@ Shortcuts app on the iPhone:
 ## The Mac's vocabulary on the iPhone
 
 One way, Mac to iPhone. Each night `fork/daily.sh` (on `stable`) reads the Mac's vocabulary in its
-order (`hex vocabulary list`) and copies the terms to the App Group as `fork-mac-vocabulary.json`
-(`{"terms": [...]}`) with `devicectl`. The copy holds names and email addresses, so it lives only in
+order (`hex vocabulary list`) and copies the terms to the App Group as
+`Library/fork-mac-vocabulary.json` (`{"terms": [...]}`) with `devicectl`, which can't write to the
+container's root (CoreDeviceError 7000). The copy holds names and email addresses, so it lives only in
 `~/.hex-fork/state/` on the Mac and in the App Group on the iPhone, never in a repository.
 
 `ForkMacVocabulary.apply()` folds a new copy into Hex's list (`CustomVocabularySettings`,
