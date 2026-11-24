@@ -297,8 +297,10 @@ One way, Mac to iPhone, each run after the installs:
    `~/.hex-fork/state/ios-vocabulary/next/fork-mac-vocabulary.json` as `{"terms": [...]}`. When Hex
    isn't running, the step is skipped (`skipped-hex-not-running`) and the next run copies.
 2. When the terms differ from the last copy (`~/.hex-fork/state/ios-vocabulary/fork-mac-vocabulary.json`),
-   the iPhone app was installed in this run, or `--force` is given, copy the file into the App Group
-   `group.io.veraze.hex.mobile` with `xcrun devicectl device copy to --domain-type appGroupDataContainer`.
+   the iPhone app was installed in this run, or `--force` is given, copy the file to
+   `Library/fork-mac-vocabulary.json` in the App Group `group.io.veraze.hex.mobile` with
+   `xcrun devicectl device copy to --domain-type appGroupDataContainer`. devicectl can't write to the
+   container's root (CoreDeviceError 7000), so the file goes under `Library/`.
    The iPhone app folds it into its list as `ios-stable`'s `FORK.md` describes, the next time the keyboard
    or Hex comes on screen, without Derek opening Hex.
 3. `--no-push` reads and compares only (`changed` or `up-to-date`).

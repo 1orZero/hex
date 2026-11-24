@@ -12,7 +12,7 @@ ios_app=
 ios_udid=
 ios_tag_glob='ios-beta-appstore-*'
 ios_vocabulary_dir=$state_dir/ios-vocabulary
-ios_vocabulary_file=fork-mac-vocabulary.json
+ios_vocabulary_file=Library/fork-mac-vocabulary.json
 
 git_ios() { git -C "$ios_src" "$@"; }
 
@@ -297,8 +297,8 @@ ios_install() {
 # copied into the App Group when they differ from the last copy or the app was just installed. The
 # file holds names and email addresses, so it stays owner-only in $ios_vocabulary_dir.
 ios_vocabulary() {
-  local hex=${HEX_FORK_HEX:-$mac_app/Contents/MacOS/hex} next=$ios_vocabulary_dir/next/$ios_vocabulary_file
-  local copied=$ios_vocabulary_dir/$ios_vocabulary_file copy_log=$log_dir/$run_id-ios-vocabulary.log count
+  local hex=${HEX_FORK_HEX:-$mac_app/Contents/MacOS/hex} next=$ios_vocabulary_dir/next/${ios_vocabulary_file##*/}
+  local copied=$ios_vocabulary_dir/${ios_vocabulary_file##*/} copy_log=$log_dir/$run_id-ios-vocabulary.log count
   ios_vocabulary_status=failed
   (umask 077 && mkdir -p "$ios_vocabulary_dir/next") || return 1
   if ! (umask 077 && "$hex" vocabulary list --json 2>>"$copy_log" | jq -e '{terms: [.entries[].term]}' >"$next" 2>>"$copy_log"); then
