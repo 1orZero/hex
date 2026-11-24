@@ -10,8 +10,9 @@ built. The fork's `dev` branch is kept as it was and is no longer used.
 
 Fork code lives in files upstream does not have; upstream files carry only the hooks below. When a
 fork change has to touch an upstream file, add a row here with the file, the hook (the function or
-line), and the purpose, so whoever resolves a release merge knows what to keep. Every hook today
-belongs to the Dropline private API provider (see "Dropline private API").
+line), and the purpose, so whoever resolves a release merge knows what to keep. The hooks belong to
+the Dropline private API provider (see "Dropline private API") and the iPhone vocabulary link (see
+"Vocabulary").
 
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
@@ -25,6 +26,8 @@ belongs to the Dropline private API provider (see "Dropline private API").
 | `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The iPhone dictation-finish point: Dropline first, the local engine on failure. |
 | `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: vocabularyTerms)` after `let vocabularyTerms = …` | Opens the Dropline session early (best effort). |
 | `ios/HEXMobile/ContentView.swift` | `standaloneView`: `ForkDroplineSettingsCard()` between `settingsCard` and `ExperimentsCard()` | Adds, selects, and deletes the provider. |
+| `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links; upstream's handler ignores hosts other than `keyboard`. |
+| `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyLinkAdded)` after the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link adds a term; otherwise the editor's next add or remove writes its stale list back and drops the linked term. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
 
@@ -37,6 +40,9 @@ The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the 
   Dropline private API provider in the Mac app.
 - `ios/HEXShared/Fork/`, `ios/HEXMobile/Fork/`, and `ios/HEXMobileTests/ForkDropline*Tests.swift`: the same
   provider in the iPhone app.
+- `ios/HEXMobile/Fork/VocabularyLink.swift` and `ios/HEXMobileTests/Fork/VocabularyLinkTests.swift`: the
+  iPhone vocabulary link.
+- `fork/vocabulary.py`: nightly vocabulary upkeep (see "Vocabulary").
 
 ## Dropline private API
 
@@ -78,6 +84,96 @@ This describes this branch's `ios/`, which is no longer built; the installed iPh
   `KeyboardBridge.appGroup`, after first unlock). The daily pipeline's identity rewrite moves that group
   with the app.
 - Saving the provider selects it.
+
+## Vocabulary
+
+### Add a word on the iPhone
+
+```text
+hex-dictation://vocabulary/add?term=<term>
+```
+
+- Adds the term to the custom vocabulary list (`CustomVocabularySettings`, in the App Group
+  `KeyboardBridge.appGroup` that the app and the keyboard share): the list under Experiments ›
+  Custom vocabulary, which dictation spells while that experiment is on.
+- Uses the list editor's checks: at most 64 characters, at least two letters or digits, no
+  duplicate spelling (case, spaces, and punctuation ignored), at most 100 terms.
+- Shows an alert over whatever is on screen: "Added to Vocabulary", "Already in the list",
+  "Too long", "Needs at least two letters or digits", "Up to 100 terms", or "No word in the
+  link". The iPhone list has no "sounds like" spellings, so `sounds_like` is ignored.
+- Query values are percent-decoded; `+` stays a plus (`term=C++`), so encode spaces as `%20`.
+
+Shortcuts app on the iPhone:
+
+1. New shortcut: **Ask for Input** (Text, prompt "Word"), then **URL Encode** (input: Provided Input).
+2. **Text**: `hex-dictation://vocabulary/add?term=` followed by **URL Encoded Text**.
+3. **Open URLs** with that Text.
+4. Run it from the Home Screen, the Action button, or Settings › Accessibility › Touch › Back Tap.
+
+### Add a word on the Mac
+
+The Mac needs no fork code: a Shortcuts quick action runs `hex vocabulary add`, which edits the
+vocabulary through the running Hex as Settings does (64 characters per term, 500 terms).
+
+1. In Shortcuts › Settings › Advanced, turn on **Allow Running Scripts**.
+2. Create a shortcut named "Add to Hex Vocabulary". In its details (ⓘ), turn on **Use as Quick
+   Action** with **Services Menu**, set it to receive **Text**, and set **If there's no input** to
+   **Ask For Text**, so the key also works with nothing selected.
+3. Add **Run Shell Script**: shell `zsh`, **Pass Input** as arguments, script:
+
+   ```sh
+   /Applications/Hex.app/Contents/MacOS/hex vocabulary add "$1" 2>&1 || true
+   ```
+
+4. Add **Show Notification** with the **Shell Script Result**. It shows `Added “X”`,
+   `“X” is already in the vocabulary`, or the reason the term was refused.
+5. In the shortcut's details choose **Add Keyboard Shortcut** (or System Settings › Keyboard ›
+   Keyboard Shortcuts… › Services › Text), then select a word anywhere and press it.
+
+Hex must be running; otherwise the notification says so.
+
+### Nightly vocabulary upkeep
+
+Transcription reads only the front of the vocabulary: Qwen3-ASR and QwenCleo the first terms that
+fit 1,000 characters (Whisper 500), Parakeet with Labs › Vocabulary biasing on the first 64 terms
+(`src/dictation/vocabulary.rs`). The rest still serves rewriting and search. The 22:00 automation
+runs `fork/vocabulary.py` from `~/.hex-fork/repo` after `fork/daily.sh` to keep the most used terms in front
+and to add new ones:
+
+```text
+fork/vocabulary.py init --import-log LOG          once: record which terms were imported
+fork/vocabulary.py dictations                     the dictations since the last apply, printed
+fork/vocabulary.py plan [--add FILE] [--exclude-app APP]   tonight's changes, printed
+fork/vocabulary.py apply [--add FILE] [--exclude-app APP]  back up, change, verify, record
+```
+
+The automation's agent reads the dictations, picks up to 5 names, products, technical terms, or
+misheard spellings that recur, and passes them as `--add` (`{"add": [{"term", "sounds_like"}]}`).
+`apply` then ranks the vocabulary:
+
+1. Pinned terms (`~/.hex-fork/state/vocab/pinned.json`, empty until Derek adds some).
+2. Uses in the last 30 days of History's final text (`hex history --since 30d`), most first, matched
+   in any case, as whole words for Latin terms and as substrings otherwise. Equal counts go terms the
+   script added in the last 30 days (up to 200 characters of the front), then Derek's own terms,
+   then imported terms and older script terms, each group in its current order.
+
+The front takes ranked terms while they fit (64 terms, or the characters left, passing over a term
+too long for what is left), so the model reads exactly the planned terms. `hex vocabulary add`
+appends, so `apply` moves the fewest terms to the end (`remove`, then `add` with the same
+spellings) that leave the planned front first; terms inside the front keep their order. It writes
+only when the front changes or a term is added or removed, copies `settings.json` to
+`~/.hex-fork/backup/vocab/` first, and afterwards checks that every term and spelling is unchanged
+and the front matches the plan; otherwise it stops and names the backup, keeps the terms it already
+added as its own, and leaves the analyzed window for the next night. A model that reads no
+vocabulary (or Parakeet with biasing off) gets no reordering.
+
+Terms Derek added or imported are never removed and get no new spellings. A term the script added is
+removed after 90 days without a use or a new spelling. `~/.hex-fork/state/vocab/` holds `own.json` (the script's terms with
+their added and last-seen dates, and the end of the last analyzed window), `pinned.json`,
+`imported.json`, and `last-plan.json`; no dictation text is stored.
+
+`HEX_FORK_HOME`, `HEX_FORK_HEX` (the `hex` binary), and `HEX_APPLICATION_SUPPORT_DIR` override the defaults,
+which is how the script is tried against Hex Test.
 
 ## Daily pipeline
 
