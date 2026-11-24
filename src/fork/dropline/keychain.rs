@@ -46,6 +46,7 @@ unsafe extern "C" {
     static kSecMatchLimitOne: CfRef;
     fn SecItemAdd(attributes: CfRef, result: *mut CfRef) -> i32;
     fn SecItemCopyMatching(query: CfRef, result: *mut CfRef) -> i32;
+    fn SecItemUpdate(query: CfRef, attributes: CfRef) -> i32;
     fn SecItemDelete(query: CfRef) -> i32;
 }
 
@@ -129,19 +130,20 @@ pub(super) fn read(account: &str) -> Result<Option<String>, String> {
         status => return Err(format!("SecItemCopyMatching {status}")),
     }
     // SAFETY: `data` is the CFData the query returned, alive while read.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            CFDataGetBytePtr(data.0),
-            CFDataGetLength(data.0).max(0) as usize,
-        )
-    };
+    let (pointer, length) = unsafe { (CFDataGetBytePtr(data.0), CFDataGetLength(data.0)) };
+    if pointer.is_null() || length <= 0 {
+        return Ok(None);
+    }
+    // SAFETY: `pointer` holds `length` bytes owned by `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
     String::from_utf8(bytes.to_vec())
         .map(Some)
         .map_err(|_| "鑰匙圈的 token 不是 UTF-8".into())
 }
 
+/// Replaces the item's secret in place, or adds the item when it is missing,
+/// so a failure never leaves the account without its old bearer.
 pub(super) fn write(account: &str, secret: &str) -> Result<(), String> {
-    delete(account)?;
     // SAFETY: `secret` is valid for its length during the call.
     let data =
         Owned(unsafe { CFDataCreate(std::ptr::null(), secret.as_ptr(), secret.len() as isize) });
@@ -149,11 +151,19 @@ pub(super) fn write(account: &str, secret: &str) -> Result<(), String> {
         return Err("無法建立鑰匙圈資料".into());
     }
     // SAFETY: immutable framework static.
-    let extra = [(unsafe { kSecValueData }, data.0)];
-    // SAFETY: `query` is a live dictionary; no result is asked for.
-    let status = with_query(account, &extra, |query| unsafe {
-        SecItemAdd(query, std::ptr::null_mut())
+    let value = [(unsafe { kSecValueData }, data.0)];
+    let changes = dictionary(&value);
+    // SAFETY: `query` and `changes` are live dictionaries.
+    let status = with_query(account, &[], |query| unsafe {
+        SecItemUpdate(query, changes.0)
     })?;
+    let status = match status {
+        // SAFETY: `query` is a live dictionary; no result is asked for.
+        NOT_FOUND => with_query(account, &value, |query| unsafe {
+            SecItemAdd(query, std::ptr::null_mut())
+        })?,
+        status => status,
+    };
     match status {
         0 => Ok(()),
         status => Err(format!("無法存進鑰匙圈（{status}）")),

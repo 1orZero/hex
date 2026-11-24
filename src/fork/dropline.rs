@@ -97,9 +97,13 @@ pub fn select(selected: bool) -> Result<(), String> {
     if provider.selected == selected {
         return Ok(());
     }
+    let saved = Provider {
+        selected,
+        ..provider.clone()
+    };
+    store::save(&saved).map_err(|error| format!("無法儲存設定：{error}"))?;
     provider.selected = selected;
-    let saved = provider.clone();
-    store::save(&saved).map_err(|error| format!("無法儲存設定：{error}"))
+    Ok(())
 }
 
 /// A local model was chosen: dictation stops using Dropline.
@@ -117,19 +121,30 @@ pub fn save(endpoint: &str, bearer: &str) -> Result<(), String> {
     let endpoint = endpoint.trim();
     let bearer = bearer.trim();
     match url::Url::parse(endpoint) {
-        Ok(url) if matches!(url.scheme(), "https" | "http") && url.host_str().is_some() => {}
-        _ => return Err("Token 端點不是有效的網址".into()),
+        Ok(url) if url.scheme() == "https" && url.host_str().is_some() => {}
+        _ => return Err("Token 端點不是有效的 https 網址".into()),
     }
     if bearer.is_empty() || bearer.chars().any(char::is_whitespace) {
         return Err("Bearer token 不能是空的或含空白".into());
     }
     let token = client::fetch_token(&client::Http, endpoint, bearer).map_err(|f| f.to_string())?;
-    keychain::write(&keychain_account(), bearer)?;
+    let account = keychain_account();
+    let previous = keychain::read(&account).ok().flatten();
+    keychain::write(&account, bearer)?;
     let provider = Provider {
         endpoint: endpoint.to_owned(),
         selected: state().provider.as_ref().is_some_and(|p| p.selected),
     };
-    store::save(&provider).map_err(|error| format!("無法儲存設定：{error}"))?;
+    if let Err(error) = store::save(&provider) {
+        let restored = match &previous {
+            Some(previous) => keychain::write(&account, previous),
+            None => keychain::delete(&account),
+        };
+        if let Err(restore) = restored {
+            tracing::warn!(%restore, "could not restore the Dropline bearer");
+        }
+        return Err(format!("無法儲存設定：{error}"));
+    }
     let mut state = state();
     state.provider = Some(provider);
     state.bearer = Some(bearer.to_owned());
@@ -141,15 +156,16 @@ pub fn save(endpoint: &str, bearer: &str) -> Result<(), String> {
 
 /// Removes the provider, its bearer, and the cached access token.
 pub fn delete() -> Result<(), String> {
-    keychain::delete(&keychain_account())?;
     store::remove().map_err(|error| format!("無法刪除設定：{error}"))?;
-    let mut state = state();
-    state.provider = None;
-    state.bearer = None;
-    state.tokens = client::TokenCache::new();
-    state.prepared = None;
-    state.fallback = None;
-    Ok(())
+    {
+        let mut state = state();
+        state.provider = None;
+        state.bearer = None;
+        state.tokens = client::TokenCache::new();
+        state.prepared = None;
+        state.fallback = None;
+    }
+    keychain::delete(&keychain_account())
 }
 
 /// A capture started: tells Dropline its session early (best effort), so
@@ -205,6 +221,8 @@ pub fn job(samples: &[f32]) -> Option<Job> {
 }
 
 /// Dropline's text for `job`, else the local model's for the same clip.
+/// When Dropline answers, the local transcript is still waited for off this
+/// thread, so its deadlines keep a wedged engine from holding later jobs.
 pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, String> {
     let Some(job) = job else {
         return local.wait();
@@ -221,6 +239,14 @@ pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, S
                 "transcribed dictation with Dropline"
             );
             state().fallback = None;
+            let watched = std::thread::Builder::new()
+                .name("hex-dropline-local".into())
+                .spawn(move || {
+                    let _ = local.wait();
+                });
+            if let Err(error) = watched {
+                tracing::warn!(%error, "could not watch the local transcript");
+            }
             Ok(Transcribed {
                 text,
                 source: Source::Offline,

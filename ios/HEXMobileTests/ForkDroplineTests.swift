@@ -271,10 +271,14 @@ final class ForkDroplineTests: XCTestCase {
                 return "qa-local"
             }
         }
-        while http.requests.isEmpty {
+        for _ in 0..<500 where http.requests.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
         task.cancel()
+        guard !http.requests.isEmpty else {
+            _ = await task.result
+            return XCTFail("expected a Dropline request")
+        }
 
         do {
             _ = try await task.value

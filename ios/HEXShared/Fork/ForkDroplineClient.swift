@@ -159,8 +159,8 @@ nonisolated struct ForkDroplineClient: Sendable {
         _ = try? await send(request, within: Self.prepareTimeout, timeout: .timeout, network: .network)
     }
 
-    /// One dictation. A 401 drops the cached token and retries once with a fresh one when at
-    /// least `retryMinimum` of the wait is left; nothing else is retried.
+    /// One dictation. A 401 drops the cached token and retries once with a fresh one when a
+    /// token fetch plus `retryMinimum` still fit in the wait; nothing else is retried.
     func dictate(
         _ credential: ForkDroplineCredential,
         audio: Data,
@@ -187,6 +187,8 @@ nonisolated struct ForkDroplineClient: Sendable {
             }
             guard response.statusCode == 401 else { throw ForkDroplineFailure.http(status: response.statusCode) }
             guard attempt == 0 else { break }
+            let remaining = Self.dictateTimeout - .seconds(clock.now().timeIntervalSince(started))
+            guard remaining >= Self.tokenTimeout + Self.retryMinimum else { break }
             await tokens.invalidate()
             token = try await accessToken(credential)
         }

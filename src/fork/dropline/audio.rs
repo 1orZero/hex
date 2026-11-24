@@ -88,9 +88,9 @@ fn kept_blocks(levels: &[u8]) -> Vec<bool> {
 
     let mut keep = vec![false; blocks];
     let mut mark = |from: isize, to: usize| {
-        for index in from.max(0) as usize..to.min(blocks) {
-            keep[index] = true;
-        }
+        let to = to.min(blocks);
+        let from = (from.max(0) as usize).min(to);
+        keep[from..to].fill(true);
     };
     let edge = EDGE_MS.div_ceil(BLOCK_MS);
     let half = (KEPT_PAUSE_MS as f64 / BLOCK_MS as f64 / 2.0).round() as usize;

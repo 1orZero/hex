@@ -42,18 +42,21 @@ A custom transcription provider, "Dropline 私人 API", in the Mac and iPhone ap
 finished dictation's recording is sent to Dropline's private API and its text replaces the local model's;
 the rest of the pipeline (corrections, modes, transformations, paste, History) is unchanged. When Dropline
 fails (network error, timeout, a second 401 after one token refetch, a bad answer), the dictation uses the
-local model's text of the same recording and says why.
+local model's text of the same recording and says why. An empty `final_text` is a valid answer: Dropline
+heard no speech, so the dictation inserts nothing and does not fall back.
 
 - The access token comes from a token endpoint (default `https://voice.veraze.io/v1/dropline-private/token`)
-  called with a bearer. Saving the provider fetches one token first and stores nothing if that fails.
+  called with a bearer. The endpoint must be https. Saving the provider fetches one token first and stores
+  nothing if that fails.
 - Context: Hex's vocabulary terms go to Dropline as `context.text`.
 - Audio: long pauses shortened and edges trimmed per 20 ms block (Derek Voice's `keptPackets`), then
   24 kbit/s Ogg Opus.
 
 ### Mac
 
-- The local model still transcribes every clip while Dropline runs, so a fallback needs no second transcription.
-  General and the model picker show the last fallback.
+- The local model still transcribes every clip while Dropline runs, so a fallback needs no second
+  transcription. When Dropline answers, the local transcript still finishes in the background under its own
+  deadlines. General and the model picker show the last fallback.
 - The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data
   folder); the endpoint and selection in `fork/dropline-private.json` in the data folder. Opus comes from
   macOS's encoder.

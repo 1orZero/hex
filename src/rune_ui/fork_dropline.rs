@@ -242,13 +242,14 @@ mod macos {
                 .gap(8.0)
                 .center_y()
                 .child(row().grow(1.0))
-                .child(button(
-                    p,
-                    "fork-dropline-cancel",
-                    "取消",
-                    ButtonKind::Secondary,
-                    |ui: &mut Ui, _| ui.fork_dropline = Form::default(),
-                ))
+                .child(
+                    Button::new("取消")
+                        .variant(ButtonVariant::Neutral)
+                        .disabled(saving)
+                        .on_press_tx(|ui: &mut Ui, _| ui.fork_dropline = Form::default())
+                        .build_push(p.k)
+                        .key("fork-dropline-cancel"),
+                )
                 .child(save_button),
         )
     }

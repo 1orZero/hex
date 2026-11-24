@@ -10,7 +10,8 @@ use serde_json::json;
 const DROPLINE: &str = "https://api.dropline.fish.audio";
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(3);
-/// A 401's one retry runs only when this much of the wait is left.
+/// A 401's one retry runs only when a token refetch plus this much more still
+/// fits in the wait.
 const RETRY_MINIMUM: Duration = Duration::from_secs(3);
 /// Tokens are used until this long before they expire.
 const TOKEN_MARGIN_MS: u64 = 5 * 60 * 1000;
@@ -266,10 +267,12 @@ pub(super) fn dictate(
         match response.status {
             200..=299 => return final_text(&response.body),
             401 if attempt == 0 => {
-                access = token(true)?;
-                if deadline.saturating_duration_since(Instant::now()) < RETRY_MINIMUM {
+                if deadline.saturating_duration_since(Instant::now())
+                    < TOKEN_TIMEOUT + RETRY_MINIMUM
+                {
                     return Err(Failure::Unauthorized);
                 }
+                access = token(true)?;
             }
             401 => return Err(Failure::Unauthorized),
             status => return Err(Failure::Http(status)),

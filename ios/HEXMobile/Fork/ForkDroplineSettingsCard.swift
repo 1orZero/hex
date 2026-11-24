@@ -38,6 +38,11 @@ struct ForkDroplineSettingsCard: View {
             in: RoundedRectangle(cornerRadius: HexTheme.cardRadius, style: .continuous)
         )
         .onAppear(perform: reload)
+        .task {
+            for await _ in NotificationCenter.default.notifications(named: UserDefaults.didChangeNotification) {
+                reload()
+            }
+        }
     }
 
     @ViewBuilder
@@ -183,8 +188,8 @@ struct ForkDroplineSettingsCard: View {
     private func save() {
         let bearer = bearerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let endpoint = URL(string: endpointText.trimmingCharacters(in: .whitespacesAndNewlines)),
-              ["https", "http"].contains(endpoint.scheme?.lowercased() ?? ""), endpoint.host() != nil else {
-            error = "網址格式不正確"
+              endpoint.scheme?.lowercased() == "https", endpoint.host() != nil else {
+            error = "Token 端點不是有效的 https 網址"
             return
         }
         isSaving = true
