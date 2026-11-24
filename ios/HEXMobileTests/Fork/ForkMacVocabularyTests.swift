@@ -28,7 +28,8 @@ final class ForkMacVocabularyTests: XCTestCase {
     /// Writes the Mac's copy as fork/daily.sh does and applies it.
     @discardableResult
     private func copy(_ terms: [String]) throws -> Bool {
-        let url = folder.appendingPathComponent(ForkMacVocabulary.fileName)
+        let url = folder.appendingPathComponent(ForkMacVocabulary.relativePath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["terms": terms]).write(to: url)
         return ForkMacVocabulary.apply(from: url, defaults: defaults)
     }
@@ -38,6 +39,11 @@ final class ForkMacVocabularyTests: XCTestCase {
         XCTAssertTrue(try copy(["qa-mac-gamma", "qa-mac-alpha", "qa-mac-beta"]))
         XCTAssertEqual(list, ["qa-phone-one", "qa-phone-two", "qa-mac-gamma", "qa-mac-alpha", "qa-mac-beta"])
         XCTAssertEqual(defaults.stringArray(forKey: ForkMacVocabulary.syncedKey), ["qa-mac-gamma", "qa-mac-alpha", "qa-mac-beta"])
+    }
+
+    func testCopyURLMatchesTheNightlyDestination() throws {
+        let group = try XCTUnwrap(FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: KeyboardBridge.appGroup))
+        XCTAssertEqual(ForkMacVocabulary.copyURL, group.appendingPathComponent("Library/fork-mac-vocabulary.json"))
     }
 
     func testALaterCopyRemovesWhatTheMacDroppedAndKeepsTheIPhonesOwn() throws {

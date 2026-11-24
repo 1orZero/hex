@@ -2,8 +2,8 @@ import Foundation
 
 /// Hex fork (see FORK.md): the Mac's vocabulary on this iPhone, one way. Each night
 /// `fork/daily.sh` copies the Mac's terms, in the Mac's order, into the App Group as
-/// `fork-mac-vocabulary.json` (`{"terms": [...]}`), and the app and the keyboard fold a new
-/// copy into Hex's list (`CustomVocabularySettings`) the next time they come on screen.
+/// `Library/fork-mac-vocabulary.json` (`{"terms": [...]}`), and the app and the keyboard fold a
+/// new copy into Hex's list (`CustomVocabularySettings`) the next time they come on screen.
 ///
 /// The list keeps the iPhone's own terms first, then the Mac's in its order while the list holds
 /// `listLimit` terms, which leaves room under the 100-term cap for terms added here before the
@@ -12,7 +12,7 @@ import Foundation
 /// first. The terms that came from the Mac are recorded, so a later copy removes the ones the Mac
 /// no longer lists and never removes the iPhone's own.
 nonisolated enum ForkMacVocabulary {
-    static let fileName = "fork-mac-vocabulary.json"
+    static let relativePath = "Library/fork-mac-vocabulary.json"
     static let listLimit = 90
     static let syncedKey = "fork.macVocabulary.synced"
     static let appliedKey = "fork.macVocabulary.applied"
@@ -24,7 +24,7 @@ nonisolated enum ForkMacVocabulary {
     static var copyURL: URL? {
         FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: KeyboardBridge.appGroup)?
-            .appendingPathComponent(fileName)
+            .appendingPathComponent(relativePath)
     }
 
     /// Folds in the Mac's copy, once per copy. True when Hex's list changed.
