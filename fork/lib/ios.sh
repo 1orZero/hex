@@ -2,13 +2,17 @@
 # iPhone step of fork/daily.sh: merge upstream's newest App Store tag into the
 # fork's iOS branch, build ios/ under the fork's identity in a staging worktree,
 # so the repo itself is never rewritten, and install it on the iPhone over the
-# network. Sets ios_candidate, ios_release, ios_sync_status, ios_merged_tag,
-# ios_upstream_commits, and ios_pushed.
+# network, then copy the Mac's vocabulary into its App Group. Sets ios_candidate,
+# ios_release, ios_sync_status, ios_merged_tag, ios_upstream_commits, ios_pushed, and
+# ios_vocabulary_status.
 
 ios_src=$home/ios-src
 ios_derived=$home/ios-derived
 ios_app=
+ios_udid=
 ios_tag_glob='ios-beta-appstore-*'
+ios_vocabulary_dir=$state_dir/ios-vocabulary
+ios_vocabulary_file=fork-mac-vocabulary.json
 
 git_ios() { git -C "$ios_src" "$@"; }
 
@@ -257,23 +261,29 @@ ios_verify() {
   log "Built $name $version ($id, team $team_id)"
 }
 
-ios_install() {
-  local devices udid install_log=$log_dir/$run_id-ios-install.log
-  ios_status=install-failed
+# Sets ios_udid to the paired $iphone's when it answers (its output goes to $1); 1 when it doesn't.
+ios_device() {
+  local devices
   devices=$(mktemp)
   xcrun devicectl list devices --json-output "$devices" >/dev/null 2>&1
-  udid=$(jq -r --arg name "$iphone" '.result.devices[]?
+  ios_udid=$(jq -r --arg name "$iphone" '.result.devices[]?
     | select(.deviceProperties.name == $name and .hardwareProperties.reality == "physical")
     | select(.connectionProperties.pairingState == "paired" and (.connectionProperties.transportType // "") != "")
     | .hardwareProperties.udid' "$devices" 2>/dev/null | head -n 1)
   rm -f "$devices"
-  if [ -z "$udid" ] || ! xcrun devicectl device info details --device "$udid" --timeout 90 >>"$install_log" 2>&1; then
+  [ -n "$ios_udid" ] && xcrun devicectl device info details --device "$ios_udid" --timeout 90 >>"$1" 2>&1
+}
+
+ios_install() {
+  local install_log=$log_dir/$run_id-ios-install.log
+  ios_status=install-failed
+  if ! ios_device "$install_log"; then
     log "$iphone is not reachable (another network, asleep, or unpaired); skipping the iPhone install"
     ios_status=skipped-unreachable
     return "$EXIT_IOS_SKIPPED"
   fi
   log "Installing on $iphone; output in $install_log"
-  if ! xcrun devicectl device install app --device "$udid" --timeout 600 "$ios_app" >>"$install_log" 2>&1; then
+  if ! xcrun devicectl device install app --device "$ios_udid" --timeout 600 "$ios_app" >>"$install_log" 2>&1; then
     log "ERROR devicectl install failed; last lines:"
     tail -n 20 "$install_log" | sed 's/^/  /'
     return "$EXIT_IOS_INSTALL"
@@ -281,4 +291,50 @@ ios_install() {
   write_state ios "$ios_candidate"
   ios_status=installed
   log "Installed $ios_prefix on $iphone at $(short "$ios_candidate")"
+}
+
+# The Mac's vocabulary for the iPhone (ForkMacVocabulary on ios-stable): its terms in its order,
+# copied into the App Group when they differ from the last copy or the app was just installed. The
+# file holds names and email addresses, so it stays owner-only in $ios_vocabulary_dir.
+ios_vocabulary() {
+  local hex=${HEX_FORK_HEX:-$mac_app/Contents/MacOS/hex} next=$ios_vocabulary_dir/next/$ios_vocabulary_file
+  local copied=$ios_vocabulary_dir/$ios_vocabulary_file copy_log=$log_dir/$run_id-ios-vocabulary.log count
+  ios_vocabulary_status=failed
+  (umask 077 && mkdir -p "$ios_vocabulary_dir/next") || return 1
+  if ! (umask 077 && "$hex" vocabulary list --json 2>>"$copy_log" | jq -e '{terms: [.entries[].term]}' >"$next" 2>>"$copy_log"); then
+    rm -f "$next"
+    if ! mac_running; then
+      ios_vocabulary_status=skipped-hex-not-running
+      log "Hex isn't running on the Mac, so its vocabulary can't be read; the next run copies it"
+      return 0
+    fi
+    log "ERROR reading the Mac's vocabulary failed; see $copy_log"
+    return 1
+  fi
+  count=$(jq '.terms | length' "$next")
+  if [ "$force" != 1 ] && [ "$ios_status" != installed ] && cmp -s "$next" "$copied"; then
+    ios_vocabulary_status=up-to-date
+    log "The iPhone already has the Mac's $count vocabulary terms"
+    return 0
+  fi
+  if [ "$no_push" = 1 ]; then
+    ios_vocabulary_status=changed
+    log "--no-push: not copying the Mac's $count vocabulary terms to $iphone"
+    return 0
+  fi
+  if [ "$ios_status" = skipped-unreachable ] || ! ios_device "$copy_log"; then
+    ios_vocabulary_status=skipped-unreachable
+    log "$iphone is not reachable; the next run copies the Mac's vocabulary"
+    return "$EXIT_IOS_SKIPPED"
+  fi
+  if ! xcrun devicectl device copy to --device "$ios_udid" --domain-type appGroupDataContainer \
+    --domain-identifier "group.$ios_prefix" --source "$next" --destination "$ios_vocabulary_file" \
+    --timeout 120 >>"$copy_log" 2>&1; then
+    log "ERROR copying the vocabulary to $iphone failed; last lines:"
+    tail -n 20 "$copy_log" | sed 's/^/  /'
+    return 1
+  fi
+  mv "$next" "$copied"
+  ios_vocabulary_status=copied
+  log "Copied the Mac's $count vocabulary terms to $iphone"
 }

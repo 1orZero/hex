@@ -4,8 +4,9 @@
 # newest release tag into the fork's stable branch and upstream's newest App
 # Store tag into its ios-stable branch, then builds and installs the Mac app
 # from stable and the iPhone app from ios-stable when each differs from the
-# commit it last installed. FORK.md lists the options, exit codes, and what to
-# do on a merge conflict.
+# commit it last installed, and copies the Mac's vocabulary to the iPhone when it
+# changed. FORK.md lists the options, exit codes, and what to do on a merge
+# conflict.
 set -uo pipefail
 
 fork_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -24,6 +25,7 @@ EXIT_MAC_BUSY=40
 EXIT_MAC_IDENTITY=41
 EXIT_MAC_INSTALL=42
 EXIT_IOS_INSTALL=43
+EXIT_IOS_VOCABULARY=44
 
 home=${HEX_FORK_HOME:-$HOME/.hex-fork}
 repo=$home/repo
@@ -72,6 +74,7 @@ ios_merged_tag=
 ios_upstream_commits=0
 ios_pushed=false
 ios_status=not-run
+ios_vocabulary_status=not-run
 
 usage() {
   cat <<'EOF'
@@ -140,12 +143,13 @@ finish() {
     --arg ios_branch "$ios_branch" --arg ios_candidate "$ios_candidate" --arg ios_release "$ios_release" \
     --arg ios_sync "$ios_sync_status" --arg ios_merged_tag "$ios_merged_tag" \
     --argjson ios_commits "$ios_upstream_commits" --argjson ios_pushed "$ios_pushed" \
-    --arg ios "$ios_status" --arg ios_installed "$(read_state ios)" --arg log "$log_file" \
+    --arg ios "$ios_status" --arg ios_installed "$(read_state ios)" --arg ios_vocabulary "$ios_vocabulary_status" --arg log "$log_file" \
     '{started: $started, finished: $finished, exit: $exit, branch: $branch, candidate: $candidate, release: $release,
       sync: {status: $sync, merged_tag: $merged_tag, upstream_commits: $commits, pushed: $pushed},
       mac: {status: $mac, installed: $mac_installed},
       ios_sync: {branch: $ios_branch, status: $ios_sync, merged_tag: $ios_merged_tag, upstream_commits: $ios_commits, pushed: $ios_pushed},
-      ios: {status: $ios, candidate: $ios_candidate, release: $ios_release, installed: $ios_installed}, log: $log}' >"$state_dir/last-run.json"
+      ios: {status: $ios, candidate: $ios_candidate, release: $ios_release, installed: $ios_installed},
+      ios_vocabulary: {status: $ios_vocabulary}, log: $log}' >"$state_dir/last-run.json"
   step "Summary"
   log "sync: $sync_status, merged tag: ${merged_tag:-none} ($upstream_commits upstream commits), pushed: $pushed"
   log "candidate: ${candidate:-none} (release ${release_tag:-unknown})"
@@ -153,6 +157,7 @@ finish() {
   log "ios candidate: ${ios_candidate:-none} (${ios_release:-unknown})"
   log "mac: $mac_status (installed: $(read_state mac))"
   log "ios: $ios_status (installed: $(read_state ios))"
+  log "ios vocabulary: $ios_vocabulary_status"
   log "exit: $code"
   return "$code"
 }
@@ -245,29 +250,37 @@ main() {
   fi
   if [ "$no_push" = 1 ]; then
     log "--no-push: skipping pushes and installs"
-    finish "$(first_failure "$stable_rc" "$ios_sync_rc" "$mac_rc" "$ios_rc")"
-    return
-  fi
-  if [ "$merged" = 1 ] && [ "$stable_rc" -eq 0 ]; then
-    step "Push"
-    sync_push || stable_rc=$EXIT_PUSH
-  fi
-  if [ "$ios_merged" = 1 ] && [ "$ios_sync_rc" -eq 0 ]; then
-    step "iOS push"
-    ios_push || ios_sync_rc=$EXIT_IOS_PUSH
+  else
+    if [ "$merged" = 1 ] && [ "$stable_rc" -eq 0 ]; then
+      step "Push"
+      sync_push || stable_rc=$EXIT_PUSH
+    fi
+    if [ "$ios_merged" = 1 ] && [ "$ios_sync_rc" -eq 0 ]; then
+      step "iOS push"
+      ios_push || ios_sync_rc=$EXIT_IOS_PUSH
+    fi
+
+    if [ "$mac_needed" = 1 ] && [ "$mac_rc" -eq 0 ] && [ "$stable_rc" -eq 0 ]; then
+      step "Mac install"
+      mac_install
+      mac_rc=$?
+    fi
+    if [ "$ios_needed" = 1 ] && [ "$ios_rc" -eq 0 ] && [ "$ios_sync_rc" -eq 0 ]; then
+      step "iOS install"
+      ios_install
+      ios_rc=$?
+    fi
   fi
 
-  if [ "$mac_needed" = 1 ] && [ "$mac_rc" -eq 0 ] && [ "$stable_rc" -eq 0 ]; then
-    step "Mac install"
-    mac_install
-    mac_rc=$?
-  fi
-  if [ "$ios_needed" = 1 ] && [ "$ios_rc" -eq 0 ] && [ "$ios_sync_rc" -eq 0 ]; then
-    step "iOS install"
-    ios_install
-    ios_rc=$?
-  fi
-  finish "$(first_failure "$stable_rc" "$ios_sync_rc" "$mac_rc" "$ios_rc")"
+  local vocabulary_rc=0
+  step "iPhone vocabulary"
+  ios_vocabulary
+  case $? in
+    0) ;;
+    "$EXIT_IOS_SKIPPED") vocabulary_rc=$EXIT_IOS_SKIPPED ;;
+    *) vocabulary_rc=$EXIT_IOS_VOCABULARY ;;
+  esac
+  finish "$(first_failure "$stable_rc" "$ios_sync_rc" "$mac_rc" "$ios_rc" "$vocabulary_rc")"
 }
 
 main "$@"; exit $?
