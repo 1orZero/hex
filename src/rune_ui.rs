@@ -41,6 +41,7 @@ pub(crate) use self::meetings::meeting_import_failed;
 mod captures;
 mod meetings_host;
 pub(crate) use meetings_host::{meeting_corner_moved, meeting_failed, meeting_provider_chosen};
+mod fork_dropline;
 mod model_details;
 mod model_import;
 mod models;
@@ -70,7 +71,6 @@ mod speech_model;
 #[cfg(target_os = "macos")]
 pub(crate) mod story_link;
 mod vocabulary;
-mod fork_dropline;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
