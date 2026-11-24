@@ -137,8 +137,9 @@ Hex must be running; otherwise the notification says so.
 Transcription reads only the front of the vocabulary: Qwen3-ASR and QwenCleo the first terms that
 fit 1,000 characters (Whisper 500), Parakeet with Labs › Vocabulary biasing on the first 64 terms
 (`src/dictation/vocabulary.rs`). The rest still serves rewriting and search. The 22:00 automation
-runs `fork/vocabulary.py` from `~/.hex-fork/repo` after `fork/daily.sh` to keep the most used terms in front
-and to add new ones:
+runs `fork/vocabulary.py` from `~/.hex-fork/repo` before `fork/daily.sh` to keep the most used terms in front
+and to add new ones; `fork/daily.sh` then copies the result to the iPhone (see "The Mac's vocabulary on
+the iPhone"):
 
 ```text
 fork/vocabulary.py init --import-log LOG          once: record which terms were imported
