@@ -213,7 +213,8 @@ does what Derek's `hex-screen-ocr` LaunchAgent did from another process through
   nothing is read and no other window is captured. Vision reads it with `.accurate`, `en-US`, and no
   language correction. Lines whose centers are closer than half a line's height form one row.
 - Before every read Hex checks Screen Recording with `CGPreflightScreenCaptureAccess`. It never asks:
-  without the permission nothing is listed or captured, and dictation works as before.
+  without the permission nothing is listed or captured, and dictation works as before. macOS keeps a
+  process's first answer, so Hex starts reading only after it is reopened once Screen Recording is allowed.
 - The read belongs to the snapshot its capture finished with, so two overlapping dictations each get
   their own. A transformation chain waits up to 500 ms for it, as `screen.ts` did. A late, failed, or
   unpermitted read leaves `screenLines` out, and a late one is stopped. At most 400 lines and 32 KiB pass.
