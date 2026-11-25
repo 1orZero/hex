@@ -924,6 +924,8 @@ impl SealedReplay {
 
         let engine_cfg = hex_engine_config();
         let transcriber = ChosenTranscriber;
+        #[cfg(target_os = "macos")]
+        let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));
         let (dir, bundle, summary) = scrawl_capture::pipeline::finalize_capture_bundle_for_config(
             &self.bundle,
             target,

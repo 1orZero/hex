@@ -11,9 +11,6 @@ mod other {
     use super::super::Ui;
     use super::super::controls::Paint;
 
-    #[derive(Default)]
-    pub(in crate::rune_ui) struct Form;
-
     pub(in crate::rune_ui) fn section(_ui: &Ui, _p: Paint) -> Option<El> {
         None
     }
@@ -30,7 +27,7 @@ mod other {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) use other::{Form, model_chosen, model_name, section, status};
+pub(super) use other::{model_chosen, model_name, section, status};
 
 #[cfg(target_os = "macos")]
 pub(super) use macos::{Form, model_chosen, model_name, section, status};

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::transcription::engine::{PendingTranscript, Source, Transcribed};
 
 pub use store::DEFAULT_ENDPOINT;
+pub(crate) use text::traditional;
 
 /// The provider's name, as the picker and General show it.
 pub const NAME: &str = "Dropline 私人 API";

@@ -232,6 +232,8 @@ impl TrackTranscript {
     }
 
     fn accept(&mut self, chunk: &Chunk, transcript: Transcript) {
+        #[cfg(target_os = "macos")]
+        let transcript = crate::fork::traditional::transcript(transcript);
         let chunk_ms = self.origin_ms + samples_ms(chunk.start);
         let duration_ms = samples_ms(chunk.samples.len());
         let next_seam = chunk_ms + duration_ms - samples_ms(chunk.tail) / 2;

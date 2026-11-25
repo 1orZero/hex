@@ -1487,3 +1487,6 @@ mod echo_replay_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod live_replay_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod fork_tests;
