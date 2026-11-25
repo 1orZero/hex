@@ -415,6 +415,8 @@ fn scrawl_engine(
     events: SyncSender<Event>,
     transcriber: Arc<dyn Transcriber>,
 ) -> scrawl_capture::capture::Engine {
+    #[cfg(target_os = "macos")]
+    let transcriber = crate::fork::annotate::traditional(transcriber);
     scrawl_capture::capture::Engine::new(Arc::new(HexHost { events }), Arc::new(HexConfig))
         .with_resources(SharedResources::none())
         .with_transcriber(transcriber)

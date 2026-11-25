@@ -1,4 +1,4 @@
-pub(super) fn traditional(text: &str) -> String {
+pub(crate) fn traditional(text: &str) -> String {
     use objc2_foundation::{NSString, ns_string};
     use regex::{Captures, Regex};
     use std::sync::LazyLock;

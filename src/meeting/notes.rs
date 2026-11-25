@@ -334,6 +334,8 @@ pub(super) fn summarize_with_calendar(
 }
 
 pub(super) fn clean_title(title: &str) -> String {
+    #[cfg(target_os = "macos")]
+    let title = &crate::fork::traditional::text(title);
     let words = title
         .trim()
         .trim_matches(['"', '\'', '“', '”', '#', '*'])
@@ -346,6 +348,8 @@ pub(super) fn clean_title(title: &str) -> String {
 
 /// One paragraph of at most two sentences and `MAX_SUMMARY_CHARS`.
 fn clean_summary(summary: &str) -> String {
+    #[cfg(target_os = "macos")]
+    let summary = &crate::fork::traditional::text(summary);
     let text = summary
         .split_whitespace()
         .map(|word| word.trim_start_matches(['-', '*', '•']))
@@ -376,7 +380,7 @@ fn clean_summary(summary: &str) -> String {
     }
     let cut = text[..text.floor_char_boundary(MAX_SUMMARY_CHARS)]
         .rfind(' ')
-        .unwrap_or(MAX_SUMMARY_CHARS);
+        .unwrap_or_else(|| text.floor_char_boundary(MAX_SUMMARY_CHARS));
     format!("{}…", text[..cut].trim_end_matches([',', ';', ':']))
 }
 

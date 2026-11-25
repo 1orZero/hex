@@ -935,6 +935,8 @@ fn clean_topic(topic: &str) -> String {
 }
 
 fn clean_summary(summary: &str) -> String {
+    #[cfg(target_os = "macos")]
+    let summary = &crate::fork::traditional::text(summary);
     let text = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_words(text.trim_matches(['"', '“', '”']), MAX_SUMMARY_CHARS)
 }
