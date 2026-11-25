@@ -11,8 +11,11 @@ built. The fork's `dev` branch is kept as it was and is no longer used.
 Fork code lives in files upstream does not have; upstream files carry only the hooks below. When a
 fork change has to touch an upstream file, add a row here with the file, the hook (the function or
 line), and the purpose, so whoever resolves a release merge knows what to keep. The hooks belong to
-the Dropline private API provider (see "Dropline private API") and the iPhone vocabulary link (see
-"Vocabulary"). The `crates/capture/build.rs` row is an upstream fix carried before its release, not a hook.
+the Dropline private API provider (see "Dropline private API"), the iPhone vocabulary link (see
+"Vocabulary"), and Traditional Chinese in Annotate and meetings (see "Traditional Chinese in Annotate and
+meetings"). Every hook in a file all three OSes build sits behind `#[cfg(target_os = "macos")]`, so Linux
+and Windows build upstream's code unchanged. The `crates/capture/build.rs` row and the `clean_summary`
+cut in `src/meeting/notes.rs` are upstream fixes carried before a release has them, not hooks.
 
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
@@ -23,6 +26,13 @@ the Dropline private API provider (see "Dropline private API") and the iPhone vo
 | `src/rune_ui.rs` | `mod fork_dropline;`, `Ui.fork_dropline` field and its default | The picker section's form state. |
 | `src/rune_ui/picker.rs` | `fork_dropline::model_chosen()` at the top of `choose`; `content.children(fork_dropline::section(ui, p))` after the body in `modal` | Choosing a local model in the picker stops using Dropline; the picker's last section adds, uses, and deletes the provider. |
 | `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name)` in the Speech model button; `description.or_else(\|\| fork_dropline::status(ui, p))` after the description match | General names Dropline while it is in use and shows the last fallback. |
+| `src/capture_host.rs` | `scrawl_engine`: `let transcriber = crate::fork::annotate::traditional(transcriber);` first (macOS, 2 lines) | Annotate's capture engine transcribes through the conversion, whichever of Hex's model or Apple Speech `ChosenTranscriber` picks. |
+| `src/capture_host/replay.rs` | after `let transcriber = ChosenTranscriber;` in the replay's finish: `let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));` (macOS, 2 lines) | The 15 s replay transcribes with its own `ChosenTranscriber`, outside the engine. |
+| `src/meeting/transcript.rs` | `TrackTranscript::accept`: `let transcript = crate::fork::traditional::transcript(transcript);` first (macOS, 2 lines) | Every meeting chunk before its words are joined with spaces: the in-call draft, Copy new and ⌥⌃V, the final pass, a track rebuilt from its WAV, and imports. |
+| `src/meeting/notes.rs` | `clean_title` and `clean_summary`: `let title = &crate::fork::traditional::text(title);` (and `summary`) first (macOS, 2 lines each) | Generated text from either notes writer (Apple Intelligence or OpenCode): the final title and summary, the provisional title, and chapter titles (`chapters::clean_topic` calls `clean_title`). |
+| `src/meeting/notes.rs` | `clean_summary`: `.unwrap_or_else(\|\| text.floor_char_boundary(MAX_SUMMARY_CHARS))` in place of `.unwrap_or(MAX_SUMMARY_CHARS)` (1 line) | Upstream fix: a summary over 400 bytes without a space (Chinese) was cut inside a character and panicked (`meeting::fork_tests::a_long_chinese_summary_without_spaces_is_cut_at_a_character`). Upstream `dev` still has the bug; take upstream's line once a release fixes it. |
+| `src/meeting/chapters.rs` | `clean_summary`: `let summary = &crate::fork::traditional::text(summary);` first (macOS, 2 lines) | Live chapter summaries. |
+| `src/meeting.rs` | `#[cfg(all(test, target_os = "macos"))] mod fork_tests;` at the end (3 lines) | The fork's tests that need the meeting module's private functions. |
 | `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The iPhone dictation-finish point: Dropline first, the local engine on failure. |
 | `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: vocabularyTerms)` after `let vocabularyTerms = …` | Opens the Dropline session early (best effort). |
 | `ios/HEXMobile/ContentView.swift` | `standaloneView`: `ForkDroplineSettingsCard()` between `settingsCard` and `ExperimentsCard()` | Adds, selects, and deletes the provider. |
@@ -31,6 +41,13 @@ the Dropline private API provider (see "Dropline private API") and the iPhone vo
 | `crates/capture/build.rs` | `compile_helper`: `profile_dir` is the parent of the `build` directory in `OUT_DIR`, not `out_dir.ancestors().nth(3)` | Upstream backport: anomalyco/hex#1734 (`db338045`), cherry-picked unchanged with `-x`, which also touches `.github/workflows/build-desktop.yml` and `docs/plans/capture-in-hex.md`. Under cargo 1.100's build-dir layout, v3.4.0 puts `scrawl-helper` in `target/release/build/`, so `scripts/build-app.sh` can't copy it from `target/release/`. The row goes away once a release that includes #1734 is merged; until then, take upstream's version on a conflict. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
+
+A trial merge of upstream `dev` at 58ddfbb18 (2026-11-25, not pushed) conflicts only at earlier hooks:
+`src/parakeet.rs`, `src/recognition.rs`, `src/rune_ui.rs`, `src/rune_ui/general.rs`, and
+`src/rune_ui/picker.rs` (Dropline dictation), and three files under `ios/`, which this branch no longer
+builds. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
+`src/capture_host/words.rs`, but `scrawl_engine` and the replay's `let transcriber = ChosenTranscriber;`
+are still where the hooks expect them.
 
 ## Fork-only files
 
@@ -44,6 +61,10 @@ The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the 
 - `ios/HEXMobile/Fork/VocabularyLink.swift` and `ios/HEXMobileTests/Fork/VocabularyLinkTests.swift`: the
   iPhone vocabulary link.
 - `fork/vocabulary.py`: nightly vocabulary upkeep (see "Vocabulary").
+- `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
+  Annotate and meetings.
+- `fork/docs/`: the glossary (`GLOSSARY.md`) and the decisions (`adr/`) behind the fork's meeting, Annotate,
+  and screen text features, in Traditional Chinese as Derek accepted them.
 
 ## Dropline private API
 
@@ -94,6 +115,28 @@ This describes this branch's `ios/`, which is no longer built; the installed iPh
   `KeyboardBridge.appGroup`, after first unlock). The daily pipeline's identity rewrite moves that group
   with the app.
 - Saving the provider selects it.
+
+## Traditional Chinese in Annotate and meetings
+
+Mac only. Annotate and meetings keep transcribing with the local model; their text goes through the same
+conversion as Dropline's answers (`src/fork/dropline/text.rs`, re-exported as `crate::fork::traditional::text`),
+so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same everywhere. Times never change.
+
+- Timed words convert as one run without separators, then each word gets back as many characters as it had:
+  the conversion reads context, and a phrase a model split across words (`头` + `发`) would otherwise become
+  `頭發` instead of `頭髮`. A conversion that changes the run's length keeps the words as they were and logs
+  only their count. A transcript's text and each segment convert whole.
+- Annotate: the capture engine's transcriber and the 15 s replay's convert `text`, `segments`, and `words`,
+  so `summary.md`, `scrawl.json`, each keyframe's narration, the clipboard, and Paste read converted text.
+  Not converted: the retranscription Scrawl runs after Apple's speech model downloads
+  (`crates/capture/src/speech_model.rs`) and Apple's live-transcription experiment
+  (`crates/capture/src/live_transcribe.rs`), which run outside these transcribers; neither runs with
+  `capture.transcriber = parakeet`.
+- Meetings: every chunk converts as the track accepts it, so the in-call draft, Copy new and ⌥⌃V, the final
+  transcript, its Markdown, and `hex meetings` read converted text. Generated titles, summaries, and chapters
+  convert in the shared cleaners, whichever writer produced them. A title the user typed, calendar names,
+  hand-edited notes, links, and exported files are left alone.
+- The summary prompt is English and names no output language, so a writer may still answer in English.
 
 ## Vocabulary
 
