@@ -82,6 +82,16 @@ fn a_transformation_receives_its_dictations_screen_lines_in_order() {
 }
 
 #[test]
+fn a_window_without_text_gives_empty_screen_lines() {
+    let report = transformed(ContextSnapshot {
+        fork_screen_text: ScreenText::ready(&[]),
+        ..ContextSnapshot::default()
+    });
+    assert_eq!(report["present"], true);
+    assert_eq!(report["lines"], serde_json::json!([]));
+}
+
+#[test]
 fn without_a_read_the_context_has_no_screen_lines() {
     let report = transformed(ContextSnapshot::default());
     assert_eq!(report["present"], false);
