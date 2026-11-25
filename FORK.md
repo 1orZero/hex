@@ -12,10 +12,11 @@ Fork code lives in files upstream does not have; upstream files carry only the h
 fork change has to touch an upstream file, add a row here with the file, the hook (the function or
 line), and the purpose, so whoever resolves a release merge knows what to keep. The hooks belong to
 the Dropline private API provider (see "Dropline private API"), the iPhone vocabulary link (see
-"Vocabulary"), and Traditional Chinese in Annotate and meetings (see "Traditional Chinese in Annotate and
-meetings"). Every hook in a file all three OSes build sits behind `#[cfg(target_os = "macos")]`, so Linux
-and Windows build upstream's code unchanged. The `crates/capture/build.rs` row and the `clean_summary`
-cut in `src/meeting/notes.rs` are upstream fixes carried before a release has them, not hooks.
+"Vocabulary"), screen text (see "Screen text"), and Traditional Chinese in Annotate and meetings (see
+"Traditional Chinese in Annotate and meetings"). Every hook in a file all three OSes build runs only on macOS
+(behind `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build
+upstream's code unchanged. The `crates/capture/build.rs` row and the `clean_summary` cut in
+`src/meeting/notes.rs` are upstream fixes carried before a release has them, not hooks.
 
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
@@ -38,11 +39,18 @@ cut in `src/meeting/notes.rs` are upstream fixes carried before a release has th
 | `ios/HEXMobile/ContentView.swift` | `standaloneView`: `ForkDroplineSettingsCard()` between `settingsCard` and `ExperimentsCard()` | Adds, selects, and deletes the provider. |
 | `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links; upstream's handler ignores hosts other than `keyboard`. |
 | `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyLinkAdded)` after the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link adds a term; otherwise the editor's next add or remove writes its stale list back and drops the linked term. |
+| `build.rs` | `compile_swift_bridge("fork/screen_text", …)` and the Vision link, after the calendar bridge (2 lines) | Builds screen text's Swift bridge, `src/fork/screen_text.swift`. |
+| `src/recognition/context_watch.rs` | `ContextWatch.screen_text` (the last field) and `ScreenTextRead::start()` in `start`; `self.screen_text.begin()`, `.intend()`, `.cancel()` at the end of `begin`, `intend`, and `cancel`; `finish` takes `self.screen_text.finish()`, calls `finish_snapshot` (the old body of `finish`), and sets `snapshot.fork_screen_text` (16 lines) | One read per capture, started when the capture becomes real or when a short tap finishes, dropped by a cancel, and handed to the snapshot `finish` returns. |
+| `src/recognition.rs` | `handle_hotkey_action`, `HotkeyAction::Start`: `context.screen_text.raw(raw)` after `context.begin()` (1 line) | A raw dictation (the raw shortcut, `hex dictation start --raw`) runs no transformation, so it reads nothing. |
+| `src/dictation/context.rs` | `ContextSnapshot.fork_screen_text` (macOS), the last field; `fork_screen_text: Default::default()` in `snapshot_of` and in `capture_for_meeting`'s two `Self { … }` (6 lines) | The snapshot a capture finishes with carries its read. |
+| `src/dictation/processor.rs`, `src/meeting/detection.rs` | `fork_screen_text: Default::default()` (macOS) in the tests' `context` helpers (2 lines each) | Struct literals that name every field need the new one. |
+| `src/personal_commands.rs` | `InvocationContext.screen_lines` (macOS) after `window_title`; `screen_lines: context.fork_screen_text.lines()` in `invocation_context`; `mod fork_screen_text_tests` (`#[path]` to `src/fork/screen_text/transformation_tests.rs`) at the end of the file (9 lines) | Each transformation chain waits for its dictation's read and passes it as `screenLines`; the test module runs a real config against the worker. |
+| `src/personal_commands/hex.d.ts` | `screenLines?: readonly string[]` at the end of `HandlerContext` (2 lines) | Types the field for configs. |
 | `crates/capture/build.rs` | `compile_helper`: `profile_dir` is the parent of the `build` directory in `OUT_DIR`, not `out_dir.ancestors().nth(3)` | Upstream backport: anomalyco/hex#1734 (`db338045`), cherry-picked unchanged with `-x`, which also touches `.github/workflows/build-desktop.yml` and `docs/plans/capture-in-hex.md`. Under cargo 1.100's build-dir layout, v3.4.0 puts `scrawl-helper` in `target/release/build/`, so `scripts/build-app.sh` can't copy it from `target/release/`. The row goes away once a release that includes #1734 is merged; until then, take upstream's version on a conflict. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
 
-A trial merge of upstream `dev` at 58ddfbb18 (2026-11-25, not pushed) conflicts only at earlier hooks:
+A trial merge of upstream `dev` at a394af280 (2026-11-25, not pushed) conflicts only at earlier hooks:
 `src/parakeet.rs`, `src/recognition.rs`, `src/rune_ui.rs`, `src/rune_ui/general.rs`, and
 `src/rune_ui/picker.rs` (Dropline dictation), and three files under `ios/`, which this branch no longer
 builds. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
@@ -61,6 +69,8 @@ are still where the hooks expect them.
 - `ios/HEXMobile/Fork/VocabularyLink.swift` and `ios/HEXMobileTests/Fork/VocabularyLinkTests.swift`: the
   iPhone vocabulary link.
 - `fork/vocabulary.py`: nightly vocabulary upkeep (see "Vocabulary").
+- `src/fork/screen_text.rs`, `src/fork/screen_text.swift`, `src/fork/screen_text/transformation_tests.rs`, and
+  `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
 - `fork/docs/`: the glossary (`GLOSSARY.md`) and the decisions (`adr/`) behind the fork's meeting, Annotate,
@@ -228,6 +238,49 @@ their added and last-seen dates, and the end of the last analyzed window), `pinn
 
 `HEX_FORK_HOME`, `HEX_FORK_HEX` (the `hex` binary), and `HEX_APPLICATION_SUPPORT_DIR` override the defaults,
 which is how the script is tried against Hex Test.
+
+## Screen text
+
+While a dictation records, the Mac app reads the front window's text with Vision and passes the lines to
+that dictation's transformations as `context.screenLines`, top to bottom and each row left to right. It
+does what Derek's `hex-screen-ocr` LaunchAgent did from another process through
+`~/.local/share/hex-lab/screen.json`, for his `jev` transformation.
+
+- Only while some mode uses a script transformation, the condition under which Hex reads the window
+  title. A capture reads once: when it becomes real (held past the hold threshold, a control start, or a
+  released microphone opening), or, for a short tap, when it finishes. A discarded or cancelled press and
+  a raw dictation read nothing.
+- The window is the frontmost on-screen one at layer 0, wider and taller than 50 points, that no Hex
+  build (`anomaly.hex`, `anomaly.hex.*`) owns, chosen as the read starts. Only that window is captured
+  (ScreenCaptureKit, at most 2800 px on its longer side, without the cursor); if it has closed by then,
+  nothing is read and no other window is captured. Vision reads it with `.accurate`, `en-US`, and no
+  language correction. Lines whose centers are closer than half a line's height form one row.
+- Before every read Hex checks Screen Recording with `CGPreflightScreenCaptureAccess`. It never asks:
+  without the permission nothing is listed or captured, and dictation works as before. macOS keeps a
+  process's first answer, so Hex starts reading only after it is reopened once Screen Recording is allowed.
+- The read belongs to the snapshot its capture finished with, so two overlapping dictations each get
+  their own. A transformation chain waits up to 500 ms for it, as `screen.ts` did. A late, failed, or
+  unpermitted read leaves `screenLines` out, and a late one is stopped. At most 400 lines and 32 KiB pass.
+- Every custom transformation in the chain sees the same `screenLines`, as with `windowTitle`. Hex keeps
+  the lines in memory only and logs counts and durations (`fork screen text: …`), never text.
+- When the listener starts with a script transformation set up and Screen Recording allowed, Vision loads
+  on a background thread; the helper once saw 43 s for a first read after a restart. The model then stays
+  in Hex's memory.
+- Screen text never reaches speech recognition or Dropline. Dropline's prompt is Hex's vocabulary
+  (`vocabulary::terms()`), which the read never touches. When upstream's Words on screen (Labs,
+  `screen-vocabulary`, on `dev`) reaches a release, check that its terms stay out of `vocabulary::terms()`
+  too, or Dropline's prompt would carry them.
+
+A trial merge of upstream `dev` (`a394af280`) conflicts in five of the hook files. In
+`src/recognition/context_watch.rs`, Words on screen and Rewrite reads nearby text add `screen` and `caret`
+fields and split `finish` into `finish` and `finish_snapshot` the same way: keep both sides' fields, and
+in `finish` take `self.screen_text.finish()` before `finish_snapshot` and set `fork_screen_text` beside
+`screen_terms`. In `src/dictation/context.rs`, `src/dictation/processor.rs`, and `src/meeting/detection.rs`,
+`dev` adds `screen_terms`, `caret_text`, and `bundle_name` where the fork adds `fork_screen_text`: keep
+both. `dev` moves `handle_hotkey_action` from `src/recognition.rs` to `src/recognition/capture_actions.rs`:
+take `dev`'s `recognition.rs` and put `context.screen_text.raw(raw)` back after `context.begin()` there
+(the Dropline `prepare()` hook moves with it). `build.rs`, `src/personal_commands.rs`, and `hex.d.ts`
+merge cleanly.
 
 ## Daily pipeline
 

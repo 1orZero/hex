@@ -30,6 +30,8 @@ pub struct ContextSnapshot {
     pub browser_url: Option<Url>,
     pub window_title: Option<String>,
     pub input_revision: Option<u64>,
+    #[cfg(target_os = "macos")]
+    pub fork_screen_text: crate::fork::screen_text::ScreenText,
 }
 
 /// The page refresh one capture owes. A shortcut's press starts it
@@ -259,6 +261,8 @@ fn snapshot_of(front: &Frontmost, page: Option<Url>) -> ContextSnapshot {
         browser_url: page.or_else(|| front.page.clone()),
         window_title: front.window_title.clone(),
         input_revision: None,
+        #[cfg(target_os = "macos")]
+        fork_screen_text: Default::default(),
     }
 }
 
@@ -307,6 +311,7 @@ impl ContextSnapshot {
                         browser_url: Some(browser_url),
                         window_title,
                         input_revision: None,
+                        fork_screen_text: Default::default(),
                     });
                 }
                 Ok(None) => {}
@@ -349,6 +354,7 @@ impl ContextSnapshot {
                     browser_url: url,
                     window_title: title,
                     input_revision: None,
+                    fork_screen_text: Default::default(),
                 });
             }
         }

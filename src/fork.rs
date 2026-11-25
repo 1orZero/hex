@@ -3,4 +3,5 @@
 
 pub mod annotate;
 pub mod dropline;
+pub mod screen_text;
 pub mod traditional;
