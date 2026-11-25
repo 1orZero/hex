@@ -15,4 +15,4 @@ Hex 的 Dropline 走私人 API，每次送出的內容都會寫進 Derek 的 Dro
 
 ## 影響
 - 一般聽寫留下的 Dropline 記憶也會一起清掉。
-- 審核查證（HEX-11、HEX-12）：清除端點接受 Worker 的 owner API bearer 或登入 bearer，鍵盤 bearer 會得到 403；只在 Derek Voice 開啟定期清除、私人連線有效且帳號相符時才真的清除，否則回 `200 {cleared:false}`。前提的處理見計畫 P1。
+- 審核查證（HEX-11、HEX-12）：清除端點接受 Worker 的 owner API bearer 或登入 bearer，鍵盤 bearer 會得到 403；只在 Derek Voice 開啟定期清除、私人連線有效且帳號相符時才真的清除，否則回 `200 {cleared:false}`。這個前提與未清除時的處理見 [ADR-0007](0007-memory-clear-requires-scheduled-clearing.md)。

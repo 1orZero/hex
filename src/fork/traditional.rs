@@ -9,8 +9,9 @@ pub(crate) use super::dropline::traditional as text;
 
 /// Converts timed words as one run without separators, so a phrase a model
 /// split across words (`头` + `发`) converts as the phrase (`頭髮`, not
-/// `頭發`). Each word gets back as many characters as it had; a conversion
-/// that changes the run's length keeps every word as it was.
+/// `頭發`). A word's own leading and trailing spaces stay out of the run and
+/// in place; each word gets back as many characters as it had. When the
+/// conversion changes the run's length, each word converts on its own.
 pub(crate) fn words<'a>(words: impl IntoIterator<Item = &'a mut String>) {
     split_converted(words, text);
 }
@@ -20,7 +21,18 @@ fn split_converted<'a>(
     convert: impl Fn(&str) -> String,
 ) {
     let mut words = words.into_iter().collect::<Vec<_>>();
-    let joined = words.iter().map(|word| word.as_str()).collect::<String>();
+    let spans = words
+        .iter()
+        .map(|word| {
+            let start = word.len() - word.trim_start().len();
+            (start, word.trim_end().len().max(start))
+        })
+        .collect::<Vec<_>>();
+    let joined = words
+        .iter()
+        .zip(&spans)
+        .map(|(word, &(start, end))| &word[start..end])
+        .collect::<String>();
     let converted = convert(&joined);
     if converted == joined {
         return;
@@ -28,14 +40,18 @@ fn split_converted<'a>(
     if converted.chars().count() != joined.chars().count() {
         tracing::warn!(
             words = words.len(),
-            "kept the original script of words whose conversion changed their length"
+            "converted words one by one because the run's conversion changed its length"
         );
+        for word in &mut words {
+            **word = convert(word);
+        }
         return;
     }
     let mut characters = converted.chars();
-    for word in &mut words {
-        let count = word.chars().count();
-        **word = characters.by_ref().take(count).collect();
+    for (word, (start, end)) in words.iter_mut().zip(spans) {
+        let count = word[start..end].chars().count();
+        let core = characters.by_ref().take(count).collect::<String>();
+        word.replace_range(start..end, &core);
     }
 }
 
@@ -94,10 +110,22 @@ mod tests {
     }
 
     #[test]
-    fn a_conversion_that_changes_the_length_keeps_every_word() {
+    fn a_conversion_that_changes_the_length_converts_each_word_alone() {
         let mut words = vec!["qa-头".to_owned(), "发".to_owned()];
-        split_converted(words.iter_mut(), |text| format!("{text}!"));
-        assert_eq!(words, ["qa-头", "发"]);
+        split_converted(words.iter_mut(), |text| match text {
+            "qa-头发" => "qa-頭髮!".to_owned(),
+            word => word.replace('头', "頭").replace('发', "發"),
+        });
+        assert_eq!(words, ["qa-頭", "發"]);
+    }
+
+    #[test]
+    fn spaces_inside_words_stay_in_place_and_out_of_the_run() {
+        assert_eq!(converted(&[" qa-头", " 发 ", " "]), [" qa-頭", " 髮 ", " "]);
+        assert_eq!(
+            converted(&[" qa", " 会", "后", "  "]),
+            [" qa", " 會", "後", "  "]
+        );
     }
 
     fn segment(start_ms: i64, end_ms: i64, text: &str) -> TranscriptSegment {

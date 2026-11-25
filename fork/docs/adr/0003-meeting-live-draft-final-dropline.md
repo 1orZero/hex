@@ -8,7 +8,7 @@
 依 ADR-0001，Dropline 每 2–3 分鐘才回來一段。會議中的畫面和 Copy new（⌥⌃V）需要即時文字。
 
 ## 決定
-會議進行中，畫面、Copy new 與 ⌥⌃V 繼續用本機草稿，草稿先經 fork 內建繁體轉換。會議停止後，定稿（`transcript.ndjson`、`transcript.md`）由 Dropline 段組成，摘要讀這份定稿。
+會議進行中，畫面、Copy new 與 ⌥⌃V 繼續用本機草稿，草稿先經 fork 內建繁體轉換。會議停止後，定稿（`transcript.ndjson`、`transcript.md`）以 Dropline 段為主；重送後仍失敗的段（ADR-0005）與對齊不可信的段（ADR-0008）改用經 fork 內建繁體轉換的本機文字。摘要讀這份定稿。
 
 ## 考慮過的做法
 - Dropline 段回來後即時換掉草稿：會議中較準，但畫面文字會被換掉，也要改較多 upstream 程式。

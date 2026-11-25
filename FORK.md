@@ -124,8 +124,8 @@ so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same
 
 - Timed words convert as one run without separators, then each word gets back as many characters as it had:
   the conversion reads context, and a phrase a model split across words (`头` + `发`) would otherwise become
-  `頭發` instead of `頭髮`. A conversion that changes the run's length keeps the words as they were and logs
-  only their count. A transcript's text and each segment convert whole.
+  `頭發` instead of `頭髮`. A word's own leading and trailing spaces stay in place, outside the run. When the
+  run's conversion changes its length, each word converts on its own and only their count is logged. A transcript's text and each segment convert whole.
 - Annotate: the capture engine's transcriber and the 15 s replay's convert `text`, `segments`, and `words`,
   so `summary.md`, `scrawl.json`, each keyframe's narration, the clipboard, and Paste read converted text.
   Not converted: the retranscription Scrawl runs after Apple's speech model downloads

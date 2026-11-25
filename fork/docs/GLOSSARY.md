@@ -6,7 +6,7 @@
 - **本機草稿**：會議錄音中，本機模型每 6–10 秒轉錄一小段產生的逐字稿，寫入 `transcript.rolling.ndjson`。
 - **定稿**：會議停止後寫入 `transcript.ndjson` 與 `transcript.md` 的逐字稿；摘要讀這份。
 - **每字時間**：Annotate 轉錄結果中每個字的開始與結束時間，用來把旁白對到每張截圖（keyframe）。
-- **fork 內建繁體轉換**：fork 的 `src/fork/dropline/text.rs` 中 `traditional`，用 Apple Foundation 離線轉換字形，不改寫用詞，保留程式識別名與粵語「吓」。目前只套用在 Dropline 成功回傳的文字。
+- **fork 內建繁體轉換**：fork 的 `src/fork/dropline/text.rs` 中 `traditional`，用 Apple Foundation 離線轉換字形，不改寫用詞，保留程式識別名與粵語「吓」。套用在 Dropline 成功回傳的文字、Annotate 的本機轉錄，以及會議的逐字稿、標題與摘要。
 - **s2tw 對照表**：Derek 的 `traditional-chinese` transformer 用的本機轉換（`~/dotfiles/hex/.config/hex/s2twp.ts`），由 OpenCC s2tw 字典加 Big5 字形與粵語詞產生，不做台灣詞彙替換。
 - **辨識偏置**：轉錄時把字典交給模型。Qwen3-ASR／Whisper 一律套用；Parakeet 要開 Labs › Vocabulary biasing。
 - **transformations**：使用者在 `hex.config.ts` 定義、依聽寫模式執行的文字轉換，例如 Derek 的 `traditional-chinese → jev → cjk-spacing`。目前只在一般聽寫執行。
