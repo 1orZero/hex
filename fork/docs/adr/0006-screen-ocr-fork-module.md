@@ -17,3 +17,11 @@ Derek 的 `Jev` transformer 用螢幕文字挑候選詞。目前由外部 helper
 - upstream 檔案各加一小段掛勾：`src/dictation/context.rs`、`src/recognition/context_watch.rs`、`src/personal_commands.rs`、`src/personal_commands/hex.d.ts`。OCR 本體放新檔。
 - 不再需要 LaunchAgent、輪詢與暫存檔。`Jev` 要改讀新欄位。
 - upstream 的 Words on screen 進正式版後，兩者並存：upstream 的用於辨識偏置，fork 的用於 transformation。
+
+## 實作（DER-67，PR #11）
+- 讀取時機：只在有模式用 script transformation 時讀取。一次擷取只讀一次，在擷取確定成立時讀（按住超過門檻、`hex dictation start`，或閒置時釋放的麥克風重新開啟時）；短按在結束時讀。raw 與取消的聽寫不讀。
+- 權限：讀取前用 `CGPreflightScreenCaptureAccess` 檢查，從不跳出授權要求。macOS 在同一個行程裡沿用第一次的結果，所以給了螢幕錄製權限後要重開 Hex。
+- 交付：transformation chain 最多等 500 ms。逾時、失敗或沒有權限時省略 `screenLines`，最多傳 400 行、32 KiB。Hex 不寫檔，log 只記行數與耗時。螢幕文字不進辨識，也不進 Dropline。
+- upstream 掛勾：實際動到 8 個檔案、共 40 行，比「影響」列的 4 個檔案多了 `build.rs`、`src/recognition.rs`，以及 `src/dictation/processor.rs`、`src/meeting/detection.rs` 的測試 fixture。各處用途記在 `FORK.md` 的「Screen text」。
+- 量測：Vision 載入後，一次讀取約 220–290 ms，在錄音中完成，transformation 不必等待。新簽章的 build 第一次載入 Vision 曾花 45 秒。
+- `Jev`：Derek dotfiles 的修改（`screen.ts` 先讀 `context.screenLines`）在安裝新版後套用，之後停用 LaunchAgent。
