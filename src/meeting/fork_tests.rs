@@ -112,15 +112,66 @@ fn live_chapter_titles_and_summaries_are_traditional() {
 
 #[test]
 fn a_title_the_user_typed_keeps_its_script() {
+    let notes = summarize_entries(&conversation(), 8_000, later(), |_, _, _| {
+        Ok(GeneratedNotes {
+            title: "qa-软件发布".into(),
+            summary: "qa-讨论头发。".into(),
+            written_by: Some(NotesWriter::AppleIntelligence),
+        })
+    })
+    .unwrap()
+    .notes;
     let mut manifest = manifest("qa-typed");
     manifest.title = "qa-我的软件会议".into();
     manifest.title_source = Some(TitleSource::User);
+    manifest.notes = Some(
+        serde_json::from_value(serde_json::json!({
+            "title": notes.title,
+            "summary": notes.summary,
+        }))
+        .unwrap(),
+    );
     manifest.chapters = vec![Chapter {
         title: "qa-軟件會議".into(),
         summary: String::new(),
         start_ms: 0,
     }];
     assert_eq!(display_title(&manifest), "qa-我的软件会议");
+    // The same meeting without a typed title shows the generated one, converted.
+    manifest.title_source = Some(TitleSource::Default);
+    let shown = display_title(&manifest);
+    assert!(shown.starts_with("qa-軟件"), "{shown}");
+    assert!(!shown.contains('软'), "{shown}");
+}
+
+#[test]
+fn every_meeting_chunk_is_traditional_before_its_words_are_joined() {
+    use super::transcript::{ReplayChunk, replay_envelope, replay_track, replay_views};
+
+    let chunk: ReplayChunk = serde_json::from_value(serde_json::json!({
+        "start": 0,
+        "overlap": 0,
+        "len": 48_000,
+        "transcript": {
+            "text": "qa-头发很好",
+            "segments": [{ "startMs": 0, "endMs": 2_000, "text": "qa-头发很好" }],
+            "words": [
+                { "startMs": 0, "endMs": 500, "text": "qa-头" },
+                { "startMs": 500, "endMs": 1_000, "text": "发" },
+                { "startMs": 1_000, "endMs": 1_500, "text": "很" },
+                { "startMs": 1_500, "endMs": 2_000, "text": "好" }
+            ]
+        }
+    }))
+    .unwrap();
+    let system = replay_track(MeetingSource::System, &[chunk], u64::MAX);
+    let microphone = replay_track(MeetingSource::Microphone, &[], u64::MAX);
+    let (_, kept, _) = replay_views(&system, &microphone, &replay_envelope(&[], &[]));
+    let shown = kept
+        .iter()
+        .map(|entry| (entry.start_ms, entry.end_ms, entry.text.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(shown, [(0, 2_000, "qa-頭 髮 很 好")]);
 }
 
 pub(super) fn manifest(id: &str) -> MeetingManifest {
