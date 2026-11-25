@@ -3,15 +3,22 @@
 //! identifiers, the Cantonese particle `吓`, and Taiwan forms come out the
 //! same everywhere.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 use crate::transcription::transcript::Transcript;
 
 pub(crate) use super::dropline::traditional as text;
 
 /// Converts timed words as one run without separators, so a phrase a model
 /// split across words (`头` + `发`) converts as the phrase (`頭髮`, not
-/// `頭發`). A word's own leading and trailing spaces stay out of the run and
-/// in place; each word gets back as many characters as it had. When the
-/// conversion changes the run's length, each word converts on its own.
+/// `頭發`). A word's own leading and trailing spaces stay in place. Between
+/// two Chinese words they are left out of the run; beside an identifier,
+/// code, kana, or Hangul, which the conversion leaves alone as whole runs,
+/// they still separate the words, as they do in the transcript's text. Each
+/// word gets back as many characters as it had. When the conversion changes
+/// the run's length, each word converts on its own.
 pub(crate) fn words<'a>(words: impl IntoIterator<Item = &'a mut String>) {
     split_converted(words, text);
 }
@@ -28,11 +35,22 @@ fn split_converted<'a>(
             (start, word.trim_end().len().max(start))
         })
         .collect::<Vec<_>>();
-    let joined = words
-        .iter()
-        .zip(&spans)
-        .map(|(word, &(start, end))| &word[start..end])
-        .collect::<String>();
+    let core = |index: usize| &words[index][spans[index].0..spans[index].1];
+    let mut joined = String::new();
+    let mut separators = Vec::with_capacity(words.len());
+    for index in 0..words.len() {
+        let separator = match index.checked_sub(1) {
+            Some(previous) if !joins_phrase(core(previous), core(index)) => format!(
+                "{}{}",
+                &words[previous][spans[previous].1..],
+                &words[index][..spans[index].0]
+            ),
+            _ => String::new(),
+        };
+        joined.push_str(&separator);
+        joined.push_str(core(index));
+        separators.push(separator.chars().count());
+    }
     let converted = convert(&joined);
     if converted == joined {
         return;
@@ -48,11 +66,29 @@ fn split_converted<'a>(
         return;
     }
     let mut characters = converted.chars();
-    for (word, (start, end)) in words.iter_mut().zip(spans) {
+    for ((word, (start, end)), separator) in words.iter_mut().zip(spans).zip(separators) {
+        for _ in 0..separator {
+            characters.next();
+        }
         let count = word[start..end].chars().count();
         let core = characters.by_ref().take(count).collect::<String>();
         word.replace_range(start..end, &core);
     }
+}
+
+/// Whether the space between two words is only the model's word boundary
+/// inside Chinese: Han on both sides, and neither word holds an identifier's
+/// `_`, a backtick, kana, or Hangul, whose runs could swallow the other word.
+fn joins_phrase(previous: &str, next: &str) -> bool {
+    static HAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\p{sc=Han}$").unwrap());
+    static KEPT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"[_\x60ー\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}]").unwrap()
+    });
+    let han = |c: Option<char>| c.is_some_and(|c| HAN.is_match(c.encode_utf8(&mut [0; 4])));
+    han(previous.chars().next_back())
+        && han(next.chars().next())
+        && !KEPT.is_match(previous)
+        && !KEPT.is_match(next)
 }
 
 /// A meeting chunk's transcript: its text and each segment whole, its words
@@ -117,6 +153,21 @@ mod tests {
             word => word.replace('头', "頭").replace('发', "發"),
         });
         assert_eq!(words, ["qa-頭", "發"]);
+    }
+
+    #[test]
+    fn spaces_still_separate_identifiers_code_kana_and_hangul() {
+        assert_eq!(
+            converted(&["qa-打开", " 文件_name"]),
+            ["qa-打開", " 文件_name"]
+        );
+        assert_eq!(
+            converted(&["qa-name_文件", " 打开"]),
+            ["qa-name_文件", " 打開"]
+        );
+        assert_eq!(converted(&["qa-打开", " テスト"]), ["qa-打開", " テスト"]);
+        assert_eq!(converted(&["qa-打开", " 한국"]), ["qa-打開", " 한국"]);
+        assert_eq!(converted(&["qa-打开", " `头发`"]), ["qa-打開", " `头发`"]);
     }
 
     #[test]
