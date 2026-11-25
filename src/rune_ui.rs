@@ -701,6 +701,7 @@ pub(crate) struct Ui {
     /// The person asked for an update check (the footer or the menu bar),
     /// so the footer says how it went.
     update_asked: bool,
+    #[cfg(target_os = "macos")]
     fork_dropline: fork_dropline::Form,
 }
 
@@ -814,6 +815,7 @@ impl Ui {
             update_asked: false,
             window: None,
             tick_at: 0.0,
+            #[cfg(target_os = "macos")]
             fork_dropline: Default::default(),
         }
     }
