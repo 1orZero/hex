@@ -7,7 +7,7 @@ mod opus;
 pub(super) use opus::ogg_opus;
 
 /// 16 kHz samples in one 20 ms block, the Opus packet the levels describe.
-const BLOCK: usize = 320;
+pub(super) const BLOCK: usize = 320;
 /// A block's level: its RMS in dBFS plus this offset, clamped to 0…100.
 const LEVEL_OFFSET_DB: f64 = 100.0;
 /// The noise floor is this quantile of the clip's levels.
@@ -42,7 +42,7 @@ pub(super) fn shorten_pauses(samples: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-fn level(block: &[f32]) -> u8 {
+pub(super) fn level(block: &[f32]) -> u8 {
     let power = block
         .iter()
         .map(|s| f64::from(*s) * f64::from(*s))

@@ -11,6 +11,7 @@
 mod audio;
 mod client;
 mod keychain;
+pub(crate) mod meeting;
 mod store;
 mod text;
 

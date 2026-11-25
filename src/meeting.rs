@@ -462,6 +462,8 @@ pub fn record(
     let _active = ActiveMeeting::acquire(&meeting_dir)?;
 
     let given_title = start.title.filter(|title| !title.trim().is_empty());
+    #[cfg(target_os = "macos")]
+    let _dropline = crate::fork::dropline::meeting::start(&meeting_dir);
     let title_source = match (&given_title, start.title_source) {
         (None, _) => TitleSource::Default,
         // A title without a known source is treated as the user's.
@@ -882,6 +884,14 @@ fn write_tracks(
         for &sample in &packet.samples {
             writer.write_sample(sample)?;
         }
+        #[cfg(target_os = "macos")]
+        crate::fork::dropline::meeting::offer(
+            directory,
+            packet.source,
+            packet.position,
+            packet.sample_rate,
+            &packet.samples,
+        );
         if let Some(rolling) = &mut rolling {
             rolling.offer(&packet);
         }

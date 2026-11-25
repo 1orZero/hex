@@ -1,6 +1,7 @@
 //! The HTTP side of Dropline's private API: the access token from the token
 //! endpoint, `/client/dictate/prepare`, and `/client/dictate`, as Derek
-//! Voice sends them.
+//! Voice sends them, plus a meeting segment's retries and the Worker's
+//! memory clear.
 
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime};
@@ -16,6 +17,16 @@ const RETRY_MINIMUM: Duration = Duration::from_secs(3);
 /// Tokens are used until this long before they expire.
 const TOKEN_MARGIN_MS: u64 = 5 * 60 * 1000;
 const MAX_RESPONSE_BYTES: u64 = 1 << 20;
+/// One meeting segment request, however long it runs.
+const SEGMENT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A 429 without `Retry-After` waits this long; with one, at most `MAX_RATE_WAIT`.
+const RATE_WAIT: Duration = Duration::from_secs(5);
+const MAX_RATE_WAIT: Duration = Duration::from_secs(60);
+/// 429s a segment waits out before it fails; they are not sends.
+const MAX_RATE_LIMITS: usize = 10;
+/// Sends of one segment through 502–504, network errors, and timeouts.
+const MAX_SENDS: usize = 2;
+const CLEAR_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why Dropline gave no text, as General and the picker show it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +41,21 @@ pub(super) enum Failure {
     Unauthorized,
     Http(u16),
     InvalidResponse,
+    /// The token endpoint refused the bearer (401, 403) or Dropline isn't
+    /// connected (404).
+    TokenRejected(u16),
+    /// The meeting stopped or Hex is quitting.
+    Cancelled,
+}
+
+impl Failure {
+    /// The Worker or Dropline refused this Hex: a meeting sends nothing more.
+    pub fn is_authorization(&self) -> bool {
+        matches!(
+            self,
+            Self::NotConfigured | Self::Keychain(_) | Self::TokenRejected(_) | Self::Unauthorized
+        )
+    }
 }
 
 impl fmt::Display for Failure {
@@ -45,6 +71,9 @@ impl fmt::Display for Failure {
             Self::Unauthorized => write!(f, "Dropline 授權失敗（401）"),
             Self::Http(status) => write!(f, "Dropline 回應 HTTP {status}"),
             Self::InvalidResponse => write!(f, "Dropline 的回應格式不對"),
+            Self::TokenRejected(404) => write!(f, "Token 端點失敗：HTTP 404（Dropline 沒有連線）"),
+            Self::TokenRejected(status) => write!(f, "Token 端點失敗：HTTP {status}"),
+            Self::Cancelled => write!(f, "已取消"),
         }
     }
 }
@@ -121,6 +150,8 @@ pub(super) struct Request<'a> {
 pub(super) struct Response {
     pub status: u16,
     pub body: Vec<u8>,
+    /// `Retry-After` in seconds, when the server sent one.
+    pub retry_after: Option<Duration>,
 }
 
 /// One HTTP exchange; tests answer with their own.
@@ -158,19 +189,42 @@ impl Transport for Http {
         };
         let mut response = response.map_err(failed)?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
         let body = response
             .body_mut()
             .with_config()
             .limit(MAX_RESPONSE_BYTES)
             .read_to_vec()
             .map_err(failed)?;
-        Ok(Response { status, body })
+        Ok(Response {
+            status,
+            body,
+            retry_after,
+        })
     }
 }
 
 /// `GET <endpoint>` with the bearer: `{access_token, expires_at}`, the
 /// expiry in epoch milliseconds.
 pub(super) fn fetch_token(
+    transport: &dyn Transport,
+    endpoint: &str,
+    bearer: &str,
+) -> Result<AccessToken, Failure> {
+    request_token(transport, endpoint, bearer).map_err(|failure| match failure {
+        Failure::TokenRejected(404) => Failure::Token("HTTP 404（Dropline 沒有連線）".into()),
+        Failure::TokenRejected(status) => Failure::Token(format!("HTTP {status}")),
+        failure => failure,
+    })
+}
+
+/// [`fetch_token`], telling a refused bearer apart.
+pub(super) fn request_token(
     transport: &dyn Transport,
     endpoint: &str,
     bearer: &str,
@@ -191,7 +245,7 @@ pub(super) fn fetch_token(
         })?;
     match response.status {
         200 => {}
-        404 => return Err(Failure::Token("HTTP 404（Dropline 沒有連線）".into())),
+        status @ (401 | 403 | 404) => return Err(Failure::TokenRejected(status)),
         status => return Err(Failure::Token(format!("HTTP {status}"))),
     }
     let body: serde_json::Value = serde_json::from_slice(&response.body)
@@ -291,6 +345,138 @@ fn final_text(body: &[u8]) -> Result<String, Failure> {
         .ok_or(Failure::InvalidResponse)
 }
 
+/// `POST /client/dictate` for one meeting segment: up to 60 s a request; a
+/// 429 waits out `Retry-After` (5 s without one, at most 60 s, at most 10
+/// times) and is not a send; 502–504, network errors, and timeouts send at
+/// most twice; a 401 fetches a new token once. `proceed` runs before each
+/// request and `wait` sleeps a 429 out; either returns false when the
+/// meeting stopped.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn transcribe_segment(
+    transport: &dyn Transport,
+    token: &mut dyn FnMut(bool) -> Result<String, Failure>,
+    audio: &[u8],
+    session: &str,
+    context: &Context,
+    proceed: &mut dyn FnMut() -> bool,
+    wait: &dyn Fn(Duration) -> bool,
+) -> Result<String, Failure> {
+    let url = format!("{DROPLINE}/client/dictate");
+    let boundary = format!("hex-dropline-{session}");
+    let body = multipart(&boundary, session, context, audio);
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    let mut access = token(false)?;
+    let mut sends = 0;
+    let mut limits = 0;
+    let mut refreshed = false;
+    loop {
+        if !proceed() {
+            return Err(Failure::Cancelled);
+        }
+        sends += 1;
+        let response = transport.send(Request {
+            method: "POST",
+            url: &url,
+            bearer: &access,
+            content_type: Some(&content_type),
+            body: body.clone(),
+            timeout: SEGMENT_TIMEOUT,
+        });
+        let failure = match response {
+            Ok(response) => match response.status {
+                200..=299 => return segment_text(&response.body),
+                429 => {
+                    sends -= 1;
+                    limits += 1;
+                    if limits > MAX_RATE_LIMITS {
+                        return Err(Failure::Http(429));
+                    }
+                    let pause = response.retry_after.unwrap_or(RATE_WAIT).min(MAX_RATE_WAIT);
+                    if !wait(pause) {
+                        return Err(Failure::Cancelled);
+                    }
+                    continue;
+                }
+                401 if !refreshed => {
+                    sends -= 1;
+                    refreshed = true;
+                    access = token(true)?;
+                    continue;
+                }
+                401 => return Err(Failure::Unauthorized),
+                status @ 502..=504 => Failure::Http(status),
+                status => return Err(Failure::Http(status)),
+            },
+            Err(failure @ (Failure::Network(_) | Failure::Timeout)) => failure,
+            Err(failure) => return Err(failure),
+        };
+        if sends >= MAX_SENDS {
+            return Err(failure);
+        }
+    }
+}
+
+/// A meeting segment's words as heard: `transcript.text`, else `final_text`
+/// (Derek Voice's order).
+fn segment_text(body: &[u8]) -> Result<String, Failure> {
+    let body: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| Failure::InvalidResponse)?;
+    body["transcript"]["text"]
+        .as_str()
+        .or_else(|| body["final_text"].as_str())
+        .map(super::text::traditional)
+        .ok_or(Failure::InvalidResponse)
+}
+
+/// What the Worker said to a memory clear.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Cleared {
+    Yes,
+    /// `200 {cleared: false}`: Derek Voice's scheduled clearing is off.
+    No,
+    Failed(String),
+}
+
+/// The Worker's memory clear beside the token endpoint, or `None` when the
+/// endpoint doesn't end in `/dropline-private/token`.
+pub(super) fn memory_clear_url(endpoint: &str) -> Option<String> {
+    let mut url = url::Url::parse(endpoint).ok()?;
+    let path = url
+        .path()
+        .strip_suffix("/dropline-private/token")?
+        .to_owned();
+    url.set_path(&format!("{path}/dropline-private/memory/clear"));
+    url.set_query(None);
+    Some(url.into())
+}
+
+/// `POST <url>` with the Worker bearer. Only the outcome is kept, never the
+/// answer's other content.
+pub(super) fn clear_memory(transport: &dyn Transport, url: &str, bearer: &str) -> Cleared {
+    let response = transport.send(Request {
+        method: "POST",
+        url,
+        bearer,
+        content_type: Some("application/json"),
+        body: b"{}".to_vec(),
+        timeout: CLEAR_TIMEOUT,
+    });
+    match response {
+        Ok(response) if response.status == 200 => {
+            match serde_json::from_slice::<serde_json::Value>(&response.body)
+                .ok()
+                .and_then(|body| body["cleared"].as_bool())
+            {
+                Some(true) => Cleared::Yes,
+                Some(false) => Cleared::No,
+                None => Cleared::Failed("回應格式不對".into()),
+            }
+        }
+        Ok(response) => Cleared::Failed(format!("HTTP {}", response.status)),
+        Err(failure) => Cleared::Failed(failure.to_string()),
+    }
+}
+
 /// `request` (JSON), `context` (JSON, left out when empty), and `audio`,
 /// in that order (Dropline's documentation).
 pub(super) fn multipart(boundary: &str, session: &str, context: &Context, audio: &[u8]) -> Vec<u8> {
@@ -352,12 +538,22 @@ mod tests {
             self.answers.borrow_mut().push_back(Ok(Response {
                 status,
                 body: body.as_bytes().to_vec(),
+                retry_after: None,
             }));
             self
         }
 
         fn fail(self, failure: Failure) -> Self {
             self.answers.borrow_mut().push_back(Err(failure));
+            self
+        }
+
+        fn limited(self, retry_after: Option<u64>) -> Self {
+            self.answers.borrow_mut().push_back(Ok(Response {
+                status: 429,
+                body: b"{}".to_vec(),
+                retry_after: retry_after.map(Duration::from_secs),
+            }));
             self
         }
     }
@@ -669,5 +865,242 @@ mod tests {
         assert!(body.ends_with("--qa-boundary--\r\n"));
         let without = String::from_utf8(multipart("b", "s", &Context::default(), b"x")).unwrap();
         assert!(!without.contains(r#"name="context""#));
+    }
+    const SEGMENT_OK: &str =
+        r#"{"final_text":"qa 你好。","transcript":{"text":"qa 嗯 你好","language":"zh"}}"#;
+
+    /// Sends one meeting segment through `script`, recording each 429 wait.
+    fn segment(script: &Script) -> (Result<String, Failure>, Vec<Duration>, Vec<bool>) {
+        let waits = RefCell::new(Vec::new());
+        let mut asked = Vec::new();
+        let mut token = |fresh: bool| {
+            asked.push(fresh);
+            Ok(if fresh { "qa-new" } else { "qa-old" }.to_owned())
+        };
+        let result = transcribe_segment(
+            script,
+            &mut token,
+            b"OggS",
+            "qa-session",
+            &Context::default(),
+            &mut || true,
+            &|pause| {
+                waits.borrow_mut().push(pause);
+                true
+            },
+        );
+        (result, waits.into_inner(), asked)
+    }
+
+    #[test]
+    fn a_meeting_segment_reads_the_verbatim_transcript_before_final_text() {
+        let script = Script::default().answer(200, SEGMENT_OK);
+        assert_eq!(segment(&script).0.as_deref(), Ok("qa 嗯 你好"));
+        let script = Script::default().answer(
+            200,
+            r#"{"final_text":"qa 头发","transcript":{"text":null}}"#,
+        );
+        assert_eq!(segment(&script).0.as_deref(), Ok("qa 頭髮"));
+        let script = Script::default().answer(200, r#"{"transcript":{}}"#);
+        assert_eq!(segment(&script).0, Err(Failure::InvalidResponse));
+        let sent = script.sent.borrow();
+        assert_eq!(sent[0].1, "https://api.dropline.fish.audio/client/dictate");
+    }
+
+    #[test]
+    fn dictation_still_inserts_final_text() {
+        let script = Script::default().answer(200, SEGMENT_OK);
+        let mut token = |_| Ok("qa-access".to_owned());
+        assert_eq!(
+            dictate(
+                &script,
+                &mut token,
+                b"OggS",
+                "qa",
+                &Context::default(),
+                later()
+            )
+            .as_deref(),
+            Ok("qa 你好。")
+        );
+    }
+
+    #[test]
+    fn a_429_waits_for_retry_after_or_five_seconds_and_is_not_a_send() {
+        let script = Script::default()
+            .limited(Some(7))
+            .limited(None)
+            .limited(Some(600))
+            .fail(Failure::Timeout)
+            .answer(200, SEGMENT_OK);
+        let (result, waits, _) = segment(&script);
+        assert_eq!(result.as_deref(), Ok("qa 嗯 你好"));
+        assert_eq!(
+            waits,
+            [
+                Duration::from_secs(7),
+                Duration::from_secs(5),
+                Duration::from_secs(60)
+            ]
+        );
+        assert_eq!(script.sent.borrow().len(), 5);
+    }
+
+    #[test]
+    fn eleven_429s_fail_the_segment() {
+        let mut script = Script::default();
+        for _ in 0..=MAX_RATE_LIMITS {
+            script = script.limited(Some(1));
+        }
+        let (result, waits, _) = segment(&script);
+        assert_eq!(result, Err(Failure::Http(429)));
+        assert_eq!(waits.len(), MAX_RATE_LIMITS);
+        assert!(script.answers.borrow().is_empty());
+    }
+
+    #[test]
+    fn gateway_errors_network_failures_and_timeouts_send_at_most_twice() {
+        for first in [
+            Err(Failure::Http(502)),
+            Err(Failure::Http(503)),
+            Err(Failure::Http(504)),
+            Err(Failure::Network("qa".into())),
+            Err(Failure::Timeout),
+        ] {
+            let push = |script: Script, outcome: &Result<(), Failure>| match outcome {
+                Err(Failure::Http(status)) => script.answer(*status, "{}"),
+                Err(failure) => script.fail(failure.clone()),
+                Ok(()) => script,
+            };
+            let script = push(Script::default(), &first).answer(200, SEGMENT_OK);
+            assert_eq!(segment(&script).0.as_deref(), Ok("qa 嗯 你好"));
+            let script = push(push(Script::default(), &first), &first);
+            assert_eq!(segment(&script).0, first.clone().map(|_| String::new()));
+            assert_eq!(script.sent.borrow().len(), 2);
+        }
+    }
+
+    #[test]
+    fn other_statuses_and_bad_answers_are_not_resent() {
+        for (status, expected) in [
+            (400, Failure::Http(400)),
+            (500, Failure::Http(500)),
+            (413, Failure::Http(413)),
+        ] {
+            let script = Script::default().answer(status, "{}");
+            assert_eq!(segment(&script).0, Err(expected));
+            assert_eq!(script.sent.borrow().len(), 1);
+        }
+        let script = Script::default().answer(200, "not json");
+        assert_eq!(segment(&script).0, Err(Failure::InvalidResponse));
+        assert_eq!(script.sent.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_401_refetches_the_token_once_for_a_segment() {
+        let script = Script::default().answer(401, "{}").answer(200, SEGMENT_OK);
+        let (result, _, asked) = segment(&script);
+        assert_eq!(result.as_deref(), Ok("qa 嗯 你好"));
+        assert_eq!(asked, [false, true]);
+        assert_eq!(script.sent.borrow()[1].2, "qa-new");
+        let script = Script::default().answer(401, "{}").answer(401, "{}");
+        let (result, _, _) = segment(&script);
+        assert_eq!(result, Err(Failure::Unauthorized));
+        assert!(result.unwrap_err().is_authorization());
+    }
+
+    #[test]
+    fn a_stopped_meeting_sends_nothing_more() {
+        let script = Script::default().limited(Some(30));
+        let mut token = |_| Ok("qa-access".to_owned());
+        let result = transcribe_segment(
+            &script,
+            &mut token,
+            b"OggS",
+            "qa",
+            &Context::default(),
+            &mut || true,
+            &|_| false,
+        );
+        assert_eq!(result, Err(Failure::Cancelled));
+        let script = Script::default();
+        let result = transcribe_segment(
+            &script,
+            &mut token,
+            b"OggS",
+            "qa",
+            &Context::default(),
+            &mut || false,
+            &|_| true,
+        );
+        assert_eq!(result, Err(Failure::Cancelled));
+        assert!(script.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_refused_bearer_is_an_authorization_failure_but_dictation_reads_the_same() {
+        for (status, shown) in [
+            (401, "Token 端點失敗：HTTP 401"),
+            (403, "Token 端點失敗：HTTP 403"),
+            (404, "Token 端點失敗：HTTP 404（Dropline 沒有連線）"),
+        ] {
+            let script = Script::default().answer(status, "{}");
+            let refused = request_token(&script, ENDPOINT, "qa-bearer").err().unwrap();
+            assert_eq!(refused, Failure::TokenRejected(status));
+            assert!(refused.is_authorization());
+            assert_eq!(refused.to_string(), shown);
+            let script = Script::default().answer(status, "{}");
+            let dictation = fetch_token(&script, ENDPOINT, "qa-bearer").err().unwrap();
+            assert!(matches!(dictation, Failure::Token(_)));
+            assert_eq!(dictation.to_string(), shown);
+        }
+        let script = Script::default().answer(500, "{}");
+        let failure = request_token(&script, ENDPOINT, "qa-bearer").err().unwrap();
+        assert!(!failure.is_authorization());
+        assert!(!Failure::Timeout.is_authorization());
+    }
+
+    #[test]
+    fn the_memory_clear_sits_beside_the_token_endpoint() {
+        assert_eq!(
+            memory_clear_url(ENDPOINT).as_deref(),
+            Some("https://qa-worker.example/v1/dropline-private/memory/clear")
+        );
+        assert_eq!(
+            memory_clear_url("https://qa-worker.example/v1/dropline-private/token?x=1").as_deref(),
+            Some("https://qa-worker.example/v1/dropline-private/memory/clear")
+        );
+        assert_eq!(memory_clear_url("https://qa-worker.example/v1/token"), None);
+        assert_eq!(memory_clear_url("not a url"), None);
+    }
+
+    #[test]
+    fn the_memory_clear_reads_cleared_and_keeps_only_the_outcome() {
+        let url = "https://qa-worker.example/v1/dropline-private/memory/clear";
+        for (status, body, expected) in [
+            (200, r#"{"cleared":true}"#, Cleared::Yes),
+            (
+                200,
+                r#"{"cleared":false,"reason":"qa-secret detail"}"#,
+                Cleared::No,
+            ),
+            (200, r#"{}"#, Cleared::Failed("回應格式不對".into())),
+            (
+                403,
+                r#"{"error":"qa-secret detail"}"#,
+                Cleared::Failed("HTTP 403".into()),
+            ),
+            (429, "{}", Cleared::Failed("HTTP 429".into())),
+        ] {
+            let script = Script::default().answer(status, body);
+            assert_eq!(clear_memory(&script, url, "qa-bearer"), expected);
+            let sent = script.sent.borrow();
+            assert_eq!(sent[0], ("POST".into(), url.into(), "qa-bearer".into()));
+        }
+        let script = Script::default().fail(Failure::Network("qa".into()));
+        assert_eq!(
+            clear_memory(&script, url, "qa-bearer"),
+            Cleared::Failed("網路錯誤：qa".into())
+        );
     }
 }
