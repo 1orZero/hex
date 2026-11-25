@@ -115,6 +115,8 @@ declare module "@hex/commands" {
     readonly browserHost?: string
     readonly browserUrl?: string
     readonly windowTitle?: string
+    /** macOS: the front window's text lines as this dictation started, top to bottom. */
+    readonly screenLines?: readonly string[]
   }
 
   export interface HandlerArguments<Captures extends UntypedCaptures = Readonly<Record<string, string>>> {

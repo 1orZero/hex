@@ -1225,6 +1225,7 @@ fn handle_hotkey_action(
             // The press started a capture, but it may still be provisional:
             // no page is read until the capture is held past its threshold.
             context.begin();
+            context.screen_text.raw(raw);
             // The tone confirms the press at once; a chord or short tap
             // retracts it. A released microphone confirms only once it opens.
             if release_while_idle {

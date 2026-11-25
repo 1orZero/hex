@@ -25,6 +25,8 @@ pub(super) struct ContextWatch {
     activity: InputActivity,
     /// The one refresh this capture owes, if any.
     capture: CaptureRefresh,
+    /// The fork's screen text read, for this capture (FORK.md).
+    pub(super) screen_text: crate::fork::screen_text::ScreenTextRead,
 }
 
 impl ContextWatch {
@@ -34,6 +36,7 @@ impl ContextWatch {
             snapshot: ContextSnapshot::default(),
             activity,
             capture: CaptureRefresh::default(),
+            screen_text: crate::fork::screen_text::ScreenTextRead::start(),
         }
     }
 
@@ -65,6 +68,7 @@ impl ContextWatch {
     /// press a chord discards, so nothing reads the page yet.
     pub(super) fn begin(&mut self) {
         self.capture.begin();
+        self.screen_text.begin();
     }
 
     /// The capture became real: a control start (no hold to judge), a hold
@@ -73,11 +77,13 @@ impl ContextWatch {
     pub(super) fn intend(&mut self) {
         let monitor = &self.monitor;
         self.capture.intend(|| monitor.request_refresh());
+        self.screen_text.intend();
     }
 
     /// The capture ended without transcribing: no finish waits for its page.
     pub(super) fn cancel(&mut self) {
         self.capture.cancel();
+        self.screen_text.cancel();
     }
 
     /// The context to hand a finished capture: the refreshed page when it
@@ -86,6 +92,16 @@ impl ContextWatch {
     /// real asks for its page here, and a finish with no capture at all (the
     /// loop's own context) returns it unchanged.
     pub(super) fn finish(&mut self, events: &mut EventLog) -> Result<ContextSnapshot> {
+        let screen_text = self.screen_text.finish();
+        let mut snapshot = self.finish_snapshot(events)?;
+        snapshot.fork_screen_text = screen_text;
+        Ok(snapshot)
+    }
+
+    /// The context itself: the refreshed page when it arrived in time, else
+    /// the same context without a page rather than the page of a previous
+    /// dictation.
+    fn finish_snapshot(&mut self, events: &mut EventLog) -> Result<ContextSnapshot> {
         let monitor = &self.monitor;
         let Some(ticket) = self.capture.finish(|| monitor.request_refresh()) else {
             return Ok(self.snapshot.clone());

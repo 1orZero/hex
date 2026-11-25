@@ -939,6 +939,9 @@ struct InvocationContext {
     browser_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     window_title: Option<String>,
+    #[cfg(target_os = "macos")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_lines: Option<Vec<String>>,
 }
 
 fn invocation_context(
@@ -951,6 +954,8 @@ fn invocation_context(
         browser_host: context.browser_host().map(Into::into),
         browser_url: context.browser_url.as_ref().map(ToString::to_string),
         window_title: context.window_title.clone(),
+        #[cfg(target_os = "macos")]
+        screen_lines: context.fork_screen_text.lines(),
     }
 }
 
@@ -1697,3 +1702,7 @@ export default defineHexConfig({
         fs::remove_dir_all(workspace).unwrap();
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "fork/screen_text/transformation_tests.rs"]
+mod fork_screen_text_tests;
