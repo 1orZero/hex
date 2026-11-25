@@ -96,11 +96,12 @@ impl Writer {
 
 /// The meeting's lines, without one a crash cut short.
 pub(super) fn read(directory: &Path) -> Vec<Line> {
-    let Ok(text) = std::fs::read_to_string(directory.join(FILE)) else {
+    let Ok(bytes) = std::fs::read(directory.join(FILE)) else {
         return Vec::new();
     };
-    text.lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
         .collect()
 }
 
@@ -223,5 +224,30 @@ mod tests {
                 .segments
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_line_cut_inside_a_character_keeps_the_lines_before_it() {
+        let directory = super::super::tests::scratch("sidecar-utf8");
+        let mut writer = Writer::new(&directory);
+        writer.write(&segment(1, State::Done, true, Some("qa-完成")));
+        writer.write(&Line::Clear {
+            result: "cleared".into(),
+            reason: None,
+        });
+        let path = directory.join(FILE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let cut = serde_json::to_vec(&segment(2, State::Done, true, Some("qa-第二段"))).unwrap();
+        let inside = cut
+            .windows(3)
+            .position(|window| window == "第".as_bytes())
+            .unwrap()
+            + 1;
+        bytes.extend_from_slice(&cut[..inside]);
+        std::fs::write(path, bytes).unwrap();
+        let summary = Summary::of(read(&directory));
+        assert_eq!(summary.segments.len(), 1);
+        assert_eq!(summary.segments[0].text.as_deref(), Some("qa-完成"));
+        assert!(summary.clear_recorded);
     }
 }

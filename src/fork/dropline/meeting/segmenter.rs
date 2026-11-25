@@ -101,7 +101,8 @@ impl Segmenter {
         let start = self.start;
         self.start += samples.len() as u64;
         let levels = samples.chunks(BLOCK).map(level).collect::<Vec<_>>();
-        let speech = levels.iter().any(|level| *level >= threshold(&levels));
+        let threshold = threshold(&levels);
+        let speech = levels.iter().any(|level| *level >= threshold);
         Cut {
             start,
             end: self.start,

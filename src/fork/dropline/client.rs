@@ -53,7 +53,11 @@ impl Failure {
     pub fn is_authorization(&self) -> bool {
         matches!(
             self,
-            Self::NotConfigured | Self::Keychain(_) | Self::TokenRejected(_) | Self::Unauthorized
+            Self::NotConfigured
+                | Self::Keychain(_)
+                | Self::TokenRejected(_)
+                | Self::Unauthorized
+                | Self::Http(403)
         )
     }
 }

@@ -142,9 +142,9 @@ so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same
 
 - Timed words convert as one run without separators, then each word gets back as many characters as it had:
   the conversion reads context, and a phrase a model split across words (`头` + `发`) would otherwise become
-  `頭發` instead of `頭髮`. A word's own leading and trailing spaces stay in place; between two Chinese
-  words they don't split the run, but beside an identifier, code, kana, or Hangul they still do, as in the
-  transcript's text. When the run's conversion changes its length, each word converts on its own and only
+  `頭發` instead of `頭髮`. A word's own leading and trailing spaces stay in place. A space joins the run
+  only where a Chinese character meets a Chinese character and neither word holds an identifier's `_`, a
+  backtick, kana, or Hangul; anywhere else it still separates the words, as in the transcript's text. When the run's conversion changes its length, each word converts on its own and only
   their count is logged. A transcript's text and each segment convert whole.
 - Annotate: the capture engine's transcriber and the 15 s replay's convert `text`, `segments`, and `words`,
   so `summary.md`, `scrawl.json`, each keyframe's narration, the clipboard, and Paste read converted text.
@@ -183,8 +183,8 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
 - Retries (ADR-0005): each request gets 60 s. A 429 waits for `Retry-After` (5 s without it, at most 60 s,
   at most 10 times) and doesn't count as a send; a 502–504, a network error, or a timeout is sent at most
   twice; a 401 fetches a new token once; other statuses and bad answers aren't resent. An authorization
-  failure (no provider, the token endpoint refusing, the Worker refusing the bearer, a second 401) stops
-  the meeting's sends.
+  failure (no provider, the token endpoint refusing, the Worker refusing the bearer, a second 401, or
+  Dropline answering 403) stops the meeting's sends.
 - Final pass: Stop cuts each track's tail and waits up to 3 minutes for the queue, and gives up at once when
   Hex is quitting; segments still unanswered fail. The local transcript is merged and echo-suppressed as
   before. Then each local entry whose middle falls in an answered segment takes the part of Dropline's text
@@ -194,8 +194,8 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   stretches. The ratio is logged as a number; no text is logged.
 - `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,
   `[start, end)` in 16 kHz WAV samples, whether it was sent, its state and text, and the memory clear's
-  outcome. It holds no audio or credentials, skips a last line cut short, and goes to the Trash with the
-  meeting.
+  outcome. It holds no audio or credentials, skips a last line cut short (even inside a character), and goes
+  to the Trash with the meeting.
 - Memory clear (ADR-0004, ADR-0007): once per meeting, after its last possible send, when a segment was sent
   and no clear outcome is recorded, Hex posts to `…/dropline-private/memory/clear` beside the token
   endpoint with the saved bearer. A token endpoint that doesn't end in `/dropline-private/token` is skipped.
@@ -206,7 +206,8 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
 - Quit and the next launch: quitting while a meeting records stops its sends. The next launch finishes the
   meeting from its WAV files as before; the final pass reads the file, reuses the answered segments, sends
   no audio, and runs the memory clear if it never ran. A meeting dropped without its final pass stops
-  sending and clears once its request in flight is over. Imported meetings and meetings recorded without
+  sending and clears once its request in flight is over. Transcribing a Dropline meeting again reuses its
+  answered segments the same way and sends no audio. Imported meetings and meetings recorded without
   Dropline have no file and stay local.
 
 ## Vocabulary

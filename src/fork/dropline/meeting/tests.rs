@@ -93,6 +93,17 @@ impl Transport for Fake {
             "qa-bearer"
         };
         assert_eq!(request.bearer, bearer, "{kind}");
+        if kind == "dictate" {
+            assert!(
+                request
+                    .content_type
+                    .is_some_and(|value| value.starts_with("multipart/form-data; boundary="))
+            );
+            assert!(
+                request.body.windows(4).any(|window| window == b"OggS"),
+                "the segment's Ogg audio"
+            );
+        }
         lock(&self.log).push(kind);
         match kind {
             "token" => Ok(response(
@@ -495,8 +506,14 @@ fn one_request_at_a_time_and_at_most_twenty_segments_wait() {
 #[test]
 fn the_final_pass_waits_at_most_its_budget_then_keeps_local_text() {
     let directory = scratch("budget");
-    let fake = Arc::new(Fake::new(|_| {
-        thread::sleep(Duration::from_millis(1_500));
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let opened = gate.clone();
+    let fake = Arc::new(Fake::new(move |_| {
+        let (open, changed) = &*opened;
+        let mut open = lock(open);
+        while !*open {
+            open = changed.wait(open).unwrap();
+        }
         Ok(segment("qa-太晚了"))
     }));
     let recording = start_with(
@@ -507,7 +524,14 @@ fn the_final_pass_waits_at_most_its_budget_then_keeps_local_text() {
         },
     );
     let mut position = 0;
-    feed(&directory, SYSTEM, &mut position, 16_000, &speech(40));
+    feed(
+        &directory,
+        SYSTEM,
+        &mut position,
+        16_000,
+        &track(&[(true, 110), (false, 40)]),
+    );
+    wait_until("the request", || fake.in_flight.load(Ordering::SeqCst) == 1);
     let entries = vec![entry(SYSTEM, 10_100, 10_700, "qa 本機")];
     let started = Instant::now();
     let (merged, _) = finish(&recording, ORIGINS, entries, 10_000, &[]);
@@ -519,12 +543,41 @@ fn the_final_pass_waits_at_most_its_budget_then_keeps_local_text() {
     assert_eq!(shown(&merged), [(SYSTEM, 100, 700, "qa 本機")]);
     // The clear waits for the request still in flight.
     assert_eq!(fake.log(), ["token", "dictate"]);
-    wait_until("the clear", || fake.log().contains(&"clear"));
+    *lock(&gate.0) = true;
+    gate.1.notify_all();
+    wait_until("the clear's outcome", || summary(&directory).clear_recorded);
     assert_eq!(fake.log(), ["token", "dictate", "clear"]);
     let summary = summary(&directory);
     assert_eq!(summary.segments[0].state, State::Failed);
     assert_eq!(summary.segments[0].reason.as_deref(), Some("定稿等待逾時"));
     assert!(summary.segments[0].sent && summary.clear_recorded);
+}
+
+#[test]
+fn dropline_forbidding_a_segment_stops_sending_and_still_clears_once() {
+    let directory = scratch("forbidden");
+    let fake = Arc::new(Fake::new(|_| Ok(response(403, "{}"))));
+    let recording = recording(&directory, fake.clone());
+    let mut position = 0;
+    feed(
+        &directory,
+        SYSTEM,
+        &mut position,
+        16_000,
+        &track(&[(true, 110), (false, 40), (true, 60)]),
+    );
+    let entries = vec![entry(SYSTEM, 10_100, 11_200, "qa 本機")];
+    let (merged, _) = finish(&recording, ORIGINS, entries, 10_000, &[]);
+    assert_eq!(shown(&merged), [(SYSTEM, 100, 1_200, "qa 本機")]);
+    assert_eq!(fake.log(), ["token", "dictate", "clear"]);
+    let summary = summary(&directory);
+    assert_eq!(
+        summary.segments[0].reason.as_deref(),
+        Some("Dropline 回應 HTTP 403")
+    );
+    assert!(summary.segments[0].sent);
+    assert!(!summary.segments[1].sent);
+    assert_eq!(summary.segments[1].state, State::Failed);
 }
 
 #[test]

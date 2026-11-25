@@ -527,25 +527,28 @@ impl Meeting {
     }
 
     /// Clears Dropline's memory on its own thread once the request in
-    /// flight is over, waiting at most [`DRAIN`].
+    /// flight is over, waiting at most [`DRAIN`]; right away when that
+    /// thread can't start.
     fn clear_later(self: Arc<Self>) {
-        let cleared = thread::Builder::new()
+        let meeting = Arc::clone(&self);
+        let waiter = thread::Builder::new()
             .name("hex-dropline-meeting-clear".into())
             .spawn(move || {
                 let deadline = Instant::now() + DRAIN;
-                let mut progress = self.progress();
+                let mut progress = meeting.progress();
                 while progress.sending && Instant::now() < deadline {
-                    progress = self
+                    progress = meeting
                         .changed
                         .wait_timeout(progress, Duration::from_millis(200))
                         .unwrap_or_else(|error| error.into_inner())
                         .0;
                 }
                 drop(progress);
-                self.clear_once();
+                meeting.clear_once();
             });
-        if let Err(error) = cleared {
-            tracing::warn!(%error, "could not clear Dropline's memory after a meeting");
+        if let Err(error) = waiter {
+            tracing::warn!(%error, "could not wait for the request in flight; clearing Dropline's memory now");
+            self.clear_once();
         }
     }
 
@@ -703,6 +706,7 @@ fn run_sender(meeting: &Meeting) {
             let mut progress = meeting.progress();
             loop {
                 if let Some(next) = progress.queue.pop_front() {
+                    progress.sending = true;
                     break next;
                 }
                 if progress.cut || progress.stopped.is_some() {
@@ -714,7 +718,6 @@ fn run_sender(meeting: &Meeting) {
                     .unwrap_or_else(|error| error.into_inner());
             }
         };
-        meeting.progress().sending = true;
         let session = super::new_session();
         let started = Instant::now();
         let outcome = client::transcribe_segment(
