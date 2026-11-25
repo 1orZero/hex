@@ -50,7 +50,8 @@ upstream's code unchanged. The `crates/capture/build.rs` row and the `clean_summ
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
 
-A trial merge of upstream `dev` at a394af280 (2026-11-25, not pushed) conflicts only at earlier hooks:
+Apart from screen text's hooks (see "Screen text"), a trial merge of upstream `dev` at a394af280
+(2026-11-25, not pushed) conflicts only at earlier hooks:
 `src/parakeet.rs`, `src/recognition.rs`, `src/rune_ui.rs`, `src/rune_ui/general.rs`, and
 `src/rune_ui/picker.rs` (Dropline dictation), and three files under `ios/`, which this branch no longer
 builds. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
