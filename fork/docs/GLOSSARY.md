@@ -15,7 +15,8 @@
 - **公開 API**：用使用者自己的 Dropline 金鑰呼叫 `POST /v1/dictate`。Derek Voice 的會議固定用這條。
 - **Dropline 記憶**：Dropline 帳號記住送過的內容。清除端點 `DELETE /client/memory` 一次清掉整個帳號的記憶；Derek Voice 在每場會議處理完後經 Worker `POST /v1/dropline-private/memory/clear` 清除。Hex 目前沒有清除。
 - **sounds like**：字典項目的其他拼法。只在 Parakeet 系列模型、Labs › Vocabulary biasing 開啟時於辨識層生效；Qwen3-ASR、Whisper 與 Dropline 都不使用。
-- **螢幕 OCR helper**：Derek 的外部程式 `io.veraze.hex-screen-ocr`（LaunchAgent），聽寫開始時擷取最前方視窗並用 Vision OCR，結果寫到 `~/.local/share/hex-lab/screen.json`，供 `Jev` 讀取。
+- **螢幕 OCR helper**：Derek 的外部程式 `io.veraze.hex-screen-ocr`（LaunchAgent），聽寫開始時擷取最前方視窗並用 Vision OCR，結果寫到 `~/.local/share/hex-lab/screen.json`，供 `Jev` 讀取。fork 的螢幕文字取代它；`Jev` 改讀 `screenLines` 後，用 `switch.sh off` 停用。
+- **螢幕文字**：fork 在聽寫錄音時，在 Hex 主行程用 Vision 讀前景視窗得到的文字行，由上到下、同一列由左到右，以 `screenLines` 交給這次聽寫的 transformations。只在有模式用 script transformation、而且已經有螢幕錄製權限時讀取。沒有讀取、讀取失敗，或 transformation 等了 500 ms 還沒讀完時，沒有這個欄位；視窗沒有文字時是空陣列。
 - **螢幕詞**：從螢幕文字挑出、像名稱的詞。Derek 的 `Jev` 最多取 30 個，用在辨識後的校正。
 - **Words on screen**：upstream `dev` 的 Labs 功能（`screen-vocabulary`），用 Accessibility 讀前景視窗文字，最多 24 個詞，只交給辨識偏置。尚未進正式版。
-- **HandlerContext**：transformations 收到的前後文物件，目前有 `source`、`application`、`browserHost`、`browserUrl`、`windowTitle`。
+- **HandlerContext**：transformations 收到的前後文物件，目前有 `source`、`application`、`browserHost`、`browserUrl`、`windowTitle`，以及 fork 在 Mac 加的 `screenLines`（螢幕文字）。

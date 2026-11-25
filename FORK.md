@@ -247,7 +247,8 @@ which is how the script is tried against Hex Test.
 While a dictation records, the Mac app reads the front window's text with Vision and passes the lines to
 that dictation's transformations as `context.screenLines`, top to bottom and each row left to right. It
 does what Derek's `hex-screen-ocr` LaunchAgent did from another process through
-`~/.local/share/hex-lab/screen.json`, for his `jev` transformation.
+`~/.local/share/hex-lab/screen.json`, for his `jev` transformation
+(`fork/docs/adr/0006-screen-ocr-fork-module.md`).
 
 - Only while some mode uses a script transformation, the condition under which Hex reads the window
   title. A capture reads once: when it becomes real (held past the hold threshold, a control start, or a
