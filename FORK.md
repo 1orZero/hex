@@ -227,6 +227,17 @@ does what Derek's `hex-screen-ocr` LaunchAgent did from another process through
   `screen-vocabulary`, on `dev`) reaches a release, check that its terms stay out of `vocabulary::terms()`
   too, or Dropline's prompt would carry them.
 
+A trial merge of upstream `dev` (`a394af280`) conflicts in five of the hook files. In
+`src/recognition/context_watch.rs`, Words on screen and Rewrite reads nearby text add `screen` and `caret`
+fields and split `finish` into `finish` and `finish_snapshot` the same way: keep both sides' fields, and
+in `finish` take `self.screen_text.finish()` before `finish_snapshot` and set `fork_screen_text` beside
+`screen_terms`. In `src/dictation/context.rs`, `src/dictation/processor.rs`, and `src/meeting/detection.rs`,
+`dev` adds `screen_terms`, `caret_text`, and `bundle_name` where the fork adds `fork_screen_text`: keep
+both. `dev` moves `handle_hotkey_action` from `src/recognition.rs` to `src/recognition/capture_actions.rs`:
+take `dev`'s `recognition.rs` and put `context.screen_text.raw(raw)` back after `context.begin()` there
+(the Dropline `prepare()` hook moves with it). `build.rs`, `src/personal_commands.rs`, and `hex.d.ts`
+merge cleanly.
+
 ## Daily pipeline
 
 `fork/daily.sh` runs on Derek's Mac from its own clone, `~/.hex-fork/repo` (created on the first run).
