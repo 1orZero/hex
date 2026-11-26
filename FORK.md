@@ -22,11 +22,13 @@ are upstream fixes carried before a release has them, not hooks.
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
 | `src/main.rs` | `mod fork;` (macOS) after `mod feedback;` | Compiles the fork module. |
-| `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples, submitted_at)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/parakeet.rs` | `record_history`: `model: crate::fork::dropline::history_model(completed.timings.total_started),` in place of `model: crate::history::dictation_model(),` (1 line) | History names what made the text: Dropline, or the local model marked as Dropline's fallback. `total_started` is the job's `submitted_at`, the same instant `job` received. Upstream `dev` moved `record_history` to `src/dictation/modes/output.rs`, which all three OSes build; there the hook becomes `model: crate::fork::dropline::history_model(input.total_started)` behind `#[cfg(target_os = "macos")]`, keeping upstream's line for the other OSes. |
 | `src/recognition.rs` | `fork::dropline::prepare()` after `worker.prepare_paste()` on capture start | Opens the Dropline session early (best effort). |
 | `src/macos_rune.rs` | `fork::dropline::deselect()` in `StatusItemAction::SelectModel` | Choosing a local model in the menu bar stops using Dropline. |
 | `src/rune_ui.rs` | `mod fork_dropline;`, `Ui.fork_dropline` field and its default, both behind `#[cfg(target_os = "macos")]` | The picker section's form state, which only macOS reads. |
 | `src/rune_ui/picker.rs` | `fork_dropline::model_chosen()` at the top of `choose`; `content.children(fork_dropline::section(ui, p))` after the body in `modal` | Choosing a local model in the picker stops using Dropline; the picker's last section adds, uses, and deletes the provider. |
+| `src/rune_ui/picker/compare.rs`, `src/rune_ui/picker/list.rs` | `#[cfg(target_os = "macos")] State::InUse if crate::rune_ui::fork_dropline::local_is_fallback(ui) => { … fallback_badge(p) }` before `State::InUse => facts::in_use(p),` (4 lines each) | While Dropline is in use, the local model's card and row read 失敗時改用 instead of In use. |
 | `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name)` in the Speech model button; `description.or_else(\|\| fork_dropline::status(ui, p))` after the description match | General names Dropline while it is in use and shows the last fallback. |
 | `src/capture_host.rs` | `scrawl_engine`: `let transcriber = crate::fork::annotate::traditional(transcriber);` first (macOS, 2 lines) | Annotate's capture engine transcribes through the conversion, whichever of Hex's model or Apple Speech `ChosenTranscriber` picks. |
 | `src/capture_host/replay.rs` | after `let transcriber = ChosenTranscriber;` in the replay's finish: `let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));` (macOS, 2 lines) | The 15 s replay transcribes with its own `ChosenTranscriber`, outside the engine. |
@@ -64,7 +66,10 @@ unchanged `src/meeting/sweep.rs`, and
 it adds a quit check and a `Recording` guard right after `ActiveMeeting::acquire` in `record`, so the
 `start` hook sits after `let given_title = …;` to stay clear of them. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
 `src/capture_host/words.rs`, but `scrawl_engine` and the replay's `let transcriber = ChosenTranscriber;`
-are still where the hooks expect them.
+are still where the hooks expect them. For History's speech source and the picker's 失敗時改用, a trial merge of
+`dev` at 2548a1b87 (2026-11-26, not pushed) merges `src/rune_ui/picker/compare.rs` and
+`src/rune_ui/picker/list.rs` cleanly; `src/parakeet.rs` already conflicted, and `dev` no longer has
+`record_history` there (its row says where the hook goes).
 
 ## Fork-only files
 
@@ -90,7 +95,7 @@ are still where the hooks expect them.
 
 A custom transcription provider, "Dropline 私人 API", in the Mac and iPhone apps. While it is selected, a
 finished dictation's recording is sent to Dropline's private API and its text replaces the local model's;
-the rest of the pipeline (corrections, modes, transformations, paste, History) is unchanged. When Dropline
+the rest of the pipeline (corrections, modes, transformations, paste) is unchanged. When Dropline
 fails (network error, timeout, a second 401 after one token refetch, a bad answer), the dictation uses the
 local model's text of the same recording and says why. An empty `final_text` is a valid answer: Dropline
 heard no speech, so the dictation inserts nothing and does not fall back.
@@ -116,6 +121,18 @@ heard no speech, so the dictation inserts nothing and does not fall back.
 - The local model still transcribes every clip while Dropline runs, so a fallback needs no second
   transcription. When Dropline answers, the local transcript still finishes in the background under its own
   deadlines. General and the model picker show the last fallback.
+- History's Speech model names what made each dictation's text: `Dropline 私人 API` when Dropline
+  answered, the local model followed by `（Dropline 失敗後改用）` when it fell back (for example
+  `Qwen3-ASR 1.7B（Dropline 失敗後改用）`), and the local model alone when Dropline wasn't selected.
+  History's search matches the same text (`hex history` doesn't print the model). Inference is how long
+  the text took: Dropline's request when it answered (the local transcript isn't waited for), or
+  Dropline's attempt plus the rest of the local transcript when it fell back. The fallback's model is read
+  when the local transcript finishes, so a model chosen before History records the dictation doesn't
+  rename it. Answers live in memory by submission instant until History records the dictation or 16
+  newer answers push them out (a dictation History never records: cancelled, no speech, a failed paste,
+  the local API's).
+- While Dropline is in use, the picker's local model reads 失敗時改用 where it read In use; Dropline's row
+  reads 使用中.
 - The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data
   folder); the endpoint and selection in `fork/dropline-private.json` in the data folder. Opus comes from
   macOS's encoder.
