@@ -383,12 +383,13 @@ pub fn history_model(submitted: Instant) -> Option<String> {
 }
 
 /// Dropline's text for the recording so far, for live text (blocks on the
-/// network). It goes in the session the dictation's final request uses,
-/// with the same vocabulary; a failure is only logged, by reason.
-pub(crate) fn live(samples: Vec<f32>) -> Option<String> {
+/// network). `session` is the one the dictation's final request uses
+/// ([`live_session`]), and the vocabulary is the same; a failure is only
+/// logged, by reason.
+pub(crate) fn live(samples: Vec<f32>, session: String) -> Option<String> {
     let job = Job {
         samples,
-        session: live_session(),
+        session,
         vocabulary: crate::dictation::vocabulary::terms(),
         submitted: Instant::now(),
     };
@@ -411,8 +412,9 @@ pub(crate) fn live(samples: Vec<f32>) -> Option<String> {
     }
 }
 
-/// The capture's prepared session, made now when its prepare didn't run.
-fn live_session() -> String {
+/// The capture's prepared session, made now (and kept for its final request)
+/// when its prepare didn't run.
+pub(crate) fn live_session() -> String {
     let mut state = state();
     if let Some((session, at)) = &state.prepared
         && at.elapsed() < SESSION_AGE
@@ -443,18 +445,28 @@ fn transcribe(job: &Job) -> Result<String, client::Failure> {
     )
 }
 
-/// The saved endpoint and bearer.
+/// The saved endpoint and bearer. The Keychain is read without holding the
+/// state, which the audio loop reads on every chunk through [`selected`].
 fn credentials() -> Result<(String, String), client::Failure> {
-    let mut state = state();
-    let endpoint = state
-        .provider
-        .as_ref()
-        .map(|provider| provider.endpoint.clone())
-        .ok_or(client::Failure::NotConfigured)?;
-    if state.bearer.is_none() {
-        state.bearer = keychain::read(&keychain_account()).map_err(client::Failure::Keychain)?;
+    let (endpoint, bearer) = {
+        let state = state();
+        let endpoint = state
+            .provider
+            .as_ref()
+            .map(|provider| provider.endpoint.clone())
+            .ok_or(client::Failure::NotConfigured)?;
+        (endpoint, state.bearer.clone())
+    };
+    if let Some(bearer) = bearer {
+        return Ok((endpoint, bearer));
     }
-    let bearer = state.bearer.clone().ok_or(client::Failure::NotConfigured)?;
+    let bearer = keychain::read(&keychain_account())
+        .map_err(client::Failure::Keychain)?
+        .ok_or(client::Failure::NotConfigured)?;
+    let mut state = state();
+    if state.provider.is_some() {
+        state.bearer.get_or_insert_with(|| bearer.clone());
+    }
     Ok((endpoint, bearer))
 }
 

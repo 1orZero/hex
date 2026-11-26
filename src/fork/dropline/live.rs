@@ -6,7 +6,9 @@
 //! model runs while it records. With live text wanted (Labs › Live text, or
 //! the first run's practice), the recording's live text reads Listening…
 //! until Dropline's first words, and every 4 s the whole recording so far
-//! goes to Dropline; a round is skipped while the previous request is out,
+//! goes to Dropline in the session the recording's final request uses (taken
+//! once, when the recording starts showing); a round is skipped while the
+//! previous request is out,
 //! and none goes once the recording passes 180 s, which keeps the last words
 //! shown. The recording's own live text holder shows it, so the text leaves
 //! with the recording.
@@ -25,7 +27,8 @@ const LIVE_SAMPLES: usize = 180 * 16_000;
 /// The recording being served.
 struct Live {
     recording: CaptureInstant,
-    shows: bool,
+    /// The Dropline session, while the recording shows live text.
+    session: Option<String>,
     next: Instant,
     answer: Arc<Mutex<Answer>>,
 }
@@ -59,8 +62,9 @@ impl DictationCapture {
             &mut lock(&LIVE),
             Instant::now(),
             || {
-                !cfg!(test)
-                    && (crate::labs::live_text() || crate::dictation::live_text::board_demanded())
+                let wanted = !cfg!(test)
+                    && (crate::labs::live_text() || crate::dictation::live_text::board_demanded());
+                wanted.then(crate::fork::dropline::live_session)
             },
             send,
         );
@@ -75,20 +79,22 @@ impl DictationCapture {
 }
 
 /// What the recording's live text should show now, if it changes.
+/// `session` is asked once per recording: the Dropline session when live
+/// text is wanted, else `None`.
 fn tick(
     recording: &Recording,
     live: &mut Option<Live>,
     now: Instant,
-    wanted: impl FnOnce() -> bool,
-    send: impl FnOnce(Vec<f32>, Arc<Mutex<Answer>>),
+    session: impl FnOnce() -> Option<String>,
+    send: impl FnOnce(Vec<f32>, String, Arc<Mutex<Answer>>),
 ) -> Option<Partial> {
     let mut shown = None;
     if live
         .as_ref()
         .is_none_or(|live| live.recording != recording.started_at)
     {
-        let shows = wanted();
-        if shows {
+        let session = session();
+        if session.is_some() {
             shown = Some(Partial {
                 stable: String::new(),
                 tentative: crate::desktop::i18n::tr("Listening…").to_owned(),
@@ -96,12 +102,13 @@ fn tick(
         }
         *live = Some(Live {
             recording: recording.started_at,
-            shows,
+            session,
             next: now + EVERY,
             answer: Arc::default(),
         });
     }
-    let live = live.as_mut().filter(|live| live.shows)?;
+    let live = live.as_mut()?;
+    let session = live.session.clone()?;
     let text = lock(&live.answer).text.take();
     if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
         shown = Some(Partial {
@@ -127,18 +134,18 @@ fn tick(
         }
         answer.waiting = true;
     }
-    send(audio.to_vec(), live.answer.clone());
+    send(audio.to_vec(), session, live.answer.clone());
     shown
 }
 
 /// Asks Dropline on its own thread; the capture shows the answer on its
 /// next chunk.
-fn send(audio: Vec<f32>, answer: Arc<Mutex<Answer>>) {
+fn send(audio: Vec<f32>, session: String, answer: Arc<Mutex<Answer>>) {
     let reply = answer.clone();
     let started = std::thread::Builder::new()
         .name("hex-dropline-live".into())
         .spawn(move || {
-            let text = crate::fork::dropline::live(audio);
+            let text = crate::fork::dropline::live(audio, session);
             let mut reply = lock(&reply);
             reply.waiting = false;
             if text.is_some() {
@@ -177,11 +184,14 @@ mod tests {
         }
     }
 
-    /// One recording's ticks: each request's length and reply slot, and
-    /// what its live text shows.
+    /// Ticks with live text wanted: each request's length, session, and
+    /// reply slot, what the live text shows, and how often a session was
+    /// asked for.
     struct Ticks {
         live: Option<Live>,
-        sent: Vec<(usize, Arc<Mutex<Answer>>)>,
+        session: &'static str,
+        sessions_taken: usize,
+        sent: Vec<(usize, String, Arc<Mutex<Answer>>)>,
         shown: Option<Partial>,
     }
 
@@ -189,6 +199,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 live: None,
+                session: "qa-session",
+                sessions_taken: 0,
                 sent: Vec::new(),
                 shown: None,
             }
@@ -196,12 +208,17 @@ mod tests {
 
         fn at(&mut self, capture: &DictationCapture, now: Instant) {
             let sent = &mut self.sent;
+            let taken = &mut self.sessions_taken;
+            let session = self.session;
             let shown = tick(
                 capture.recording.as_ref().unwrap(),
                 &mut self.live,
                 now,
-                || true,
-                |audio, answer| sent.push((audio.len(), answer)),
+                || {
+                    *taken += 1;
+                    Some(session.to_owned())
+                },
+                |audio, session, answer| sent.push((audio.len(), session, answer)),
             );
             if shown.is_some() {
                 self.shown = shown;
@@ -215,7 +232,7 @@ mod tests {
         }
 
         fn reply(&self, request: usize, text: &str) {
-            let mut answer = lock(&self.sent[request].1);
+            let mut answer = lock(&self.sent[request].2);
             answer.waiting = false;
             answer.text = Some(text.into());
         }
@@ -247,6 +264,13 @@ mod tests {
         ticks.at(&capture, t0 + 2 * EVERY);
         assert_eq!(ticks.sent.len(), 2);
         assert!(ticks.sent[1].0 >= 8 * SECOND, "{}", ticks.sent[1].0);
+        assert_eq!(ticks.sessions_taken, 1, "the session is taken once");
+        assert!(
+            ticks
+                .sent
+                .iter()
+                .all(|(_, session, _)| session == "qa-session")
+        );
     }
 
     #[test]
@@ -314,8 +338,8 @@ mod tests {
                 capture.recording.as_ref().unwrap(),
                 &mut live,
                 t0 + round * EVERY,
-                || false,
-                |_, _| sent += 1,
+                || None,
+                |_, _, _| sent += 1,
             );
             assert!(shown.is_none());
         }
@@ -333,11 +357,16 @@ mod tests {
         next.recording.as_mut().unwrap().started_at = CaptureInstant::from_nanos(2_000_000_000_000);
         ticks.reply(0, "qa-舊的");
         ticks.shown = None;
+        ticks.session = "qa-next-session";
         ticks.at(&next, t0 + EVERY + Duration::from_secs(1));
         assert_eq!(ticks.shows(), Some(("", "Listening…")));
         ticks.at(&next, t0 + EVERY + Duration::from_secs(2));
         assert_eq!(ticks.shows(), Some(("", "Listening…")));
         assert_eq!(ticks.sent.len(), 1, "the new recording waits its own 4 s");
+        ticks.at(&next, t0 + 2 * EVERY + Duration::from_secs(1));
+        assert_eq!(ticks.sent.len(), 2);
+        assert_eq!(ticks.sent[1].1, "qa-next-session");
+        assert_eq!(ticks.sessions_taken, 2);
     }
 
     /// Begin, feed, or finish commands the engine received.
