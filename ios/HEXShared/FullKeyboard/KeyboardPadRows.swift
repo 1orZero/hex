@@ -126,12 +126,8 @@ extension KeyboardLayout {
         if showsGlobe { lead.append((.globe, small, "globe")) }
         lead.append((pageKey.0, small, pageKey.1))
         lead.append((.hex, small, "hex"))
-        var trail: [(KeyKind, CGFloat, String)] = []
-        switch field {
-        case .text: break
-        case .url: trail += [(.character("."), lw, "."), (.character("/"), lw, "/")]
-        case .email: trail += [(.character("@"), lw, "@"), (.character("."), lw, ".")]
-        }
+        // Apple's docked web search row is its text row, `.` staying on row 3 (iPad mini, iOS 27.2).
+        var trail = field == .webSearch ? [] : field.keysRightOfSpace(width: lw)
         trail.append(showsEmoji && layer == .letters ? (.emoji, wide, "emoji") : (pageKey.0, wide, pageKey.1))
         trail.append((.dismiss, wide, "dismiss"))
         x = left
@@ -159,6 +155,7 @@ extension KeyboardLayout {
                 keys.append(KeyboardKey(kind: item.kind, row: row, frame: item.frame, hitFrame: hit, label: item.label, shifted: item.shifted))
             }
         }
+        KeyboardFlicks.add(to: &keys, layer: layer, language: language)
         return keys
     }
 }

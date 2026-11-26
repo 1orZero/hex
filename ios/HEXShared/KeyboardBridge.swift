@@ -3,6 +3,7 @@ import Foundation
 nonisolated enum KeyboardDictationState: String, Codable, Sendable {
     case offline
     case ready
+    case starting
     case recording
     case transcribing
     case failed
@@ -82,6 +83,8 @@ nonisolated enum KeyboardLaunchRequest: Equatable, Sendable {
     /// Jumps through Hex to iOS Settings › Apps › Hex so Paste from Other Apps can be set to
     /// Allow without hunting through Settings.
     case pasteSettings
+    /// Opens Hex at Home: the Hex key menu's Open Hex.
+    case home
     case startSession(requestedAt: TimeInterval?)
     case startRecording(
         jobID: String,
@@ -111,6 +114,8 @@ nonisolated enum KeyboardLaunchRequest: Equatable, Sendable {
             self = .translationSettings
         case "/paste-settings":
             self = .pasteSettings
+        case "/home":
+            self = .home
         case "/start":
             self = .startSession(requestedAt: requestedAt)
         case "/record":
@@ -128,14 +133,14 @@ nonisolated enum KeyboardLaunchRequest: Equatable, Sendable {
     /// Opens a page of Hex, starting no session.
     var opensPage: Bool {
         switch self {
-        case .setup, .translationSettings, .pasteSettings: true
+        case .setup, .translationSettings, .pasteSettings, .home: true
         case .startSession, .startRecording: false
         }
     }
 
     var requestedAt: TimeInterval? {
         switch self {
-        case .setup, .translationSettings, .pasteSettings:
+        case .setup, .translationSettings, .pasteSettings, .home:
             nil
         case .startSession(let ts), .startRecording(_, let ts, _):
             ts
@@ -162,6 +167,9 @@ nonisolated enum KeyboardLaunchRequest: Equatable, Sendable {
 
         case .pasteSettings:
             components.path = "/paste-settings"
+
+        case .home:
+            components.path = "/home"
 
         case .startSession(let requestedAt):
             components.path = "/start"
@@ -265,7 +273,7 @@ nonisolated struct KeyboardSnapshot: Codable, Equatable, Sendable {
     func isAvailable(at now: TimeInterval) -> Bool {
         let heartbeatFresh = now - heartbeat < 3.0 && heartbeat > 0
         guard heartbeatFresh else { return false }
-        if state == .recording || state == .transcribing {
+        if state == .starting || state == .recording || state == .transcribing {
             return true
         }
         return expiresAt > now
@@ -299,7 +307,7 @@ nonisolated struct KeyboardSnapshot: Codable, Equatable, Sendable {
     /// A recording or transcription Hex stopped heartbeating for. Nothing will finish it, and
     /// a new keyboard process reads it the same way: the heartbeat is wall-clock time.
     func isOrphanedJob(at now: TimeInterval) -> Bool {
-        guard state == .recording || state == .transcribing else { return false }
+        guard state == .starting || state == .recording || state == .transcribing else { return false }
         return heartbeat <= 0 || now - heartbeat > Self.orphanedJobTimeout
     }
 
@@ -379,6 +387,8 @@ nonisolated struct KeyboardHeldDictation: Codable, Equatable, Sendable {
     /// The field it was started in (`UITextDocumentProxy.documentIdentifier`), when UIKit named it.
     let document: UUID?
     let finishedAt: TimeInterval
+    /// Where its recording stopped when the keyboard closed during it (`KeyboardInterruptedRecording`).
+    var stoppedAfter: TimeInterval? = nil
 
     /// How long after it finished it still goes straight into its own field.
     static let insertWindow: TimeInterval = 30
@@ -413,10 +423,22 @@ nonisolated enum KeyboardJobWatchdog {
     static let captureSilence: TimeInterval = 6
     /// Apple Speech takes seconds for a long dictation; this is far past any of them.
     static let transcription: TimeInterval = 120
+    /// How long a capture the page says another sound interrupted may wait to come back. A
+    /// notification's tone is a second or two and Siri reading one out a few more, and the page
+    /// then needs up to a second to resume and open the microphone again; a call or an alarm
+    /// outlasts this, and the dictation finishes with what was said, as it always did.
+    static let captureInterruption: TimeInterval = 15
 
-    /// `lastProgress`: the stage's start, or the capture's last audio.
-    static func isStalled(_ stage: Stage, lastProgress: TimeInterval, now: TimeInterval) -> Bool {
-        now - lastProgress > (stage == .recording ? captureSilence : transcription)
+    /// `lastProgress`: the stage's start, or the capture's last audio. `interruptedSince`: when
+    /// the page said its capture was interrupted, nil while it isn't; that wait is never quiet.
+    static func isStalled(
+        _ stage: Stage,
+        lastProgress: TimeInterval,
+        interruptedSince: TimeInterval? = nil,
+        now: TimeInterval
+    ) -> Bool {
+        if stage == .recording, let interruptedSince { return now - interruptedSince > captureInterruption }
+        return now - lastProgress > (stage == .recording ? captureSilence : transcription)
     }
 }
 

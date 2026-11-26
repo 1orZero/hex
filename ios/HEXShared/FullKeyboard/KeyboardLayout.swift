@@ -6,15 +6,6 @@ nonisolated enum KeyboardLayer: Equatable, Hashable, Sendable {
     case symbols
 }
 
-/// The kind of text field, as far as the key rows care.
-nonisolated enum KeyboardFieldKind: Equatable, Sendable {
-    case text
-    /// Adds `.` and `/` right of space.
-    case url
-    /// Adds `@` and `.` right of space, matching Apple's iOS 26 email layout.
-    case email
-}
-
 nonisolated enum KeyboardOrientation: Equatable, Sendable {
     case portrait
     case landscape
@@ -50,6 +41,9 @@ nonisolated struct KeyboardKey: Equatable, Sendable {
     /// keys (, and !, . and ?), which show both (`KeyboardLayout.padPairs`), and the Dvorak
     /// punctuation keys (<, > and :).
     var shifted: String?
+    /// What pulling the key down types, drawn small above its label: Apple's key flicks on a
+    /// docked iPad (`KeyboardFlicks`); nil elsewhere.
+    var flick: String?
 
     var character: String? {
         if case .character(let text) = kind { return text }
@@ -171,7 +165,7 @@ nonisolated enum KeyboardPosture: Equatable, Sendable {
     }
 
     /// Apple splits its keyboard on the Duo unfolded and held upright (the inner screen wider
-    /// than tall); Hex does too, unless Settings › Experiments › Join the keyboard when
+    /// than tall); Hex does too, unless Settings › Labs › Join the keyboard when
     /// unfolded asks for the joined one. Apple's Split Keyboard preference can't be read.
     var splitsKeyboard: Bool { self == .unfoldedWide }
 
@@ -393,7 +387,7 @@ nonisolated struct KeyboardMetrics: Equatable, Sendable {
     /// `windowInset` is how far iOS set the keyboard in from each side of the screen (the Duo).
     /// `pad` is the iPad keyboard to draw, nil on an iPhone. `numberRow` adds Settings ›
     /// Keyboard › Number row's band above row 1, on an iPhone only (the iPad keeps Apple's rows).
-    /// `joinsUnfoldedKeyboard` is Settings › Experiments › Join the keyboard when unfolded: the
+    /// `joinsUnfoldedKeyboard` is Settings › Labs › Join the keyboard when unfolded: the
     /// Duo unfolded upright draws its joined rows rather than the split keyboard's.
     static func `for`(
         _ orientation: KeyboardOrientation,
@@ -613,18 +607,19 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
     /// unless it offers the one asked for.
     let letters: KeyboardLetterLayout
     let posture: KeyboardPosture
-    /// Settings › Experiments › Join the keyboard when unfolded: the Duo unfolded upright
+    /// Settings › Labs › Join the keyboard when unfolded: the Duo unfolded upright
     /// draws one keyboard rather than Apple's split one.
     let joinsUnfoldedKeyboard: Bool
-    /// Settings › Experiments › Dvorak punctuation keys: English's Dvorak letters gain comma
+    /// Settings › Labs › Dvorak punctuation keys: English's Dvorak letters gain comma
     /// and period on row 1 and a semicolon by the space bar. False on every other arrangement,
     /// and on a docked iPad, so those layouts are the same with the experiment on or off.
     let dvorakPunctuation: Bool
-    /// Settings › Experiments › Comma and period keys: a comma just left of the space bar and a
+    /// Settings › Labs › Comma and period keys: a comma just left of the space bar and a
     /// period just right of it on an iPhone's letters page in a text field. False where the
-    /// experiment never draws them (other pages and fields, an iPad, and the Dvorak letters with
-    /// Dvorak punctuation, which already puts them on row 1). True even where the space bar has
-    /// no room and they are skipped, so a bar too narrow is key for key the same either way.
+    /// experiment never draws them (other pages and fields, web search's with its own `.` among
+    /// them, an iPad, and Dvorak letters with Dvorak punctuation, which puts them on row 1). True
+    /// even where the space bar has no room and they are skipped, so a bar too narrow is key for
+    /// key the same either way.
     let commaPeriodKeys: Bool
     /// Where the Hex key sits: Settings › Keyboard › Hex key picks the strip's trailing
     /// (Right) or leading (Left) end.
@@ -677,8 +672,8 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
         self.joinsUnfoldedKeyboard = joinsUnfoldedKeyboard
         // Apple's own keys stand in for these on every other arrangement, and docked on an iPad.
         self.dvorakPunctuation = dvorakPunctuation && pad?.isDocked != true && letters == .dvorak
-        // An iPhone's letters page in a text field only, and not where Dvorak punctuation
-        // already puts comma and period on row 1.
+        // An iPhone's letters page in a text field only (not web search, whose `.` is Apple's),
+        // and not where Dvorak punctuation already puts comma and period on row 1.
         self.commaPeriodKeys = commaPeriodKeys && pad == nil && layer == .letters && field == .text
             && !self.dvorakPunctuation
         let innerWidth = width - 2 * self.horizontalInset
@@ -688,10 +683,22 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
         )
         if let availableHeight { metrics = metrics.fitted(toHeight: availableHeight) }
         self.metrics = metrics
+        if field.isNumberPad, metrics.pad == nil {
+            padLetterWidth = nil
+            split = nil
+            keys = Self.buildNumberPadKeys(
+                width: width, metrics: metrics, orientation: orientation, posture: posture, phoneSize: phoneSize,
+                decimal: field == .decimalPad, showsGlobe: showsGlobe, inset: self.horizontalInset, hexPlacement: hexPlacement,
+                joinsUnfoldedKeyboard: joinsUnfoldedKeyboard
+            )
+            return
+        }
+        // An iPad's number fields keep the 123 page, as Apple's iPad keyboard does.
+        let rowsField: KeyboardFieldKind = field.isNumberPad ? .text : field
         if metrics.pad?.isDocked == true {
             padLetterWidth = Self.padLetterWidth(innerWidth: innerWidth, metrics: metrics, layer: layer, language: language, letters: letters)
             self.keys = Self.buildPadKeys(
-                width: width, metrics: metrics, orientation: orientation, layer: layer, field: field,
+                width: width, metrics: metrics, orientation: orientation, layer: layer, field: rowsField,
                 showsGlobe: showsGlobe, showsEmoji: showsEmoji, inset: self.horizontalInset, language: language, letters: letters
             )
             self.split = nil
@@ -703,7 +710,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
                 width: width,
                 metrics: metrics,
                 layer: layer,
-                field: field,
+                field: rowsField,
                 showsGlobe: showsGlobe,
                 showsEmoji: showsEmoji,
                 inset: self.horizontalInset,
@@ -720,7 +727,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
                 width: width,
                 metrics: metrics,
                 layer: layer,
-                field: field,
+                field: rowsField,
                 showsGlobe: showsGlobe,
                 showsEmoji: showsEmoji,
                 inset: self.horizontalInset,
@@ -737,8 +744,9 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
 
     var isSplit: Bool { split != nil }
 
-    /// Whether this layout draws the experiment's row: Dvorak letters in a text field (a URL or
-    /// email field keeps its own `.`). Only then is its row 1 a key plane Adaptive touch learns.
+    /// Whether this layout draws the experiment's row: Dvorak letters in a text field (a URL,
+    /// email or web search field keeps its own `.`). Only then is its row 1 a key plane
+    /// Adaptive touch learns.
     var hasDvorakPunctuationRow: Bool { dvorakPunctuation && layer == .letters && letters == .dvorak && field == .text }
 
     /// The Duo folded draws Apple's key labels smaller: its 123 is 70 px wide there against
@@ -951,7 +959,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
         }
     }
 
-    /// `joinedUnfoldedWide` is the Duo unfolded upright with Settings › Experiments › Join the
+    /// `joinedUnfoldedWide` is the Duo unfolded upright with Settings › Labs › Join the
     /// keyboard when unfolded on: its rows keep the split keyboard's 39 pt keycaps, under the
     /// portrait bottom row's columns. `dvorakPunctuation` is the experiment of that name: comma
     /// and period on row 1 and a semicolon by the space bar. `commaPeriodKeys` is the other
@@ -974,8 +982,9 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
         let innerWidth = width - 2 * inset
         let rows = characterRows(for: layer, language: language, letters: letters)
         let dvorak = layer == .letters && letters == .dvorak
-        // Settings › Experiments › Dvorak punctuation: a URL or email field keeps its own `.`
-        // key by the space bar, so its row 1 stays Apple's rather than have a second one.
+        // Settings › Labs › Dvorak punctuation: a URL, email or web search field keeps
+        // its own `.` key by the space bar, so its row 1 stays Apple's rather than have a
+        // second one.
         let punctuation = dvorak && dvorakPunctuation
         let punctuationRow = punctuation && field == .text
         // Modifiers and the bottom row keep the 10-key sizes; an 11-key layout narrows only
@@ -1096,17 +1105,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
         if placement == .leftOfSpace {
             leading.append((.hex, functionW, "hex"))
         }
-        var trailing: [(KeyKind, CGFloat, String)] = []
-        switch field {
-        case .text:
-            break
-        case .url:
-            trailing.append((.character("."), referenceW, "."))
-            trailing.append((.character("/"), referenceW, "/"))
-        case .email:
-            trailing.append((.character("@"), referenceW, "@"))
-            trailing.append((.character("."), referenceW, "."))
-        }
+        var trailing = field.keysRightOfSpace(width: referenceW)
         if placement == .rightOfSpace {
             trailing.append((.hex, modW, "hex"))
         }
@@ -1143,15 +1142,18 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
             }
             add(.space, row: 3, x: spaceStart, w: max(lw, spaceEnd - spaceStart), label: "space")
             add(.returnKey, row: 3, x: returnStart, w: right - returnStart, label: "return")
-        } else if field == .text, m.keyHeight >= 40 || m.pad == .floating || joinedUnfoldedWide {
+        } else if field == .text || field == .webSearch && m.bottomRowReturnColumn == nil,
+                  m.keyHeight >= 40 || m.pad == .floating || joinedUnfoldedWide {
             // Apple's portrait bottom row stands on row 3's letter columns: 123 (and emoji, or
             // the globe on a Home-button iPhone) share the width from the edge to z's right edge,
             // the space bar runs from x to n, and return from m to the edge. With no emoji key
             // (Emoji not among the keyboards), Apple's 123 takes the whole first block. Hex's Hex
-            // key, left or right of space, comes out of the space bar.
+            // key, left or right of space, comes out of the space bar. In a web search field
+            // Apple's return is 1.75 keys' pitch wide and a `.` one pitch wide stands before it
+            // (iPhone 17 Pro, iOS 26.5 and 27.2), so the space bar ends a quarter pitch sooner.
             let pitch = referenceW + m.gap
             let blockEnd = left + 2.5 * pitch - m.gap
-            let returnStart = left + 7.5 * pitch
+            let returnStart = left + (field == .webSearch ? 8.25 : 7.5) * pitch
             // Docked on an iPad, Apple's hide-keyboard key ends the row: one letter wide, after return.
             let dismissW = m.pad?.isDocked == true ? referenceW : 0
             let returnEnd = dismissW > 0 ? right - dismissW - m.gap : right
@@ -1171,6 +1173,10 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
                 x += referenceW + m.gap
             }
             var spaceEnd = returnStart - m.gap
+            if field == .webSearch {
+                spaceEnd -= pitch
+                add(.character("."), row: 3, x: spaceEnd + m.gap, w: referenceW, label: ".")
+            }
             if placement == .leftOfSpace {
                 add(.hex, row: 3, x: x, w: modW, label: "hex")
                 x += modW + m.gap
@@ -1201,7 +1207,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
             }
         }
 
-        // Settings › Experiments › Dvorak punctuation: a semicolon just left of the space bar,
+        // Settings › Labs › Dvorak punctuation: a semicolon just left of the space bar,
         // taking its width from it, where the bar holds a letter-wide key and a space besides.
         if punctuation, let i = drawn.firstIndex(where: { $0.kind == .space && $0.row == 3 }) {
             let space = drawn[i].frame
@@ -1215,7 +1221,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
             }
         }
 
-        // Settings › Experiments › Comma and period keys: a comma just left of the space bar and
+        // Settings › Labs › Comma and period keys: a comma just left of the space bar and
         // a period just right of it, taking their width from it, where the bar still holds a
         // letter-wide key and a space besides both.
         if commaPeriodKeys { Self.addCommaPeriodKeys(to: &drawn, keyWidth: referenceW, gap: m.gap) }
@@ -1255,24 +1261,7 @@ nonisolated struct KeyboardLayout: Equatable, Sendable {
             }
         }
         if placement.isInStrip {
-            // A bare mark in a target wider than tall, inset like the suggestion pills; in Apple's
-            // bar the same mark, centred in its cell on the words' line.
-            let height = m.appleBar ? KeyboardMetrics.barHexKeyHeight : m.stripPillHeight
-            let hexWidth: CGFloat = 44
-            let cell = KeyboardMetrics.appleIconCellWidth
-            let x = m.appleBar
-                ? (placement == .stripLeading ? inset + (cell - hexWidth) / 2 : width - inset - (cell + hexWidth) / 2)
-                : (placement == .stripLeading ? left : right - hexWidth)
-            let y = m.appleBar ? m.stripTop + m.stripTextCenter - height / 2 : m.stripTop + m.stripInset
-            let frame = CGRect(x: x, y: y, width: hexWidth, height: height)
-            // In Apple's bar the key takes its whole cell across, up to the slot beside it.
-            let target = m.appleBar
-                ? CGRect(x: x - (cell - hexWidth) / 2, y: frame.minY - 4, width: cell, height: frame.height + 8)
-                : frame.insetBy(dx: -4, dy: -4)
-            // Up to the strip's top at least: the room above the pill belongs to the key too.
-            let targetTop = min(target.minY, m.stripTop)
-            let hitFrame = CGRect(x: target.minX, y: targetTop, width: target.width, height: top - targetTop)
-            keys.append(KeyboardKey(kind: .hex, row: -1, frame: frame, hitFrame: hitFrame, label: "hex"))
+            keys.append(stripHexKey(width: width, metrics: m, inset: inset, placement: placement))
         }
         return keys
     }
@@ -1336,8 +1325,8 @@ extension KeyboardLayout {
         typealias G = SplitGeometry
         // Dvorak splits like the other layouts, delete ending row 3 (Apple's split Dvorak unobserved).
         let rows = characterRows(for: layer, language: language, letters: letters)
-        // Settings › Experiments › Dvorak punctuation, as on the joined keyboard: a URL or email
-        // field keeps its own `.` key, so its row 1 stays Apple's.
+        // Settings › Labs › Dvorak punctuation, as on the joined keyboard: a URL, email or
+        // web search field keeps its own `.` key, so its row 1 stays Apple's.
         let punctuation = layer == .letters && letters == .dvorak && dvorakPunctuation
         let punctuationRow = punctuation && field == .text
         let left = inset + m.side
@@ -1434,16 +1423,7 @@ extension KeyboardLayout {
         }
         add(.space, row: 3, x: x, w: leftSpaceW, label: "space", rightHalf: false)
 
-        var trailing: [(KeyKind, CGFloat, String)] = []
-        switch field {
-        case .text: break
-        case .url:
-            trailing.append((.character("."), G.smallKeyWidth, "."))
-            trailing.append((.character("/"), G.smallKeyWidth, "/"))
-        case .email:
-            trailing.append((.character("@"), G.smallKeyWidth, "@"))
-            trailing.append((.character("."), G.smallKeyWidth, "."))
-        }
+        var trailing = field.keysRightOfSpace(width: G.smallKeyWidth)
         if !placement.isInStrip {
             trailing.append((.hex, G.smallKeyWidth, "hex"))
         }
@@ -1457,7 +1437,7 @@ extension KeyboardLayout {
             x += w + G.gap
         }
 
-        // Settings › Experiments › Comma and period keys: a comma just left of the left half's
+        // Settings › Labs › Comma and period keys: a comma just left of the left half's
         // space bar and a period just right of the right half's, taking their width from the
         // bars, where each still holds a letter-wide key and a space besides it.
         if commaPeriodKeys { Self.addSplitCommaPeriodKeys(to: &drawn, keyWidth: G.keyWidth, gap: G.gap) }

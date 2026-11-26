@@ -292,7 +292,10 @@ struct SetupSheet: View {
                 row(
                     title: "Microphone",
                     status: microphoneStatus,
-                    icon: monitor.microphone == .granted ? .done : .todo
+                    icon: monitor.microphone == .granted ? .done : .todo,
+                    // Under the row, as Full Access's note: beside Continue it cut the button
+                    // to "Contin…" on the smallest iPhone.
+                    note: microphoneStatus.isEmpty ? String(localized: "For dictation") : nil
                 ) {
                     // iOS asks right after this tap, so Hex's own button says Continue, never
                     // Allow (App Review 5.1.1(iv)), as onboarding's Set up Hex page does.
@@ -309,7 +312,7 @@ struct SetupSheet: View {
                     // A check or download that ended is never the last word: try it again here.
                     if modelFailed {
                         smallButton("Try again") {
-                            keyboardSpeech.start(retry: true) { dictation.engineName }
+                            keyboardSpeech.start(retry: true) { dictation.engine }
                             if case .failed = dictation.phase { dictation.prepareModel() }
                         }
                     }
@@ -391,7 +394,7 @@ struct SetupSheet: View {
         switch monitor.microphone {
         case .granted: String(localized: "Allowed")
         case .denied: String(localized: "Off")
-        default: String(localized: "For dictation")
+        default: ""
         }
     }
 

@@ -64,6 +64,9 @@ impl Feature {
             Self::NeutralVoice => {
                 "Rewrite dictations in chosen modes into plain, neutral wording on this Mac, so your writing style doesn't show"
             }
+            Self::ModelSwitchShortcut => {
+                "One shortcut that swaps dictation to another model and language (model_switch_other), and back"
+            }
             Self::SecondDictationShortcut => {
                 "Another shortcut that dictates like the main one (second_dictation_hotkey), such as a key on an external keyboard"
             }
@@ -103,6 +106,9 @@ impl Feature {
             }
             Self::HistoryStats => {
                 "Add a Stats button to History that summarizes the dictations you kept, with time saved against a typing speed, the local hour you dictate most, a year-long heatmap, and all-time totals from a daily rollup in usage.json (counts only, no text or app names) that outlives History's retention; off, the rollup is never written or read; the hex history stats command prints it too"
+            }
+            Self::HistoryStatsStrip => {
+                "Show the six headline numbers the Dictation stats dialog summarizes as one compact strip above History's list; it needs Dictation stats and reads its numbers"
             }
             Self::RecentDictations => {
                 "Copy one of your last five dictations from the menu bar, under Paste Last Dictation"
@@ -165,6 +171,9 @@ impl Feature {
             Self::MeetingImport => {
                 "Add an audio file to Meetings and turn it into text on this Mac"
             }
+            Self::TranscriptEdits => {
+                "Select lines in a saved meeting transcript and delete them; summaries, copies, and the Markdown file use what's left"
+            }
             Self::CapsLockDictation => {
                 "Press Caps Lock to start and stop dictation; its light shows when Hex records and writes the text"
             }
@@ -210,6 +219,9 @@ impl Feature {
             Self::StopPhrase => {
                 "Say a phrase at the end of a hands-free dictation to finish it; the phrase never reaches the pasted text"
             }
+            Self::ConfirmLongCancels => {
+                "Once a dictation has recorded for 10 seconds, the first press of its cancel shortcut keeps recording and asks, beside the HUD, for a second press; a second press within 3 seconds throws the dictation away. A shorter dictation still cancels at once"
+            }
             Self::HoldThroughKeys if cfg!(target_os = "windows") => {
                 "If a shortcut is made only of Ctrl, Alt, Shift, or the Windows key, with no letter or number key, pressing another key or clicking after the first second no longer ends the dictation; let go to finish. Before that first second a chord still ends it, and a shortcut with a key is unchanged"
             }
@@ -221,6 +233,9 @@ impl Feature {
             }
             Self::VocabularyFiles => {
                 "Import terms from a CSV file into the vocabulary sheet, merging them into the list, and export the list as a CSV file"
+            }
+            Self::VocabularyMenu => {
+                "Add a Vocabulary submenu to the menu bar, right under Speech Model: add a term or open the Vocabulary sheet, with the last five saved terms listed (macOS)"
             }
             Self::AnnotateAgentTools => {
                 "Adds hex annotate zoom, inspect, frames, and skill so coding agents can read a capture closely"
@@ -236,6 +251,36 @@ impl Feature {
             }
             Self::HudHeight => {
                 "Choose how high the dictation HUD sits above the Dock or the screen's bottom edge when its position is Bottom (labs.hud_bottom_gap, macOS)"
+            }
+            Self::IndicatorFollowsMouse => {
+                "While a dictation records and processes, the recording indicator follows the mouse pointer: just below it, above it near the screen's bottom, kept inside the screen's visible area, with live text beside it; Hidden still hides it, and turning it off restores the Top or Bottom position (macOS)"
+            }
+            Self::VoiceIsolation => {
+                "Open dictation's microphone through Apple's voice processing, so Control Center's Mic Mode can offer Voice Isolation and background noise is reduced (macOS; falls back to normal capture when voice processing won't start, and may lower other audio)"
+            }
+            Self::DictateWhileAnnotating => {
+                "While an Annotate capture records, the dictation shortcut dictates as usual: the text pastes into the app in front, History and Paste Last keep it, and the capture goes on recording, hearing the words too"
+            }
+            Self::StopAnyCallRecording if !cfg!(target_os = "macos") => {
+                "An offered or by-hand call recording stops on its own 30 s after its call app leaves the microphone, as Always record's Stop when the call ends does, which still governs Always record; a recording started by hand watches the one call app holding the microphone when it starts"
+            }
+            Self::StopAnyCallRecording => {
+                "An offered, calendar, or by-hand call recording stops on its own 30 s after its call app leaves the microphone, as Always record's Stop when the call ends does, which still governs Always record; a recording started by hand watches the one call app holding the microphone when it starts"
+            }
+            Self::ClipboardPhrase => {
+                "Each time you say the phrase in a normal dictation (\"my clipboard\" by default, at least two words), Hex puts the clipboard's text there in double quotes after processing and before it pastes, and Paste Last and History keep the same text. An empty clipboard leaves the words as spoken; raw and API output are left alone"
+            }
+            Self::MeetingMicrophoneMute => {
+                "Mute Hex's microphone while a meeting records: the call's audio keeps recording and transcribing, and the microphone's packets stay in place as silence until you unmute (macOS)"
+            }
+            Self::MeetingIndicatorDisplay => {
+                "Drag the meeting recording indicator to another display and it stays there, in the corner nearest where you let go. Off, it stays on the primary display (macOS and Windows)"
+            }
+            Self::MeetingAudioSource => {
+                "Record one app or one output device in a meeting instead of all computer audio (labs.meeting_audio_source_choice); a chosen source that isn't playing records silence until it returns"
+            }
+            Self::MiddleMouseDictation => {
+                "Hold the middle mouse button for half a second to start a hands-free dictation and long-press again to finish; the dictation shortcut can finish it too, and a long press finishes a hands-free dictation the shortcut started. Clicks still reach the app, and Escape cancels a hands-free dictation and stays out of the app (macOS)"
             }
         }
     }

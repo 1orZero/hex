@@ -2,7 +2,7 @@
 //! no retained entry needs a RAM slot. Row previews never authorize a paste.
 #![allow(dead_code, reason = "staged until the mixed shortcut is enabled")]
 
-use super::{HistoryEntry, HistoryKind, HistoryStore};
+use super::{HistoryKind, HistoryStore, PasteReuse};
 use crate::dictation::paste_last::LastDictation;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,6 +17,16 @@ pub(crate) struct Row {
     pub id: Id,
     pub ready_at: u64,
     pub preview: String,
+}
+
+/// What the picker's preview shows for a dictation. Display only: a paste
+/// resolves the row's ID again.
+pub(crate) struct Words {
+    pub text: String,
+    /// Dictated without processing.
+    pub raw: bool,
+    pub application: Option<String>,
+    pub model: Option<String>,
 }
 
 pub(super) struct Recovery {
@@ -37,23 +47,10 @@ impl HistoryStore {
         }
     }
 
-    pub(super) fn pasteable(&self, e: &HistoryEntry, now: u64) -> bool {
-        !self.retention.is_off()
-            && self
-                .retention
-                .cutoff(now)
-                .is_none_or(|cut| e.timestamp_ms >= cut)
-            && matches!(
-                e.kind,
-                HistoryKind::Dictation | HistoryKind::Raw | HistoryKind::Send
-            )
-            && !e.final_text.trim().is_empty()
-    }
-
     pub(crate) fn paste_rows(&self, count: usize, now: u64) -> Vec<Row> {
         let mut rows: Vec<_> = self
             .entries()
-            .filter(|e| self.pasteable(e, now))
+            .filter(|e| self.paste_reuse(e, now) != PasteReuse::None)
             .map(|e| {
                 (
                     e.timestamp_ms,
@@ -108,9 +105,25 @@ impl HistoryStore {
                 .map(|r| r.last.text()),
             Id::Retained(id) => self
                 .entries()
-                .find(|e| e.id == id && self.pasteable(e, now))
+                .find(|e| e.id == id && self.paste_reuse(e, now) != PasteReuse::None)
                 .map(|e| e.final_text.as_str()),
         }
+    }
+
+    /// The whole text and what History knows of it, for the picker's
+    /// preview. An unretained output has its text alone.
+    pub(crate) fn paste_words(&self, id: Id, now: u64) -> Option<Words> {
+        let text = self.resolve_paste(id, now)?.to_owned();
+        let entry = match id {
+            Id::Retained(id) => self.entries().find(|e| e.id == id),
+            Id::Session(_) => None,
+        };
+        Some(Words {
+            text,
+            raw: entry.is_some_and(|e| matches!(e.kind, HistoryKind::Raw)),
+            application: entry.and_then(|e| e.application.clone()),
+            model: entry.and_then(|e| e.model.clone()),
+        })
     }
 }
 
@@ -160,6 +173,9 @@ impl super::History {
     }
     pub(crate) fn resolve_paste(&self, id: Id, now: u64) -> Option<String> {
         self.synced().resolve_paste(id, now).map(str::to_owned)
+    }
+    pub(crate) fn paste_words(&self, id: Id, now: u64) -> Option<Words> {
+        self.synced().paste_words(id, now)
     }
     /// The ordered output worker hands its only unretained text to the same
     /// owner Clear and retention use. No file read or write to recover it.

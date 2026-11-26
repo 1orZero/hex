@@ -5,14 +5,18 @@ import UIKit
 /// `--snap-state full-keyboard-<state>[-dark|-dark-field]` is passed on Simulator.
 /// `-dark` is a dark app; `-dark-field` is a light app whose field asks for a dark keyboard.
 /// The layout follows `--dictation-language` (Automatic, English, without it), or
-/// `--keyboard-layout nb|es|de|it|fr|fr-CA|fr-CH|pt|pl|cs|hu|ro|ru|uk|el|sr-Latn|ko|en` pins it; drafts are in the layout's language.
+/// `--keyboard-layout nb|sv|es|de|it|fr|fr-CA|fr-CH|pt|pl|cs|sk|hu|nl|ro|ru|uk|el|sr-Latn|ko|en` pins it; drafts are in the layout's language.
 /// `--keyboard-letters qwerty|qwertz|azerty|dvorak|own` arranges its letters (its own without it).
-/// `--accent-key ø` (or Cyrillic `е`, `ь`, `ʼ`, Greek `α`, `σ`, `t` on Romanian, or `o` on Hungarian) picks the key the `accents` state holds; `--emoji-query kiss` what `emoji-search` types.
+/// `--accent-key ø` (or Cyrillic `е`, `ь`, `ʼ`, Greek `α`, `σ`, `t` on Romanian, `o` on Hungarian, or `j` on Dutch) picks the key the `accents` state holds; `--emoji-query kiss` what `emoji-search` types.
 /// Emoji states (`emoji`, `emoji-search`, `emoji-tones`, `emoji-food`, `emoji-strip`) turn
 /// Settings › Keyboard › Emoji on with a seeded history; `emoji-probe` prints the panel's
 /// footprint and latency (`EMOJI_PROBE` lines) for `simctl launch --console`.
+/// Debug builds only, for What's new's pictures: `emoji-word` (a word that names an emoji,
+/// being typed) and `strip-stopped` (a dictation the screen lock cut short, with Paste).
 struct FullKeyboardSnapshotStage: View {
     let scene: String
+    /// The `sequence` scene's dictation, once it lands in the field.
+    @State private var landed: String?
 
     static var layout: KeyboardLanguage {
         argument(after: "--keyboard-layout").flatMap(KeyboardLanguage.init(rawValue:))
@@ -65,6 +69,15 @@ struct FullKeyboardSnapshotStage: View {
 
     private var draft: String {
         switch Self.layout {
+        case .swedish:
+            return switch state {
+            case "inserted": "Kommer tio min sent, är hemma 19.30. Börja utan mig."
+            case "numbers": "Kommer tio min sent, hemma 19.3"
+            case "shift": "Kommer tio min sent. "
+            case "typing": "Kommer tio min se"
+            case "accents": Self.accentKey == "e" ? "Kaf" : "Bl"
+            default: "Kommer tio min sent, "
+            }
         case .norwegian:
             return switch state {
             case "inserted": "Kommer ti min for sent, er hjemme 19.30. Begynn uten meg."
@@ -137,6 +150,15 @@ struct FullKeyboardSnapshotStage: View {
             case "accents": Self.accentKey == "r" ? "P" : "Ka"
             default: "Přijdu o deset minut později, "
             }
+        case .slovak:
+            return switch state {
+            case "inserted": "Prídem o desať minút neskôr, doma budem o 19:30. Začnite bezo mňa."
+            case "numbers": "Prídem o desať minút neskôr, doma budem o 19:3"
+            case "shift": "Prídem o desať minút neskôr. "
+            case "typing": "Prídem o desať minút nesk"
+            case "accents": Self.accentKey == "o" ? "K" : "Ďakuj"
+            default: "Prídem o desať minút neskôr, "
+            }
         case .hungarian:
             return switch state {
             case "inserted": "Köszönöm szépen, találkozunk holnap!"
@@ -145,6 +167,15 @@ struct FullKeyboardSnapshotStage: View {
             case "typing": "Köszönöm szépen, találkozunk holn"
             case "accents": Self.accentKey == "e" ? "Káv" : "Köszön"
             default: "Köszönöm szépen, találkozunk "
+            }
+        case .dutch:
+            return switch state {
+            case "inserted": "Ik ben tien minuten later, om 19:30 thuis. Begin maar zonder mij."
+            case "numbers": "Ik ben tien minuten later, om 19:3"
+            case "shift": "Ik ben tien minuten later. "
+            case "typing": "Ik ben tien minuten la"
+            case "accents": Self.accentKey == "j" ? "Ví" : "Idee"
+            default: "Ik ben tien minuten later, "
             }
         case .romanian:
             return switch state {
@@ -203,6 +234,9 @@ struct FullKeyboardSnapshotStage: View {
         case .english:
             break
         }
+        #if DEBUG
+        if state == "emoji-word" { return "Congrats on the launch! Big smile" }
+        #endif
         if state.hasPrefix("emoji") {
             return state == "emoji-strip" ? "Happy birthday " : "Congrats on the launch, pizza tonight? "
         }
@@ -224,7 +258,7 @@ struct FullKeyboardSnapshotStage: View {
         let backdrop = FullKeyboardPalette(isDark: darkApp || darkField).backdrop
         VStack(spacing: 0) {
             Spacer()
-            Text(draft)
+            Text(landed ?? draft)
                 .font(.system(size: 15))
                 .foregroundStyle(ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -245,6 +279,9 @@ struct FullKeyboardSnapshotStage: View {
         }
         .background(canvas.ignoresSafeArea())
         .preferredColorScheme(darkApp ? .dark : .light)
+        .onReceive(NotificationCenter.default.publisher(for: MotionTrace.landed)) { note in
+            landed = (landed ?? draft) + ((note.object as? String) ?? "")
+        }
     }
 }
 
@@ -341,10 +378,13 @@ private struct FullKeyboardFixture: UIViewRepresentable {
                 let key = FullKeyboardSnapshotStage.accentKey
                 let serbian = FullKeyboardSnapshotStage.layout == .serbianLatin
                 let ownLetters: [String: String] = switch FullKeyboardSnapshotStage.layout {
+                case .swedish: ["e": "é", "ö": "ø", "ä": "æ"]
                 case .polish: ["e": "ę", "a": "ą", "c": "ć", "l": "ł", "n": "ń", "o": "ó", "s": "ś", "z": "ż"]
                 case .romanian: ["a": "ă", "i": "î", "s": "ș", "t": "ț"]
                 case .czech: ["e": "ě", "r": "ř", "u": "ů", "a": "á", "c": "č", "s": "š", "z": "ž", "y": "ý", "n": "ň"]
+                case .slovak: ["o": "ô", "a": "ä", "l": "ľ", "e": "é", "c": "č", "s": "š", "z": "ž", "y": "ý", "n": "ň"]
                 case .hungarian: ["a": "á", "e": "é", "i": "í", "o": "ő", "u": "ű"]
+                case .dutch: ["e": "ë", "i": "ï", "j": "j\u{0301}"]
                 case .greek: ["ε": "έ", "α": "ά", "ο": "ό", "η": "ή", "ι": "ί", "υ": "ύ", "ω": "ώ", "σ": "ς", "κ": "ϗ"]
                 default: [:]
                 }
@@ -388,6 +428,12 @@ private struct FullKeyboardFixture: UIViewRepresentable {
                 view.stripView.update(suggestions: [], showsUndo: false, statusText: nil, clipboard: .dictation)
             case "strip-code":
                 view.stripView.update(suggestions: [], showsUndo: false, statusText: nil, clipboard: .code(canPaste: true))
+            #if DEBUG
+            case "strip-stopped":
+                // What's new's picture: a dictation the screen lock cut short, offered with Paste.
+                model.offeredDictation = "should be home by 7:30. Start without me."
+                model.showStoppedNote(44)
+            #endif
             case "strip-selection":
                 view.stripView.isHidden = true
                 view.selectionStrip.update(TrackpadSelectionSession.Presentation(phase: .actions, before: "Running 10 ", selected: "min late", after: ", home by"), canUseClipboard: true)
@@ -439,6 +485,87 @@ private struct FullKeyboardFixture: UIViewRepresentable {
                     }
                 }
                 cycle(now)
+            case "strip-sequence":
+                // The bar's own transitions, set on the strip directly: words
+                // appearing, changing and leaving, an autocorrection's bubble, an emoji, a revert,
+                // Undo dictation in and out, and fast typing retargeting a word mid-swap.
+                let slow = MotionDebug.slow
+                if slow > 1 { view.window?.layer.speed = Float(1 / slow) }
+                if MotionDebug.tracing { MotionTrace.shared.start(view) }
+                func word(_ text: String, _ kind: KeyboardSuggestion.Kind) -> KeyboardSuggestion {
+                    KeyboardSuggestion(displayText: text, replacement: text, kind: kind)
+                }
+                func at(_ seconds: Double, _ mark: String, _ suggestions: [KeyboardSuggestion], undo: Bool = false) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5 + seconds * slow) {
+                        MotionTrace.shared.mark(mark)
+                        view.stripView.update(suggestions: suggestions, showsUndo: undo, statusText: nil)
+                    }
+                }
+                view.stripView.update(suggestions: [], showsUndo: false, statusText: nil)
+                at(0.3, "appear", [word("\u{201C}Th\u{201D}", .keepLiteral), word("The", .primary(autoReplace: false)), word("This", .secondary)])
+                at(1.1, "change", [word("\u{201C}The\u{201D}", .keepLiteral), word("They", .primary(autoReplace: false)), word("There", .secondary)])
+                at(1.9, "bubble", [word("\u{201C}Thw\u{201D}", .keepLiteral), word("The", .primary(autoReplace: true)), word("Thaw", .secondary)])
+                at(2.7, "emoji", [word("🙏", .emoji)])
+                at(3.5, "revert", [word("teh", .revert), word("then", .secondary), word("tech", .secondary)])
+                at(4.3, "undo", [], undo: true)
+                at(5.5, "undo-leaves", [word("I", .nextWord), word("The", .nextWord), word("I'm", .nextWord)])
+                at(6.3, "clear", [])
+                at(7.0, "type-r", [word("Ru", .primary(autoReplace: false))])
+                at(7.08, "type-u", [word("Run", .primary(autoReplace: false))])
+                at(7.16, "type-n", [word("Running", .primary(autoReplace: false))])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5 + 8.0 * slow) { MotionTrace.shared.finish() }
+            case "sequence", "cancel-sequence":
+                // Rest, then a recording on the demo voice (speech, pause, speech). `sequence`
+                // ends with ✓: transcribing, the text lands, the suggestions come back;
+                // `cancel-sequence` ends with ✕. `--motion-slow 4` plays all of it at a quarter.
+                let slow = MotionDebug.slow
+                if slow > 1 { view.window?.layer.speed = Float(1 / slow) }
+                if MotionDebug.tracing { MotionTrace.shared.start(view) }
+                let cancels = state == "cancel-sequence"
+                func at(_ seconds: Double, _ step: @escaping () -> Void) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5 + seconds * slow, execute: step)
+                }
+                // A finger on the Hex key for a moment, then the tap lifts and recording starts.
+                at(-0.15) { view.debugPressHexKey(true) }
+                at(0) {
+                    view.debugPressHexKey(false)
+                    MotionTrace.shared.mark("record")
+                    model.configureFixture(
+                        snapshot: KeyboardSnapshot(
+                            state: .recording,
+                            heartbeat: now,
+                            expiresAt: now + 15 * 60,
+                            recordingStartedAt: now,
+                            audioLevel: 0,
+                            loudnessDB: -120,
+                            jobID: "snap-job"
+                        ),
+                        now: now
+                    )
+                }
+                if cancels {
+                    at(2.6) {
+                        MotionTrace.shared.mark("cancel")
+                        model.configureFixture(snapshot: warm, now: now)
+                    }
+                    at(4.0) { MotionTrace.shared.finish() }
+                } else {
+                    at(3.6) {
+                        MotionTrace.shared.mark("done")
+                        model.configureFixture(
+                            snapshot: KeyboardSnapshot(state: .transcribing, heartbeat: now, expiresAt: now + 15 * 60, jobID: "snap-job"),
+                            now: now
+                        )
+                    }
+                    at(5.0) {
+                        MotionTrace.shared.mark("landed")
+                        let text = "should be home by 7:30."
+                        NotificationCenter.default.post(name: MotionTrace.landed, object: text)
+                        view.didInsertDictation(text)
+                        model.configureFixture(snapshot: warm, now: now)
+                    }
+                    at(6.6) { MotionTrace.shared.finish() }
+                }
             default:
                 break
             }
@@ -671,5 +798,56 @@ class FixtureTextTarget: KeyboardTextTarget {
 
     func adjustTextPosition(byCharacterOffset offset: Int) {
         cursorIndex = max(0, min(text.count, cursorIndex + offset))
+    }
+}
+/// Per-frame samples of the recording strip (`--motion-trace`), written as
+/// NDJSON to Documents/motion-trace.ndjson; `t` is scene time (real time over `--motion-slow`).
+@MainActor
+final class MotionTrace: NSObject {
+    static let shared = MotionTrace()
+    static let landed = Notification.Name("MotionTrace.landed")
+    private weak var view: FullKeyboardView?
+    private var link: CADisplayLink?
+    private var start: CFTimeInterval = 0
+    private var lines: [String] = []
+
+    func start(_ view: FullKeyboardView) {
+        self.view = view
+        start = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    private var now: Double { (CACurrentMediaTime() - start) / MotionDebug.slow }
+
+    func mark(_ event: String) {
+        guard link != nil else { return }
+        lines.append("{\"t\":\(now),\"event\":\"\(event)\"}")
+    }
+
+    @objc private func tick() {
+        guard let view else { return }
+        var sample = view.debugMotionSample()
+        sample["t"] = now
+        if let data = try? JSONSerialization.data(withJSONObject: sample, options: [.sortedKeys]),
+           let line = String(data: data, encoding: .utf8) {
+            lines.append(line)
+        }
+        if lines.count % 30 == 0 { flush() }
+    }
+
+    private func flush() {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("motion-trace.ndjson")
+        try? (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    func finish() {
+        guard let link else { return }
+        link.invalidate()
+        self.link = nil
+        flush()
     }
 }
