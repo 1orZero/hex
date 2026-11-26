@@ -108,7 +108,7 @@ fn tick(
         });
     }
     let live = live.as_mut()?;
-    let session = live.session.clone()?;
+    let session = live.session.as_ref()?;
     let text = lock(&live.answer).text.take();
     if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
         shown = Some(Partial {
@@ -134,7 +134,7 @@ fn tick(
         }
         answer.waiting = true;
     }
-    send(audio.to_vec(), session, live.answer.clone());
+    send(audio.to_vec(), session.clone(), live.answer.clone());
     shown
 }
 
