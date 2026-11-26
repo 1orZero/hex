@@ -257,6 +257,21 @@ pub(crate) fn join<E>(
     (kept, dropped)
 }
 
+/// Fails a final pass that Hex's quit left with audio sent and no memory
+/// clear recorded, so the meeting stays pending and the next launch, which
+/// finishes it from its files, clears.
+pub(crate) fn require_clear_outcome(directory: &Path) -> color_eyre::eyre::Result<()> {
+    if !crate::desktop::process_exit::quitting() || !sidecar::exists(directory) {
+        return Ok(());
+    }
+    let summary = sidecar::Summary::of(sidecar::read(directory));
+    color_eyre::eyre::ensure!(
+        !summary.sent() || summary.clear_recorded,
+        "Hex quit before Dropline's memory clear was recorded"
+    );
+    Ok(())
+}
+
 /// A meeting Hex quit in, finished at the next launch: the segments
 /// Dropline answered, and one memory clear if audio was sent and the clear
 /// never ran.

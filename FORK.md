@@ -37,6 +37,7 @@ are upstream fixes carried before a release has them, not hooks.
 | `src/meeting.rs` | `#[cfg(all(test, target_os = "macos"))] mod fork_tests;` at the end (3 lines) | The fork's tests that need the meeting module's private functions. |
 | `src/meeting.rs` | `record`: `let _dropline = crate::fork::dropline::meeting::start(&meeting_dir);` after `let given_title = …;` (macOS, 2 lines) | A meeting that starts while Dropline is selected sends its audio to Dropline; the guard lives until `record` returns, after the final pass. |
 | `src/meeting.rs` | `write_tracks`: `crate::fork::dropline::meeting::offer(directory, packet.source, packet.position, packet.sample_rate, &packet.samples)` after the packet's samples are written (macOS, 8 lines) | Hands each packet, at its place in the WAV (gaps padded), to the meeting's cutter without waiting. |
+| `src/meeting.rs` | `transcribe`: `crate::fork::dropline::meeting::require_clear_outcome(directory)?;` right after `transcript::transcribe(…)?` (macOS, 2 lines) | While Hex quits, a final pass that sent audio but has no memory clear recorded fails before anything is written, so the meeting stays pending and the next launch finishes it and clears. |
 | `src/meeting/transcript.rs` | `transcribe`: `let join_entries = \|entries, origin_ms, envelope\| { crate::fork::dropline::meeting::join(directory, manifest, entries, origin_ms, envelope, join_entries) };` before `Ok(join_entries(…))` (macOS, 11 lines) | The final pass, also when the next launch finishes a meeting: the local merge and echo suppression run as before, then answered segments put Dropline's words in the entries they cover. |
 | `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The iPhone dictation-finish point: Dropline first, the local engine on failure. |
 | `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: vocabularyTerms)` after `let vocabularyTerms = …` | Opens the Dropline session early (best effort). |
@@ -58,7 +59,8 @@ Apart from screen text's hooks (see "Screen text"), a trial merge of upstream `d
 (2026-11-25, not pushed) conflicts only at earlier hooks:
 `src/parakeet.rs`, `src/recognition.rs`, `src/rune_ui.rs`, `src/rune_ui/general.rs`, and
 `src/rune_ui/picker.rs` (Dropline dictation), and three files under `ios/`, which this branch no longer
-builds. The meeting Dropline hooks merge cleanly: `dev` still has `write_tracks` in `src/meeting.rs`, and
+builds. The meeting Dropline hooks merge cleanly: `dev` still has `write_tracks` and `transcribe`'s
+`transcript::transcribe(…)?` in `src/meeting.rs`, and
 it adds a quit check and a `Recording` guard right after `ActiveMeeting::acquire` in `record`, so the
 `start` hook sits after `let given_title = …;` to stay clear of them. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
 `src/capture_host/words.rs`, but `scrawl_engine` and the replay's `let transcriber = ChosenTranscriber;`
@@ -204,7 +206,8 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   any other failure as `failed` with its HTTP status or failure reason; the answer's other content isn't
   kept. When the final pass ends with a request still in flight, the clear waits for it (at most 65 s) on its
   own thread. When Hex is quitting, the clear runs at once (at most 10 s); if a request was still in flight,
-  its outcome isn't recorded, so the next launch clears again.
+  its outcome isn't recorded and the final pass fails before writing anything, so the meeting stays pending
+  and the next launch finishes it and clears again.
 - Quit and the next launch: quitting while a meeting records stops its sends. The next launch finishes the
   meeting from its WAV files as before; the final pass reads the file, reuses the answered segments, sends
   no audio, and runs the memory clear if it never ran. A meeting dropped without its final pass stops

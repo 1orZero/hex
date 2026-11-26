@@ -592,6 +592,13 @@ fn quitting_with_a_request_in_flight_child() {
     let summary = summary(&directory);
     assert_eq!(summary.segments[0].reason.as_deref(), Some("Hex 結束"));
     assert!(summary.sent() && !summary.clear_recorded);
+    // The final pass fails, so the meeting stays pending for the next launch.
+    assert!(require_clear_outcome(&directory).is_err());
+    sidecar::Writer::new(&directory).write(&Line::Clear {
+        result: "cleared".into(),
+        reason: None,
+    });
+    assert!(require_clear_outcome(&directory).is_ok());
 }
 
 #[test]
