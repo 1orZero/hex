@@ -4,8 +4,8 @@
 //!
 //! While Dropline is selected a capture opens no local stream, so no local
 //! model runs while it records. With live text wanted (Labs › Live text, or
-//! the first run's practice), the recording's live text reads Listening…
-//! until Dropline's first words, and every 4 s the whole recording so far
+//! the first run's practice), the recording's live text shows nothing until
+//! Dropline's first words, and every 4 s the whole recording so far
 //! goes to Dropline in the session the recording's final request uses (taken
 //! once, when the recording starts showing); a round is skipped while the
 //! previous request is out,
@@ -93,16 +93,9 @@ fn tick(
         .as_ref()
         .is_none_or(|live| live.recording != recording.started_at)
     {
-        let session = session();
-        if session.is_some() {
-            shown = Some(Partial {
-                stable: String::new(),
-                tentative: crate::desktop::i18n::tr("Listening…").to_owned(),
-            });
-        }
         *live = Some(Live {
             recording: recording.started_at,
-            session,
+            session: session(),
             next: now + EVERY,
             answer: Arc::default(),
         });
@@ -239,12 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn listening_shows_until_the_first_words_then_every_four_seconds_sends_the_recording() {
+    fn nothing_shows_until_the_first_words_then_every_four_seconds_sends_the_recording() {
         let (mut capture, mut through) = recording(1);
         let mut ticks = Ticks::new();
         let t0 = Instant::now();
         ticks.at(&capture, t0);
-        assert_eq!(ticks.shows(), Some(("", "Listening…")));
+        assert_eq!(ticks.shows(), None);
         assert!(ticks.sent.is_empty(), "nothing goes before 4 s");
         ticks.at(&capture, t0 + Duration::from_millis(3_990));
         assert!(ticks.sent.is_empty());
@@ -256,7 +249,7 @@ mod tests {
             "the whole recording so far: {}",
             ticks.sent[0].0
         );
-        assert_eq!(ticks.shows(), Some(("", "Listening…")));
+        assert_eq!(ticks.shows(), None);
         ticks.reply(0, "qa-第一段");
         ticks.at(&capture, t0 + EVERY + Duration::from_millis(10));
         assert_eq!(ticks.shows(), Some(("qa-第一段", "")));
@@ -274,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_answer_keeps_listening() {
+    fn an_empty_answer_shows_nothing() {
         let (capture, _) = recording(1);
         let mut ticks = Ticks::new();
         let t0 = Instant::now();
@@ -282,7 +275,7 @@ mod tests {
         ticks.at(&capture, t0 + EVERY);
         ticks.reply(0, " ");
         ticks.at(&capture, t0 + EVERY + Duration::from_millis(10));
-        assert_eq!(ticks.shows(), Some(("", "Listening…")));
+        assert_eq!(ticks.shows(), None);
     }
 
     #[test]
@@ -359,9 +352,9 @@ mod tests {
         ticks.shown = None;
         ticks.session = "qa-next-session";
         ticks.at(&next, t0 + EVERY + Duration::from_secs(1));
-        assert_eq!(ticks.shows(), Some(("", "Listening…")));
+        assert_eq!(ticks.shows(), None, "the old answer is dropped");
         ticks.at(&next, t0 + EVERY + Duration::from_secs(2));
-        assert_eq!(ticks.shows(), Some(("", "Listening…")));
+        assert_eq!(ticks.shows(), None);
         assert_eq!(ticks.sent.len(), 1, "the new recording waits its own 4 s");
         ticks.at(&next, t0 + 2 * EVERY + Duration::from_secs(1));
         assert_eq!(ticks.sent.len(), 2);
