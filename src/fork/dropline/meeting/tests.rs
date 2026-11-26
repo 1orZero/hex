@@ -594,6 +594,20 @@ fn quitting_with_a_request_in_flight_child() {
     assert!(summary.sent() && !summary.clear_recorded);
 }
 
+/// A segment sent and left unanswered when Hex quit.
+fn sent_before_quit() -> Line {
+    Line::Segment(SegmentLine {
+        track: SYSTEM,
+        seq: 1,
+        start: 0,
+        end: 16_000,
+        state: State::Failed,
+        sent: true,
+        text: None,
+        reason: Some("Hex 結束".into()),
+    })
+}
+
 #[test]
 fn the_next_launch_clears_once_for_each_meeting_a_quit_left_uncleared() {
     let root = scratch("owed");
@@ -607,16 +621,7 @@ fn the_next_launch_clears_once_for_each_meeting_a_quit_left_uncleared() {
         }
         directory
     };
-    let sent = Line::Segment(SegmentLine {
-        track: SYSTEM,
-        seq: 1,
-        start: 0,
-        end: 16_000,
-        state: State::Failed,
-        sent: true,
-        text: None,
-        reason: Some("Hex 結束".into()),
-    });
+    let sent = sent_before_quit();
     let cleared = Line::Clear {
         result: "failed".into(),
         reason: Some("HTTP 500".into()),
@@ -639,22 +644,31 @@ fn a_meeting_moved_to_the_trash_after_the_launch_scan_still_gets_its_clear() {
     let root = scratch("owed-expired");
     let directory = root.join("qa-expired");
     std::fs::create_dir_all(&directory).unwrap();
-    sidecar::Writer::new(&directory).write(&Line::Segment(SegmentLine {
-        track: SYSTEM,
-        seq: 1,
-        start: 0,
-        end: 16_000,
-        state: State::Failed,
-        sent: true,
-        text: None,
-        reason: Some("Hex 結束".into()),
-    }));
+    sidecar::Writer::new(&directory).write(&sent_before_quit());
     let owed = owed_clears(&root);
     std::fs::rename(&directory, scratch("owed-trash").join("qa-expired")).unwrap();
     let fake = Fake::texts(&[]);
     clear_owed_in(&owed, &fake, Some(&credentials()));
     assert_eq!(fake.log(), ["clear"]);
     assert!(!directory.exists());
+}
+
+#[test]
+fn the_launch_clear_skips_a_meeting_its_final_pass_cleared_after_the_scan() {
+    let root = scratch("owed-raced");
+    let directory = root.join("qa-raced");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut writer = sidecar::Writer::new(&directory);
+    writer.write(&sent_before_quit());
+    let owed = owed_clears(&root);
+    writer.write(&Line::Clear {
+        result: "cleared".into(),
+        reason: None,
+    });
+    let fake = Fake::texts(&[]);
+    clear_owed_in(&owed, &fake, Some(&credentials()));
+    assert!(fake.log().is_empty());
+    assert_eq!(sidecar::read(&directory).len(), 2);
 }
 
 #[test]

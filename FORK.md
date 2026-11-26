@@ -213,7 +213,8 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   its outcome isn't recorded. At launch, Hex clears once for each meeting that sent audio and has no clear
   outcome, such as one Hex quit while its clear waited, or one waiting for a final pass that doesn't run
   while Meetings is off or the model is missing. These meetings are found before retention moves expired
-  meetings to the Trash, so one that moves still gets its clear.
+  meetings to the Trash, so one that moves still gets its clear. The launch clear and a final pass check for
+  a recorded clear under one lock, so they never both clear one meeting.
 - Quit and the next launch: quitting while a meeting records stops its sends. The next launch finishes the
   meeting from its WAV files as before; the final pass reads the file, reuses the answered segments, sends
   no audio, and runs the memory clear if it never ran. A meeting dropped without its final pass stops

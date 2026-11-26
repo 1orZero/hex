@@ -75,6 +75,10 @@ struct Live {
 }
 
 static LIVE: Mutex<Vec<Live>> = Mutex::new(Vec::new());
+/// Held from checking a meeting's sidecar for a clear outcome until the
+/// outcome is recorded, so the launch clear and a final pass never both
+/// clear one meeting.
+static CLEARING: Mutex<()> = Mutex::new(());
 
 enum Input {
     Audio {
@@ -306,6 +310,19 @@ fn clear_owed_in(owed: &[PathBuf], transport: &dyn Transport, credentials: Optio
         if crate::desktop::process_exit::quitting() {
             return;
         }
+        clear_unless_recorded(directory, transport, credentials);
+    }
+}
+
+/// One memory clear for the meeting in `directory`, recorded there, unless
+/// a clear outcome is recorded by now.
+fn clear_unless_recorded(
+    directory: &Path,
+    transport: &dyn Transport,
+    credentials: Option<&Credentials>,
+) {
+    let _clearing = lock(&CLEARING);
+    if !sidecar::Summary::of(sidecar::read(directory)).clear_recorded {
         sidecar::Writer::new(directory).write(&clear(transport, credentials));
     }
 }
@@ -334,7 +351,7 @@ fn backfill(
     );
     let merged = merge(origins, before, kept, origin_ms, &summary.segments);
     if summary.sent() && !summary.clear_recorded {
-        sidecar::Writer::new(directory).write(&clear(transport, credentials));
+        clear_unless_recorded(directory, transport, credentials);
     }
     merged
 }
