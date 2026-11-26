@@ -144,6 +144,21 @@ final class ForkThreeLanguageTests: XCTestCase {
         XCTAssertNil(ForkThreeLanguage.plan(enabled: false, primary: "zh-HK", installed: all))
     }
 
+    /// Settings' "Cantonese" is `yue-CN`: the same three readings, Cantonese first.
+    func testCantoneseInAnyRegionUsesTheThreeLanguages() {
+        let all = ["en-US": true, "zh-HK": true, "zh-TW": true]
+        XCTAssertEqual(
+            ForkThreeLanguage.plan(enabled: true, primary: "yue-CN", installed: all),
+            ["zh-HK", "en-US", "zh-TW"]
+        )
+        XCTAssertNil(ForkThreeLanguage.plan(
+            enabled: true,
+            primary: "yue-CN",
+            installed: ["en-US": true, "zh-HK": false, "zh-TW": true]
+        ))
+        XCTAssertNil(ForkThreeLanguage.plan(enabled: false, primary: "yue-CN", installed: all))
+    }
+
     /// Nil sends the dictation down the existing Two-language path, then single-language.
     func testAMissingModelOrAnotherLanguageKeepsTheExistingDictation() {
         XCTAssertNil(ForkThreeLanguage.plan(

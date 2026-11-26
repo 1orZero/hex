@@ -179,7 +179,9 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
 `zh-HK`, and `zh-TW` at once.
 
 - When: Labs › Two-language dictation is on, the dictation language resolves to one of the three on
-  `SpeechTranscriber`, and all three `SpeechTranscriber` models are installed and not set aside.
+  `SpeechTranscriber` or is Cantonese in any region (Settings' "Cantonese" is `yue-CN`, which counts
+  as `zh-HK` and still gets the same three readings), and all three `SpeechTranscriber` models are
+  installed and not set aside.
   Otherwise, including any missing model, dictation takes upstream's Two-language path, then its
   single-language path, as before. Hex downloads only the dictation language's model: pick `zh-HK` and
   `zh-TW` once each as the dictation language (or install them elsewhere) to get all three.
