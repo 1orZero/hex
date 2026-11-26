@@ -461,3 +461,51 @@ fn a_dropline_meeting_through_the_wav_writer_keeps_times_sources_and_order() {
         assert_eq!(after.matches(text).count(), 1, "{after}");
     }
 }
+
+/// Upstream joins a hard cut's segments at the middle of the overlap by their
+/// start, so a model that answers each chunk as one segment would keep only
+/// the first chunk (`fork::meeting_seam`).
+#[test]
+fn a_hard_cut_keeps_the_new_speech_of_a_chunk_answered_as_one_segment() {
+    use super::transcript::{ReplayChunk, replay_envelope, replay_track, replay_views};
+
+    let chunk = |start: usize, overlap: usize, tail: usize, text: &str| -> ReplayChunk {
+        serde_json::from_value(serde_json::json!({
+            "start": start,
+            "overlap": overlap,
+            "tail": tail,
+            "len": 160_000,
+            "transcript": {
+                "text": text,
+                "segments": [{ "startMs": 0, "endMs": 10_000, "text": text }],
+                "words": []
+            }
+        }))
+        .unwrap()
+    };
+    let chunks = [
+        chunk(0, 0, 32_000, "qa-今天我們討論會議逐字稿的修正方式"),
+        chunk(
+            128_000,
+            32_000,
+            32_000,
+            "逐字稿的修正方式需要保留後面的文字",
+        ),
+        chunk(256_000, 32_000, 0, "後面的文字也要完整出現"),
+    ];
+    let system = replay_track(MeetingSource::System, &chunks, u64::MAX);
+    let microphone = replay_track(MeetingSource::Microphone, &[], u64::MAX);
+    let (_, _, entries) = replay_views(&system, &microphone, &replay_envelope(&[], &[]));
+    let shown = entries
+        .iter()
+        .map(|entry| (entry.start_ms, entry.end_ms, entry.text.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shown,
+        [
+            (0, 10_000, "qa-今天我們討論會議逐字稿的修正方式"),
+            (9_000, 18_000, "需要保留後面的文字"),
+            (17_000, 26_000, "也要完整出現"),
+        ]
+    );
+}

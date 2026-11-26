@@ -3,5 +3,6 @@
 
 pub mod annotate;
 pub mod dropline;
+pub mod meeting_seam;
 pub mod screen_text;
 pub mod traditional;
