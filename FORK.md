@@ -124,10 +124,10 @@ heard no speech, so the dictation inserts nothing and does not fall back.
   the local model transcribes the finished clip only after Dropline fails. The local model stays loaded for
   that fallback. General and the model picker show the last fallback.
 - Live text (`src/fork/dropline/live.rs`): with Labs › Live text on (or during the first run's practice),
-  a hotkey capture past its hold threshold shows Listening… until Dropline's first words, and every 4 s
+  a hotkey capture past its hold threshold shows no live text until Dropline's first words, and every 4 s
   sends the whole recording so far to Dropline in the session and with the vocabulary the final request
   uses. That is at most 15 requests a minute: a round is skipped, not made up, while the previous request
-  is out, and none goes once the recording passes 180 s, which keeps the last words shown. An empty answer keeps Listening…; a failed one is
+  is out, and none goes once the recording passes 180 s, which keeps the last words shown. An empty answer changes nothing; a failed one is
   logged by reason and changes nothing. With Live text off, nothing is sent until the recording finishes.
 - History's Speech model names what made each dictation's text: `Dropline 私人 API` when Dropline
   answered, the local model followed by `（Dropline 失敗後改用）` when it fell back (for example
