@@ -66,13 +66,8 @@ pub(super) enum Pane {
     /// Recorded calls and their settings, or the opt-in (macOS beta).
     Meetings,
     History,
-    /// The shots and recordings Labs › Screenshots saved (macOS, while
-    /// it's on).
-    #[cfg(hex_capture)]
-    Captures,
-    /// Annotate (Scrawl's captures inside Hex): the switch, shortcuts,
-    /// permission, transcriber, folder, retention, and Scrawl's own app.
-    /// Dev builds, macOS and Linux only.
+    /// Annotate (Scrawl's captures inside Hex): past annotations (or captures
+    /// when Labs › Screenshots is on) and its settings, switched in the header.
     #[cfg(hex_capture)]
     Annotate,
     /// The Hex Microphone's driver, tuning, and try-it demo (macOS, while
@@ -94,8 +89,6 @@ impl Pane {
         Pane::Meetings,
         Pane::History,
         #[cfg(hex_capture)]
-        Pane::Captures,
-        #[cfg(hex_capture)]
         Pane::Annotate,
         Pane::VoiceFilter,
         Pane::HudLab,
@@ -108,16 +101,18 @@ impl Pane {
             Pane::HudLab | Pane::Activity => false,
             // Labs › Modes editor; scenes render the pane without the lab.
             Pane::Modes => ui.settings.labs.modes_editor,
-            Pane::Meetings => caps.meetings && meetings::available(ui),
+            // On a Mac an ordinary item even while off: the pane itself
+            // offers to turn it on. Elsewhere it shows once it is on.
+            Pane::Meetings => {
+                caps.meetings
+                    && (meetings::available(ui)
+                        || (caps.os == super::platform::Os::Macos
+                            && crate::labs::Feature::Meetings.managed().is_none()))
+            }
             // On from Labs (dev builds), or while its driver is installed.
             Pane::VoiceFilter => caps.fun && fun::running(ui),
             #[cfg(hex_capture)]
             Pane::Annotate => ui.platform.scrawl.is_some(),
-            // The Lab turns on only on macOS.
-            #[cfg(all(target_os = "macos", hex_capture))]
-            Pane::Captures if ui.history.unified.enabled => false,
-            #[cfg(hex_capture)]
-            Pane::Captures => ui.settings.labs.screenshots,
             _ => true,
         }
     }
@@ -128,8 +123,6 @@ impl Pane {
             Pane::Output => tr("Output"),
             Pane::Modes => tr("Modes"),
             Pane::History => tr("History"),
-            #[cfg(hex_capture)]
-            Pane::Captures => tr("Captures"),
             Pane::Meetings => tr("Meetings"),
             #[cfg(hex_capture)]
             Pane::Annotate => tr("Annotate"),
@@ -146,8 +139,6 @@ impl Pane {
             Pane::Output => "nav-output",
             Pane::Modes => "nav-modes",
             Pane::History => "nav-history",
-            #[cfg(hex_capture)]
-            Pane::Captures => "nav-captures",
             Pane::Meetings => "nav-meetings",
             #[cfg(hex_capture)]
             Pane::Annotate => "nav-annotate",
@@ -164,8 +155,6 @@ impl Pane {
             Pane::Output => &OUTPUT_ICON,
             Pane::Modes => &MODES_ICON,
             Pane::History => &HISTORY_ICON,
-            #[cfg(hex_capture)]
-            Pane::Captures => &captures::CAPTURES_ICON,
             Pane::Meetings => &MEETINGS_ICON,
             #[cfg(hex_capture)]
             Pane::Annotate => &SCRAWL_ICON,
@@ -182,12 +171,12 @@ impl Pane {
 const SIDEBAR_TOP: f32 = if cfg!(target_os = "macos") {
     40.0
 } else {
-    12.0
+    20.0
 };
 
 /// Sidebar rows follow OpenCode Desktop's settings navigation: 28 pt rows
 /// with a 4 pt gap, so each row's highlight stays its own.
-pub(super) const NAV_ROW_HEIGHT: f32 = 28.0;
+pub(super) const NAV_ROW_HEIGHT: f32 = METRICS.row_h_compact;
 pub(super) const NAV_ROW_GAP: f32 = 4.0;
 
 /// On macOS the sidebar and the pane header stand in for the title bar the
@@ -206,7 +195,7 @@ pub(super) fn title_bar(element: El) -> El {
 pub(super) fn pane_header(p: Paint, title: &str, switch: Option<El>, actions: Vec<El>) -> El {
     title_bar(row())
         .key("pane-header")
-        .h(52.0)
+        .h(METRICS.header_h)
         .px(METRICS.gutter)
         .gap(8.0)
         .center_y()
@@ -215,7 +204,7 @@ pub(super) fn pane_header(p: Paint, title: &str, switch: Option<El>, actions: Ve
                 .key("pane-title")
                 .role("heading")
                 .level(1)
-                .font(p.k.ty.body_medium)
+                .font(p.title())
                 .color(p.text())
                 .shrink()
                 .truncate(),
@@ -253,8 +242,7 @@ pub(super) fn sidebar(ui: &Ui, p: Paint) -> El {
         .h_full()
         .pt(SIDEBAR_TOP - NAV_ROW_GAP / 2.0)
         .pb(12.0)
-        .pl(10.0)
-        .pr(6.0)
+        .px(8.0)
         .child(nav.grow(1.0))
         .child(footer(ui, p))
 }
@@ -282,6 +270,7 @@ fn footer(ui: &Ui, p: Paint) -> El {
                     .truncate(),
             )
     };
+    let build = ui.build_preview.unwrap_or_else(build_kind);
     let status = ui.view.as_ref().map(|view| &view.update_status);
     let status = match status {
         None
@@ -334,13 +323,10 @@ fn footer(ui: &Ui, p: Paint) -> El {
         Some(DesktopUpdateStatus::Downloading) => {
             Some(line("update-status", tr("Downloading update"), p.faint()))
         }
+        Some(DesktopUpdateStatus::SourceBuild) if matches!(build, BuildKind::Local { .. }) => None,
         Some(DesktopUpdateStatus::SourceBuild) => Some(line(
             "update-status",
-            if ui.build_preview.unwrap_or_else(build_kind) == BuildKind::Local {
-                tr("Local build · updates off")
-            } else {
-                tr("Updated from your source checkout")
-            },
+            tr("Updated from your source checkout"),
             p.faint(),
         )),
         Some(DesktopUpdateStatus::PackageManager) => Some(line(
@@ -358,7 +344,22 @@ fn footer(ui: &Ui, p: Paint) -> El {
                 .py(2.0),
         ),
     };
-    let version = version_line(ui, p, line("version", &version_label(), p.faint()));
+    let version = match build {
+        BuildKind::Local { version, commit } => {
+            let words = tr_fill("{} · Local build", version);
+            let detail = tr("Local build · updates off");
+            let version = line("version", &words, c.text_muted)
+                .role("group")
+                .label(words)
+                .help(detail)
+                .help_above();
+            match commit {
+                Some(sha) => version.help_row(sha),
+                None => version,
+            }
+        }
+        _ => version_line(ui, p, line("version", &version_label(), p.faint())),
+    };
     let version = if host::QUIT_IN_WINDOW {
         // Long build labels and translations get a second line rather than
         // crowding the badge or overlaying Quit's hit target.
@@ -391,7 +392,7 @@ fn footer(ui: &Ui, p: Paint) -> El {
         .children(sidebar_update::blocked(ui, p))
 }
 
-/// The version itself links to this build's notes.
+/// The version itself links to what changed since this build.
 fn release_notes_url(ui: &Ui) -> Option<String> {
     // A source or test build has no published notes for its code.
     if ui.build_preview.unwrap_or_else(build_kind) != BuildKind::Release {
@@ -406,8 +407,7 @@ fn release_notes_url(ui: &Ui) -> Option<String> {
     crate::updater::notes::release_notes_url(version)
 }
 
-/// A local or test build marks itself beside the version, quietly: an outline
-/// pill with a dot, in muted theme tokens.
+/// Published releases can link to their notes; test builds keep their badge.
 fn version_line(ui: &Ui, p: Paint, version: El) -> El {
     if let Some(url) = release_notes_url(ui) {
         return version
@@ -426,11 +426,9 @@ fn version_line(ui: &Ui, p: Paint, version: El) -> El {
                 }
             });
     }
-    let badge = match ui.build_preview.unwrap_or_else(build_kind) {
-        BuildKind::Release => return version,
-        BuildKind::Local => tr("Local"),
-        BuildKind::Test => tr("Test"),
-    };
+    if ui.build_preview.unwrap_or_else(build_kind) != BuildKind::Test {
+        return version;
+    }
     let c = &p.k.c;
     row()
         .key("version-row")
@@ -444,7 +442,7 @@ fn version_line(ui: &Ui, p: Paint, version: El) -> El {
                 .px(6.0)
                 .gap(4.0)
                 .center_y()
-                .radius(8.0)
+                .radius(p.k.radius.lg)
                 .border(p.hair.max(0.5), c.border_muted)
                 .child(
                     controls::status_dot(c.text_faint)
@@ -452,7 +450,7 @@ fn version_line(ui: &Ui, p: Paint, version: El) -> El {
                         .radius(2.5),
                 )
                 .child(
-                    text(badge)
+                    text(tr("Test"))
                         .key("label")
                         .font(p.k.ty.small)
                         .color(c.text_muted),
@@ -465,13 +463,19 @@ fn version_line(ui: &Ui, p: Paint, version: El) -> El {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum BuildKind {
     Release,
-    Local,
+    Local {
+        version: &'static str,
+        commit: Option<&'static str>,
+    },
     Test,
 }
 
 fn build_kind() -> BuildKind {
     if crate::app_paths::is_local_build() {
-        BuildKind::Local
+        BuildKind::Local {
+            version: crate::VERSION,
+            commit: option_env!("HEX_COMMIT"),
+        }
     } else if option_env!("HEX_TEST_BUILD") == Some("1") {
         BuildKind::Test
     } else {
@@ -482,20 +486,13 @@ fn build_kind() -> BuildKind {
 /// The footer's lines: as tall as each other, so a check moves nothing.
 pub(super) const FOOTER_LINE: f32 = 20.0;
 
-/// Test and local builds also name their commit: main moves past a release without
+/// A test build names its commit too: dev moves past a release without
 /// changing the version.
 fn version_label() -> String {
-    // Goldens render a fixed version: a local build's names its commit.
+    // Goldens render a fixed version.
     let version = if cfg!(test) { "0.0.0" } else { crate::VERSION };
     match option_env!("HEX_COMMIT") {
-        Some(commit) => {
-            let kind = if crate::app_paths::is_local_build() {
-                "local"
-            } else {
-                "test"
-            };
-            tr_fill("Version {}", &format!("{version} ({kind} {commit})"))
-        }
+        Some(commit) => tr_fill("Version {}", &format!("{version} (test {commit})")),
         None => tr_fill("Version {}", version),
     }
 }

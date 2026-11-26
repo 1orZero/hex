@@ -166,7 +166,7 @@ private final class GlobeKeycapView: UIView {
         context.fillKeycap(bounds, fill: palette.keyFill, shadow: palette.keyShadow, radius: cornerRadius)
         let config = UIImage.SymbolConfiguration(pointSize: isLandscape ? 16 : 19, weight: .regular)
         guard let image = UIImage(systemName: "globe", withConfiguration: config)?
-            .withTintColor(palette.textBase, renderingMode: .alwaysOriginal) else { return }
+            .withTintColor(palette.keyText, renderingMode: .alwaysOriginal) else { return }
         image.draw(at: CGPoint(x: bounds.midX - image.size.width / 2, y: bounds.midY - image.size.height / 2 + (isLandscape ? 0 : -1)))
     }
 }
@@ -212,7 +212,9 @@ final class LiveDictationPreviewHost {
     private func sync(_ transcript: LiveTranscript?) {
         guard let keyboard else { return }
         let live = keyboard.model.liveText
-        guard keyboard.showsRecording, live.showsPreview, let transcript else {
+        let phase = keyboard.model.stagePhase
+        let isListening = phase == .recording || phase == .transcribing
+        guard keyboard.showsRecording, isListening, live.showsPreview, let transcript else {
             hide()
             return
         }

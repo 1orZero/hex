@@ -23,7 +23,7 @@ final class EmojiPanelView: UIView, UICollectionViewDataSource, UICollectionView
     var horizontalInset: CGFloat = 0 { didSet { if horizontalInset != oldValue { setNeedsLayout() } } }
     /// The full keyboard's current emoji key, in the panel's coordinates, when it has one: only
     /// its x and width are used. ABC takes both, under the thumb that just lifted off the key
-    /// (Settings › Experiments › ABC under the emoji key); nil keeps ABC at the bar's leading
+    /// (Settings › Labs › ABC under the emoji key); nil keeps ABC at the bar's leading
     /// end, as on the dictation bar and in a panel a fixture shows alone.
     var emojiKeyFrame: CGRect? {
         didSet {
@@ -103,7 +103,8 @@ final class EmojiPanelView: UIView, UICollectionViewDataSource, UICollectionView
         grid = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
         categoryBar = EmojiCategoryBar(items: [("clock", "Frequently used")] + EmojiCategory.allCases.map { ($0.symbol, $0.title) })
         super.init(frame: .zero)
-        backgroundColor = .clear
+        // Clear to the eye, but every point of the panel takes touches (`keyboardTouchFill`).
+        backgroundColor = .keyboardTouchFill
         isOpaque = false
 
         searchButton.setImage(

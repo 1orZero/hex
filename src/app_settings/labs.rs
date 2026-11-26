@@ -182,6 +182,9 @@ pub struct LabsSettings {
     /// Menu, Pause, and Scroll Lock may be shortcut keys (Linux, issue 767).
     pub standalone_special_keys: bool,
     pub history_stats: bool,
+    /// History draws the Dictation stats dialog's headline numbers as one
+    /// compact strip above its list; it needs `history_stats` too.
+    pub history_stats_strip: bool,
     pub recent_dictations: bool,
     pub skip_pauses: bool,
     /// Output's Try card offers Vocabulary and Fix this beside its result (issue 989).
@@ -211,6 +214,10 @@ pub struct LabsSettings {
     /// Whether that light stays solid or blinks slowly while recording
     /// (macOS).
     pub caps_lock_light: CapsLockLight,
+    /// Holding the middle mouse button for half a second starts a hands-free
+    /// dictation and the next long press finishes it; clicks still reach the
+    /// app, and Escape cancels any hands-free dictation (macOS).
+    pub middle_mouse_dictation: bool,
     /// The main window is forced light or dark instead of following the OS
     /// (Labs › Appearance).
     pub appearance: bool,
@@ -229,6 +236,15 @@ pub struct LabsSettings {
     /// The gap in points above the Dock while `hud_height` is on; a saved
     /// value above [`HUD_BOTTOM_GAP_MAX`] is clamped at placement.
     pub hud_bottom_gap: u16,
+    /// While a dictation records and processes, the HUD sits just below the
+    /// pointer (above it near the screen's bottom), on the pointer's screen
+    /// and inside its visible frame, instead of at the Top or Bottom position;
+    /// Hidden still hides it (macOS, Labs › Indicator follows mouse).
+    pub indicator_follows_mouse: bool,
+    /// Dictation's microphone opens through Apple's voice processing, so
+    /// Control Center's Mic Mode can offer Voice Isolation (macOS, Labs ›
+    /// Voice isolation).
+    pub voice_isolation: bool,
     /// The meeting capsules float on a running XWayland on Wayland desktops without layer-shell, such as GNOME (Linux, issue 1274).
     pub gnome_meeting_capsules: bool,
     /// Annotate's capsule and ink float on a running XWayland on Wayland desktops without layer-shell, such as GNOME (Linux).
@@ -244,6 +260,26 @@ pub struct LabsSettings {
     pub copy_capture_zip: bool,
     /// Meetings offers Import audio…: a local audio file becomes a meeting (macOS).
     pub meeting_import: bool,
+    /// A saved meeting's transcript offers line selection and deletion.
+    pub transcript_edits: bool,
+    /// Meetings stops an offered or by-hand call recording (and a calendar
+    /// reminder's on macOS) 30 s after its call app leaves the microphone, as
+    /// Always record's Stop when the call ends does.
+    pub stop_any_call_recording: bool,
+    /// A meeting recording can leave the microphone out of its track while
+    /// the call's own audio keeps recording and transcribing (macOS; Labs ›
+    /// Mute the microphone while recording).
+    pub meeting_microphone_mute: bool,
+    /// The meeting recording indicator stays on the display it was dragged
+    /// to, instead of only the primary display (macOS and Windows).
+    pub meeting_indicator_display: bool,
+    /// A meeting's computer audio records one app or one output device
+    /// instead of every output (every OS; Labs › Choose meeting audio).
+    pub meeting_audio_source: bool,
+    /// Which app or output that is while `meeting_audio_source` is on. A
+    /// malformed saved value is dropped by the settings loader, so this
+    /// reads as all computer audio.
+    pub meeting_audio_source_choice: crate::meeting::audio_source::SourceChoice,
     /// With `labs.annotate_replay` on, keeps a rolling 15 s display buffer via `SCClipBufferingOutput` (macOS 27+).
     pub annotate_replay: bool,
     /// An OpenCode service running in the default WSL distribution is used
@@ -265,6 +301,9 @@ pub struct LabsSettings {
     /// The Vocabulary sheet imports terms from a CSV file and exports the
     /// list as one (Labs › Vocabulary files).
     pub vocabulary_files: bool,
+    /// The menu bar's Vocabulary submenu adds a term or opens the sheet, and
+    /// lists the last five saved terms (macOS; Labs › Vocabulary menu).
+    pub vocabulary_menu: bool,
     /// `hex annotate inspect`, `zoom`, `frames`, and `skill` read a capture
     /// bundle for a coding agent (Labs › Agent tools for captures).
     pub annotate_agent_tools: bool,
@@ -272,6 +311,9 @@ pub struct LabsSettings {
     /// coding agents' own folders and, on macOS, links `hex` onto PATH
     /// (Labs › Install agent skill from Annotate).
     pub annotate_agent_install: bool,
+    /// While an Annotate capture records, the dictation shortcut dictates
+    /// as it always does, and the capture keeps recording.
+    pub dictate_while_annotating: bool,
     /// The local API's `process=global` returns transcripts after Global
     /// mode's output processing.
     pub api_processing: bool,
@@ -284,6 +326,9 @@ pub struct LabsSettings {
     /// A dictation mode's speech model and language follow the foreground
     /// application (macOS and Windows).
     pub app_model_switching: bool,
+    /// `model_switch_hotkey` swaps the dictation selection with the saved
+    /// other model and language, and back.
+    pub model_switch_shortcut: bool,
     /// The menu bar lists the next calendar meetings, each a local start and
     /// end time and title; choosing one with a call link opens it (macOS,
     /// with Meetings on and a calendar connected).
@@ -317,6 +362,9 @@ pub struct LabsSettings {
     /// field returns to its default.
     #[serde(deserialize_with = "deserialize_phrase")]
     pub stop_phrase_text: String,
+    /// Once a dictation has recorded for 10 seconds, its cancel shortcut asks
+    /// for a second press before it throws the recording away (#2837).
+    pub confirm_long_cancels: bool,
     /// Every normal dictation is signed with `signature_text` on its own line
     /// at the end (every OS).
     pub signature: bool,
@@ -325,6 +373,14 @@ pub struct LabsSettings {
     /// the field returns to its default.
     #[serde(deserialize_with = "deserialize_signature")]
     pub signature_text: String,
+    /// A spoken phrase inside a normal dictation becomes the clipboard's
+    /// text in double quotes before it is pasted (every OS).
+    pub clipboard_phrase: bool,
+    /// The words replaced while `clipboard_phrase` is on: at least two words
+    /// and six letters, or the default. Another value fails to load, so the
+    /// field returns to its default.
+    #[serde(deserialize_with = "deserialize_phrase")]
+    pub clipboard_phrase_text: String,
     /// A key or click joining a held modifier-only shortcut a second or more
     /// after it went down reaches the app in front and leaves the dictation
     /// recording, which the release still finishes (macOS and Windows).
@@ -422,7 +478,8 @@ where
     }
 }
 
-/// A saved phrase (`voice_prompt_phrase`, `stop_phrase_text`) must pass
+/// A saved phrase (`voice_prompt_phrase`, `stop_phrase_text`,
+/// `clipboard_phrase_text`) must pass
 /// [`crate::dictation::voice_prompt::phrase_problem`]; another value fails to
 /// load, so the field returns to the default with the usual launch note.
 fn deserialize_phrase<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -489,6 +546,7 @@ impl Default for LabsSettings {
             parakeet_ultra: false,
             standalone_special_keys: false,
             history_stats: false,
+            history_stats_strip: false,
             recent_dictations: false,
             skip_pauses: false,
             output_fixes: false,
@@ -502,6 +560,7 @@ impl Default for LabsSettings {
             hide_menu_bar_icon: false,
             caps_lock_dictation: false,
             caps_lock_light: CapsLockLight::Steady,
+            middle_mouse_dictation: false,
             appearance: false,
             appearance_theme: AppearanceTheme::System,
             gnome_clipboard_restore: false,
@@ -509,6 +568,8 @@ impl Default for LabsSettings {
             notch_indicator: false,
             hud_height: false,
             hud_bottom_gap: HUD_BOTTOM_GAP_DEFAULT,
+            indicator_follows_mouse: false,
+            voice_isolation: false,
             annotate_replay: false,
             opencode_in_wsl: false,
             yolo_mode: false,
@@ -516,12 +577,15 @@ impl Default for LabsSettings {
             drop_transcribe: false,
             paste_last_picker: false,
             vocabulary_files: false,
+            vocabulary_menu: false,
             annotate_agent_tools: false,
             annotate_agent_install: false,
+            dictate_while_annotating: false,
             api_processing: false,
             api_timestamps: false,
             speakers_only: false,
             app_model_switching: false,
+            model_switch_shortcut: false,
             calendar_menu: false,
             calendar_bulk_select: false,
             pause_menu: false,
@@ -531,8 +595,11 @@ impl Default for LabsSettings {
             dictation_style_choice: DictationStyle::Polished,
             stop_phrase: false,
             stop_phrase_text: crate::dictation::stop_phrase::DEFAULT_PHRASE.to_owned(),
+            confirm_long_cancels: false,
             signature: false,
             signature_text: crate::dictation::signature::DEFAULT_TEXT.to_owned(),
+            clipboard_phrase: false,
+            clipboard_phrase_text: crate::dictation::clipboard_phrase::DEFAULT_PHRASE.to_owned(),
             hold_through_keys: false,
             modes_editor: false,
             gnome_meeting_capsules: false,
@@ -541,6 +608,12 @@ impl Default for LabsSettings {
             screenshots: false,
             copy_capture_zip: false,
             meeting_import: false,
+            transcript_edits: false,
+            stop_any_call_recording: false,
+            meeting_microphone_mute: false,
+            meeting_indicator_display: false,
+            meeting_audio_source: false,
+            meeting_audio_source_choice: crate::meeting::audio_source::SourceChoice::All,
             groups: std::collections::BTreeMap::new(),
             stop_when_call_ends: None,
             meeting_descriptive_filenames: None,

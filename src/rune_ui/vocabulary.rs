@@ -1,7 +1,8 @@
 //! Vocabulary: a sheet from General's Vocabulary row with one row per term
-//! and its "sounds like" spellings, edited in place and saved when typing
-//! pauses, like a mode's corrections. The boost has no control here; it
-//! stays a setting (`hex settings set vocabulary_boost`).
+//! ("Spell as") and its "sounds like" spellings ("Misheard as"), edited in
+//! place and saved when typing pauses, like a mode's corrections. The boost
+//! has no control here; it stays a setting
+//! (`hex settings set vocabulary_boost`).
 
 use std::path::{Path, PathBuf};
 
@@ -9,18 +10,15 @@ use rune::tok::motion::{SETTLE, SETTLE_EXIT};
 use rune::{El, SpringPair, TextEdit, Transition, Tx, col, edit_access, el, row, text};
 use rune_kit::{ControlSize, TextInput};
 
-use super::Ui;
 use super::controls::{
-    ButtonKind, DESCRIPTION, METRICS, Paint, button, modal_scrim_transition, modal_transition, note,
+    ButtonKind, METRICS, MODAL, ModalWidth, Paint, button, modal_panel, modal_sheet, note,
 };
 use super::lists::remove_button;
+use super::{Modal, Ui};
 use crate::desktop::file_dialog::{Dialog, Filter, Pending, Target};
 use crate::desktop::i18n::{tr, tr_fill, tr_named};
 use crate::dictation::vocabulary::csv::{self, MergeSummary};
 use crate::dictation::vocabulary::{self, VocabularyEntry};
-
-const MODAL_WIDTH: f32 = 620.0;
-const PADDING: f32 = 18.0;
 /// One term row: a regular text field and its padding.
 const ROW_HEIGHT: f32 = 36.0;
 /// The term list's fades; the bottom one is the gap before the footer at
@@ -30,9 +28,12 @@ const FADES: (f32, f32) = (0.0, 6.0);
 /// end shows no sliver of a row above.
 const ROWS_HEIGHT: f32 = 8.0 * ROW_HEIGHT + FADES.0 + FADES.1;
 /// Room beside the rows inside the list's clip, so the fields' borders
-/// aren't cut at its sides.
+/// aren't cut at its left.
 const SIDE_ROOM: f32 = 2.0;
 const TERM_WIDTH: f32 = 200.0;
+/// From the column labels to the first row; with the row's own padding,
+/// the labels sit `METRICS.label_gap` above the first field.
+const LABEL_GAP: f32 = 4.0;
 
 /// One term row: its term and "sounds like" fields, and an identity that
 /// stays with the row as rows before it are removed, so a callback built
@@ -50,8 +51,7 @@ struct Status {
     failed: bool,
 }
 
-/// The term rows, whether the sheet is open, and the file dialogs its
-/// footer asked for.
+/// The term rows and the file dialogs the sheet's footer asked for.
 #[derive(Default)]
 pub(super) struct VocabularyEditor {
     rows: Vec<TermRow>,
@@ -67,7 +67,6 @@ pub(super) struct VocabularyEditor {
     /// The file dialogs Import… and Export… asked for.
     import_chooser: Option<Pending>,
     export_chooser: Option<Pending>,
-    pub(super) open: bool,
 }
 
 impl VocabularyEditor {
@@ -162,7 +161,7 @@ pub(super) fn unused_note(ui: &Ui) -> Option<String> {
     (!model.uses_vocabulary()).then(|| {
         tr_fill(
             "{} doesn't use these terms; rewriting and search still do",
-            model.name,
+            &model.name,
         )
     })
 }
@@ -187,14 +186,12 @@ fn budget_note(ui: &Ui) -> Option<String> {
 
 /// Opens the sheet alone, with an empty row to type into when the list is
 /// empty.
-pub(super) fn open(ui: &mut Ui) {
-    super::settings::cancel_capture(ui);
-    super::picker::close(ui);
-    super::explainer::close(ui);
-    super::sound_sets::close(ui);
-    ui.open = None;
-    ui.vocabulary.open = true;
+pub(crate) fn open(ui: &mut Ui) {
+    ui.open_modal(Modal::Vocabulary);
     ui.vocabulary.status = None;
+    // The field typed in last time keeps its focus flag after the sheet
+    // closes, so without this it reopens showing a caret nobody put there.
+    blur(ui);
     if ui.vocabulary.rows.is_empty() {
         add_row(ui);
     }
@@ -202,10 +199,10 @@ pub(super) fn open(ui: &mut Ui) {
 
 /// Saves what was typed, drops rows left blank, and closes the sheet.
 pub(super) fn close(ui: &mut Ui) {
-    if !ui.vocabulary.open {
-        return;
-    }
-    ui.vocabulary.open = false;
+    ui.close_modal_if(Modal::Vocabulary);
+}
+
+pub(super) fn on_close(ui: &mut Ui) {
     ui.vocabulary.added = None;
     ui.vocabulary.status = None;
     ui.flush_drafts();
@@ -214,11 +211,15 @@ pub(super) fn close(ui: &mut Ui) {
         .retain(|row| !row.term.text.trim().is_empty() || !row.sounds_like.text.trim().is_empty());
 }
 
-fn add_row(ui: &mut Ui) -> u64 {
+fn blur(ui: &mut Ui) {
     for row in &mut ui.vocabulary.rows {
         row.term.focused = false;
         row.sounds_like.focused = false;
     }
+}
+
+fn add_row(ui: &mut Ui) -> u64 {
+    blur(ui);
     let mut term = TextEdit::default();
     term.focused = true;
     ui.vocabulary.push(term, TextEdit::default())
@@ -229,6 +230,18 @@ fn add_row(ui: &mut Ui) -> u64 {
 fn add_term(ui: &mut Ui, tx: &mut Tx) {
     ui.vocabulary.added = Some(add_row(ui));
     tx.scroll_to_bottom("term-scroll");
+}
+
+/// The menu bar's Add term: the sheet, with a new focused row at its end.
+/// An empty list already opens with a focused blank row, so this adds none
+/// then.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn open_new_term(ui: &mut Ui, tx: &mut Tx) {
+    let empty = ui.vocabulary.rows.is_empty();
+    open(ui);
+    if !empty {
+        add_term(ui, tx);
+    }
 }
 
 fn row_key(id: u64) -> String {
@@ -321,7 +334,7 @@ fn choose_export(ui: &mut Ui) {
 pub(super) fn poll(ui: &mut Ui) -> bool {
     // A closed sheet or the lab off takes no answer: a dialog that finishes
     // after either changes nothing.
-    if !ui.vocabulary.open || !on(ui) {
+    if !ui.is_modal(Modal::Vocabulary) || !on(ui) {
         ui.vocabulary.import_chooser = None;
         ui.vocabulary.export_chooser = None;
         if !on(ui) {
@@ -538,7 +551,8 @@ fn term_row(p: Paint, entry: &TermRow, added: bool) -> El {
         .center_y()
         .child(
             TextInput::new(&entry.term)
-                .placeholder(tr("Term (e.g. cappuccino)"))
+                .label(tr("Spell as"))
+                .placeholder(tr("e.g. cappuccino"))
                 .width(Some(TERM_WIDTH))
                 .on_edit(edit_access(move |ui: &mut Ui| {
                     ui.vocabulary.field(id, false)
@@ -548,7 +562,8 @@ fn term_row(p: Paint, entry: &TermRow, added: bool) -> El {
         )
         .child(
             TextInput::new(&entry.sounds_like)
-                .placeholder(tr("Sounds like (e.g. capuchin, cap a chino)"))
+                .label(tr("Misheard as"))
+                .placeholder(tr("e.g. capuchin, cap a chino"))
                 .width(None)
                 .on_edit(edit_access(move |ui: &mut Ui| {
                     ui.vocabulary.field(id, true)
@@ -570,51 +585,71 @@ fn term_row(p: Paint, entry: &TermRow, added: bool) -> El {
     }
 }
 
-pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
-    if !ui.vocabulary.open {
-        return None;
-    }
-    let c = &p.k.c;
-    let rows = col().key("terms").px(SIDE_ROOM).children(
-        ui.vocabulary
-            .rows
-            .iter()
-            .map(|entry| term_row(p, entry, ui.vocabulary.added == Some(entry.id))),
-    );
+/// The two columns' names, over the fields they name. They stay while rows
+/// are filled in, when no placeholder is left to say which column is which.
+fn column_labels(p: Paint) -> El {
+    let label = |key: &str, copy: &str, color| text(copy).key(key).font(p.label()).color(color);
+    row()
+        .key("columns")
+        .pl(SIDE_ROOM)
+        .mb(LABEL_GAP)
+        .gap(8.0)
+        .child(label("term-label", tr("Spell as"), p.muted()).w(TERM_WIDTH))
+        .child(label("sounds-like-label", tr("Misheard as"), p.muted()))
+        .child(label("optional", tr("optional"), p.faint()))
+}
+
+pub(super) fn modal(ui: &Ui, p: Paint) -> [El; 2] {
+    let rows = col()
+        .key("terms")
+        .pl(SIDE_ROOM)
+        .pr(METRICS.row_px)
+        .children(
+            ui.vocabulary
+                .rows
+                .iter()
+                .map(|entry| term_row(p, entry, ui.vocabulary.added == Some(entry.id))),
+        );
     let height = ui.vocabulary.rows.len() as f32 * ROW_HEIGHT + FADES.0 + FADES.1;
+    // The list reaches the panel's card edge on the right, so its scroll bar
+    // sits past the remove buttons instead of over them.
     let terms = col()
         .key("term-column")
-        .h(height.min(ROWS_HEIGHT))
-        .mx(-SIDE_ROOM)
-        .child(super::faded_body(p.k, "term-scroll", rows, FADES));
-    let add = button(
+        .pl(METRICS.row_px - SIDE_ROOM)
+        .child(column_labels(p))
+        .child(
+            col()
+                .key("term-list")
+                .h(height.min(ROWS_HEIGHT))
+                .child(super::faded_body(p.k, "term-scroll", rows, FADES)),
+        );
+    let mut footer = vec![button(
         p,
         "add-term",
         tr("Add term"),
         ButtonKind::Secondary,
         add_term,
-    );
-    let mut footer = row().key("footer").gap(12.0).center_y().child(add);
+    )];
     // Labs › Vocabulary files: two more ways to fill the list, never main
     // actions, so both stay Secondary.
     if on(ui) {
-        footer = footer
-            .child(button(
-                p,
-                "import-vocabulary",
-                tr("Import…"),
-                ButtonKind::Secondary,
-                |ui: &mut Ui, _| choose_import(ui),
-            ))
-            .child(button(
-                p,
-                "export-vocabulary",
-                tr("Export…"),
-                ButtonKind::Secondary,
-                |ui: &mut Ui, _| choose_export(ui),
-            ));
+        footer.push(button(
+            p,
+            "import-vocabulary",
+            tr("Import…"),
+            ButtonKind::Secondary,
+            |ui: &mut Ui, _| choose_import(ui),
+        ));
+        footer.push(button(
+            p,
+            "export-vocabulary",
+            tr("Export…"),
+            ButtonKind::Secondary,
+            |ui: &mut Ui, _| choose_export(ui),
+        ));
     }
-    let footer = footer.child(el().key("spacer").grow(1.0)).child(
+    footer.push(el().key("spacer").grow(1.0));
+    footer.push(
         button(
             p,
             "close-vocabulary",
@@ -626,112 +661,68 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
     );
     let mut heading = col()
         .key("heading")
+        .px(METRICS.row_px)
+        .mt(4.0 - MODAL.gap)
         .gap(4.0)
         .child(
-            text(tr("Vocabulary"))
-                .key("title")
-                .font(p.k.ty.body_medium)
-                .color(p.text()),
-        )
-        .child(
             text(tr(
-                "Transcription and rewriting spell them right, and search finds them when misheard",
+                "Names and words Hex should spell right. Phrases match only when said in full.",
             ))
             .key("description")
-            .font(DESCRIPTION)
+            .font(p.description())
             .color(p.muted())
             .wrap(),
-        )
-        .child(
-            text(tr("Terms with spaces match only when said in full"))
-                .key("phrases")
-                .font(DESCRIPTION)
-                .color(p.muted())
-                .wrap(),
         );
     let unused = unused_note(ui).or_else(|| budget_note(ui));
     if let Some(unused) = unused {
         heading = heading.child(
             text(unused)
                 .key("unused")
-                .font(DESCRIPTION)
+                .font(p.description())
                 .color(p.muted())
                 .wrap(),
         );
     }
-    let mut panel = col()
-        .key("vocabulary")
-        .role("dialog")
-        .label(tr("Vocabulary"))
-        .w(MODAL_WIDTH)
-        .pt(PADDING)
-        .px(PADDING)
-        .pb(14.0)
-        .gap(12.0)
-        .radius(p.k.radius.xl)
-        .fill(c.bg_base)
-        .border(p.hair, c.border_weak)
-        // Presses inside the panel stay inside.
-        .on_press(|_: &mut Ui| {})
-        .child(heading)
-        .child(terms);
+    let mut body = vec![heading, terms];
     if ui.vocabulary.clamped() {
-        panel = panel.child(
-            note(
-                "limits",
-                tr("Up to 16 spellings per term are saved, and 64 characters per term or spelling."),
-                p.danger(),
-            )
-            .mx(-METRICS.row_px),
-        );
+        body.push(note(
+            "limits",
+            tr("Up to 16 spellings per term are saved, and 64 characters per term or spelling."),
+            p.danger(),
+        ));
     }
     if on(ui)
         && let Some(status) = &ui.vocabulary.status
     {
-        panel = panel.child(
-            note(
-                "file-status",
-                &status.message,
-                if status.failed { p.danger() } else { p.muted() },
-            )
-            .mx(-METRICS.row_px),
-        );
+        body.push(note(
+            "file-status",
+            &status.message,
+            if status.failed { p.danger() } else { p.muted() },
+        ));
     }
-    panel = panel.child(footer);
-    for shadow in &p.k.elevation.overlay {
-        panel = panel.box_shadow(*shadow);
-    }
-    let layer = |key: &str| {
-        el().key(key)
-            .role("none")
-            .absolute(0.0, 0.0)
-            .w_full()
-            .h_full()
-    };
-    Some([
-        layer("vocabulary-scrim")
-            .fill(c.scrim)
-            .on_press(close)
-            .transition(modal_scrim_transition(p)),
-        layer("vocabulary-layer")
-            .center()
-            .transition(modal_transition(p))
-            // Keys stay inside, Escape or a press outside closes, and focus
-            // returns to the row's button that opened it.
-            .child(panel.modal(true, close)),
-    ])
+    let panel = modal_panel(
+        p,
+        "vocabulary",
+        tr("Vocabulary"),
+        ModalWidth::Wide,
+        body,
+        footer,
+    );
+    modal_sheet(p, "vocabulary", panel, close)
 }
 
-/// A few terms, one with spellings, with the sheet open.
+/// A few terms, some with spellings, with the sheet open.
 pub(super) fn fixture(ui: &mut Ui, filled: bool) {
     ui.settings.vocabulary = if filled {
         let mut entries = Vec::new();
         for (term, sounds_like) in [
-            ("cappuccino", "capuchin, cap a chino"),
+            ("Claude", "clawed"),
             ("OpenCode", "open code"),
-            ("Rune", "roon"),
+            ("Hex", ""),
+            ("Rune", ""),
+            ("cappuccino", "capuchin, cap a chino"),
+            ("Scrawl", ""),
             ("Parakeet", ""),
-            ("Dax", "Dex, Docs"),
         ] {
             let _ = vocabulary::add(
                 &mut entries,
@@ -790,10 +781,10 @@ mod tests {
     fn the_sheet_starts_empty_lists_with_a_row_and_saves_on_close() {
         let mut ui = ui();
         open(&mut ui);
-        assert!(ui.vocabulary.open);
+        assert!(ui.is_modal(Modal::Vocabulary));
         assert_eq!(ui.vocabulary.rows.len(), 1);
         close(&mut ui);
-        assert!(!ui.vocabulary.open);
+        assert!(!ui.is_modal(Modal::Vocabulary));
         assert!(ui.vocabulary.rows.is_empty());
         assert_eq!(summary(&ui), "None");
 
@@ -807,6 +798,55 @@ mod tests {
 
         open(&mut ui);
         assert_eq!(ui.vocabulary.rows.len(), 1);
+    }
+
+    #[test]
+    fn reopening_the_sheet_focuses_no_field() {
+        let mut ui = ui();
+        open(&mut ui);
+        ui.vocabulary.rows[0].term.text = "pure win".into();
+        ui.vocabulary.rows[0].sounds_like.focused = true;
+        ui.vocabulary.rows[0].term.focused = false;
+        close(&mut ui);
+
+        open(&mut ui);
+        assert_eq!(ui.vocabulary.rows.len(), 1);
+        assert!(!ui.vocabulary.rows[0].term.focused);
+        assert!(!ui.vocabulary.rows[0].sounds_like.focused);
+    }
+
+    #[test]
+    fn adding_a_term_from_the_menu_opens_the_sheet_with_one_blank_row_last() {
+        let mut ui = ui();
+        ui.settings.vocabulary = vec![VocabularyEntry {
+            term: "Rune".into(),
+            sounds_like: vec!["roon".into()],
+        }];
+        ui.vocabulary = VocabularyEditor::new(&ui.settings.vocabulary);
+        open_new_term(&mut ui, &mut Tx::default());
+        assert!(ui.is_modal(Modal::Vocabulary));
+        assert_eq!(terms(&ui), ["Rune", ""]);
+        let last = ui.vocabulary.rows.last().unwrap();
+        assert_eq!(ui.vocabulary.added, Some(last.id));
+        assert!(last.term.focused);
+        assert!(!last.sounds_like.focused);
+
+        // Nothing was typed, so Done saves only the term already listed.
+        close(&mut ui);
+        assert_eq!(ui.settings.vocabulary, ui.vocabulary.project());
+        assert_eq!(ui.settings.vocabulary.len(), 1);
+        assert_eq!(ui.settings.vocabulary[0].term, "Rune");
+    }
+
+    #[test]
+    fn adding_a_term_to_an_empty_list_opens_the_one_blank_row_it_made() {
+        let mut ui = ui();
+        open_new_term(&mut ui, &mut Tx::default());
+        assert!(ui.is_modal(Modal::Vocabulary));
+        assert_eq!(ui.vocabulary.rows.len(), 1);
+        assert!(ui.vocabulary.rows[0].term.focused);
+        // The row the sheet opens with never animates in.
+        assert_eq!(ui.vocabulary.added, None);
     }
 
     #[test]

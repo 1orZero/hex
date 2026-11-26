@@ -1,17 +1,23 @@
 package ly.anoma.hex.keyboard
 
 import android.animation.ValueAnimator
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.text.TextPaint
 import android.text.TextUtils
+import android.util.DisplayMetrics
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -20,10 +26,12 @@ import ly.anoma.hex.R
 import ly.anoma.hex.speech.SpeechPhase
 import ly.anoma.hex.typing.Suggestion
 import ly.anoma.hex.useInter
+import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
-/** The strip above the keys, with the Hex mark at its trailing end where Gboard has its mic.
+/** The strip above the keys, with the Hex mark at its trailing end where Gboard has its mic (its leading end
+ * with Labs › Keyboard › Hex key on the left).
  * Idle it shows three suggestions (the likeliest, or the autocorrection in a small chip, in the
  * middle) or a hint and the Hex menu button. Dictating, the mark becomes ✓ and the strip becomes
  * the recording bar: the dot waveform's well grows out of it, with ✕ beside ✓. */
@@ -46,14 +54,39 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
     private val idleRow = LinearLayout(context)
     private val statusText = TextView(context)
     private val slotRow = LinearLayout(context)
+    // Android's inline autofill suggestions (Labs › Keyboard › Password manager suggestions), in the
+    // slots' place while the service has any: its own chips, which Hex lays out and never reads.
+    private val inlineArea = LinearLayout(context)
+    private val inlineRow = HorizontalScrollView(context)
+    private val inlineChips = LinearLayout(context)
+    // Pinned suggestions may not scroll (Android's inline contract), so they sit at the area's edge.
+    private val inlinePinned = LinearLayout(context)
     private val slotViews = List(3) { FrameLayout(context) }
-    private val words = List(3) { TextView(context) }
+    private val words = List(3) { Word(context) }
+    private val measurePaint = TextPaint()
     private val dividers = List(2) { View(context) }
     private var offered = arrayOfNulls<String>(3)
     private val menuKey = TextView(context)
+    // The tools in the hint's place while the strip has nothing else to show (Labs › Keyboard ›
+    // Keyboard tools): emoji, paste, Hex's Keyboard settings and undo of the last autocorrection.
+    private val toolsRow = LinearLayout(context)
+    private val toolEmoji = toolButton(R.drawable.ic_emoji, R.string.keyboard_emoji) { host.openEmoji() }
+    private val toolPaste = toolButton(R.drawable.ic_paste, R.string.keyboard_tool_paste) { ime.pasteClipboard() }
+    private val toolClipboard = toolButton(R.drawable.ic_clipboard, R.string.keyboard_menu_clipboard) { host.openClipboard() }
+    private val toolSettings = toolButton(R.drawable.ic_settings, R.string.keyboard_tool_settings) { ime.openKeyboardSettings() }
+    private val toolUndo = toolButton(R.drawable.ic_undo, R.string.keyboard_tool_undo) { ime.engine.undoAutocorrection() }
+    private val clipboard = context.getSystemService(ClipboardManager::class.java)
     // Undo dictation, in the slots' place after a dictation (iPhone Hex's chip).
     private val undoChip = TextView(context)
+    private val undoBox = FrameLayout(context)
     private var undoing = false
+    /** The hint line holds a dictation's note ("No speech heard", "Stopped at 1 minute"), not the idle hint. */
+    private var noting = false
+    // A dismissible line in the hint's place (Hex Preview's update): it goes for this field once typing starts.
+    private val noticeRow = LinearLayout(context)
+    private val noticeText = TextView(context)
+    private val noticeClose = FrameLayout(context)
+    private var notice: StripNotice? = null
 
     private val well = FrameLayout(context)
     private val scope = DotScopeView(context)
@@ -65,8 +98,11 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
     private val spinner = ProgressBar(context, null, 0, android.R.style.Widget_Material_ProgressBar_Small)
 
     private var idle = true
+    /** Labs › Keyboard › Hex key on the left, as [placeHexKey] last laid the strip out. */
+    private var hexKeyLeft = false
     private var reveal: ValueAnimator? = null
-    var hint = context.getString(R.string.keyboard_hint_hold)
+    private val holdHint = context.getString(R.string.keyboard_hint_hold)
+    var hint = holdHint
         private set
     /** The Hex menu replaces the keys. */
     var choosing = false
@@ -88,17 +124,35 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
         clipChildren = false
 
         statusText.apply {
-            useInter(500); setTextColor(quiet); textSize = 14f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            useInter(500); setTextColor(quiet); setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14f); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(10), 0, dp(4), 0)
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             setOnClickListener { if (choosing) host.backInMenu() }
         }
         idleRow.addView(statusText, LinearLayout.LayoutParams(0, -1, 1f))
+        noticeText.apply {
+            // Two lines when it must, shrinking from 14 dp down to 10 only as far as it must, as a dictation's note beside
+            // the ↶ chip does: "Swipe typing isn’t available in Nederlands yet" names its language even at 360 dp.
+            useInter(500); setTextColor(ink); maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+            includeFontPadding = false; setLineSpacing(0f, 0.85f)
+            setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, TypedValue.COMPLEX_UNIT_DIP)
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(10), 0, dp(4), 0); isFocusable = true
+            setOnClickListener { notice?.let { notice = null; update(); it.tap() } }
+        }
+        noticeClose.apply {
+            isFocusable = true
+            addView(icon(R.drawable.ic_cancel), LayoutParams(dp(16), dp(16), Gravity.CENTER))
+            setOnClickListener { notice?.let { notice = null; update(); it.dismiss() } }
+        }
+        noticeRow.addView(noticeText, LinearLayout.LayoutParams(0, -1, 1f))
+        noticeRow.addView(noticeClose, LinearLayout.LayoutParams(dp(40), -1))
+        noticeRow.visibility = GONE
+        idleRow.addView(noticeRow, LinearLayout.LayoutParams(0, -1, 1f))
         for (i in 0..2) {
             if (i > 0) slotRow.addView(dividers[i - 1].apply { setBackgroundColor(color(R.color.rule)) },
                 LinearLayout.LayoutParams(maxOf(1, dp(1) / 2 + 1), dp(20)).apply { gravity = Gravity.CENTER_VERTICAL })
             words[i].apply {
-                useInter(450); gravity = Gravity.CENTER; setTextColor(ink); textSize = 16f
+                useInter(450); gravity = Gravity.CENTER; setTextColor(ink); setTextSize(TypedValue.COMPLEX_UNIT_DIP, StripText.SIZE)
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END; includeFontPadding = false
                 setPadding(dp(10), 0, dp(10), 0); importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
             }
@@ -110,9 +164,25 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
             slotRow.addView(slotViews[i], LinearLayout.LayoutParams(0, -1, 1f))
         }
         idleRow.addView(slotRow, LinearLayout.LayoutParams(0, -1, 1f))
-        val undoBox = FrameLayout(context).apply {
+        inlineArea.orientation = LinearLayout.HORIZONTAL
+        inlineArea.gravity = Gravity.CENTER_VERTICAL
+        inlineChips.gravity = Gravity.CENTER_VERTICAL
+        inlineRow.isHorizontalScrollBarEnabled = false
+        inlineRow.addView(inlineChips, FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, -1))
+        inlineArea.addView(inlineRow, LinearLayout.LayoutParams(0, -1, 1f))
+        inlinePinned.gravity = Gravity.CENTER_VERTICAL
+        inlineArea.addView(inlinePinned, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, -1))
+        inlineArea.visibility = GONE
+        idleRow.addView(inlineArea, LinearLayout.LayoutParams(0, -1, 1f))
+        toolsRow.gravity = Gravity.CENTER_VERTICAL
+        listOf(toolEmoji, toolPaste, toolClipboard, toolSettings, toolUndo).forEach {
+            toolsRow.addView(it, LinearLayout.LayoutParams(dp(40), -1))
+        }
+        toolsRow.visibility = GONE
+        idleRow.addView(toolsRow, LinearLayout.LayoutParams(0, -1, 1f))
+        undoBox.apply {
             undoChip.apply {
-                text = context.getString(R.string.keyboard_undo_dictation); useInter(500); textSize = 14f; setTextColor(ink)
+                text = context.getString(R.string.keyboard_undo_dictation); useInter(500); setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14f); setTextColor(ink)
                 gravity = Gravity.CENTER; includeFontPadding = false; isFocusable = true
                 background = shape(key, dp(15).toFloat()); setPadding(dp(12), 0, dp(14), 0)
                 compoundDrawablePadding = dp(6)
@@ -126,12 +196,12 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
         }
         idleRow.addView(undoBox, LinearLayout.LayoutParams(0, -1, 1f))
         menuKey.apply {
-            useInter(550); gravity = Gravity.CENTER; textSize = 14f; setTextColor(ink)
+            useInter(550); gravity = Gravity.CENTER; setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14f); setTextColor(ink)
             setOnClickListener { if (choosing) host.closeMenu() else host.openMenu() }
             setPadding(dp(8), 0, dp(8), 0); isFocusable = true; minimumWidth = dp(40)
         }
         idleRow.addView(menuKey, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, -1))
-        addView(idleRow, LayoutParams(-1, -1).apply { marginStart = side; marginEnd = side + hexWidth })
+        addView(idleRow, LayoutParams(-1, -1))
 
         well.background = shape(color(R.color.sheet), pill / 2f)
         well.clipToOutline = true
@@ -140,10 +210,7 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
         // a pane title would stay behind as the keyboard window's name).
         scope.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
         scope.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        val wellStart = side + px(KeyboardMetrics.GAP / 2)
-        addView(well, LayoutParams(-1, pill, Gravity.CENTER_VERTICAL).apply {
-            marginStart = wellStart; marginEnd = side + hexWidth + cancelWidth - (cancelWidth - pill) / 2 + dp(6)
-        })
+        addView(well, LayoutParams(-1, pill, Gravity.CENTER_VERTICAL))
 
         cancelKey.apply {
             contentDescription = context.getString(R.string.keyboard_cancel_dictation); isFocusable = true
@@ -152,7 +219,7 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
                 LayoutParams(pill, pill, Gravity.CENTER))
             addView(icon(R.drawable.ic_cancel), LayoutParams(dp(19), dp(19), Gravity.CENTER))
         }
-        addView(cancelKey, LayoutParams(cancelWidth, -1, Gravity.END).apply { marginEnd = side + hexWidth })
+        addView(cancelKey, LayoutParams(cancelWidth, -1))
 
         hexKey.apply {
             isFocusable = true
@@ -168,8 +235,27 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
             setOnClickListener { ime.toggleSpeech() }
             setOnTouchListener { v, e -> hexTouch(v, e) }
         }
-        addView(hexKey, LayoutParams(hexWidth, -1, Gravity.END).apply { marginEnd = side })
+        addView(hexKey, LayoutParams(hexWidth, -1))
+        placeHexKey()
         showIdle(true)
+    }
+
+    /** The Hex key's end of the strip: the right, where Gboard has its mic, or the left with Labs › Keyboard ›
+     * Hex key on the left. ✕ sits beside it and the recording well grows out of it towards the other end; the
+     * idle row (hint, suggestions, menu key) keeps its order in the rest. The keyboard is always laid out
+     * left to right, so start is the left. */
+    fun placeHexKey() {
+        val left = ime.feedback.hexKeyLeft
+        hexKeyLeft = left
+        val edge = if (left) Gravity.START else Gravity.END
+        fun FrameLayout.LayoutParams.ends(hexEnd: Int, otherEnd: Int) = apply {
+            marginStart = if (left) hexEnd else otherEnd; marginEnd = if (left) otherEnd else hexEnd
+        }
+        idleRow.layoutParams = (idleRow.layoutParams as LayoutParams).ends(side + hexWidth, side)
+        well.layoutParams = (well.layoutParams as LayoutParams).ends(
+            side + hexWidth + cancelWidth - (cancelWidth - pill) / 2 + dp(6), side + px(KeyboardMetrics.GAP / 2))
+        cancelKey.layoutParams = (cancelKey.layoutParams as LayoutParams).apply { gravity = edge }.ends(side + hexWidth, 0)
+        hexKey.layoutParams = (hexKey.layoutParams as LayoutParams).apply { gravity = edge }.ends(side, 0)
     }
 
     private fun hexTouch(v: View, e: MotionEvent): Boolean {
@@ -188,27 +274,31 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
                 held = false; tracking = false
             }
             MotionEvent.ACTION_CANCEL -> {
-                removeCallbacks(hold); if (held) ime.cancelSpeech()
+                removeCallbacks(hold)
+                if (held) { if (DictationField.cancelledHoldFinishes(ime.isInputViewShown && isShown)) ime.finishSpeech() else ime.cancelSpeech() }
                 held = false; tracking = false; v.isPressed = false
             }
         }
         return true
     }
 
-    /** The typing model's slots in its order. With what was typed among them they show as given: typed
-     * in quotes on the left, then the fix (in a chip) or the likeliest word in the middle. Without it,
-     * the likeliest word takes the middle, the next the left, as Gboard and iPhone place them. */
+    /** The typing model's slots in their display order ([Suggestion.place]): with what was typed among
+     * them, typed in quotes on the left then the fix (in a chip) or the likeliest word in the middle;
+     * otherwise the likeliest word in the middle and the next on the left, as Gboard and iPhone place
+     * them. The emoji always keeps the last slot (Labs › Keyboard › Emoji suggestions). */
     fun suggestions(slots: List<Suggestion>) {
-        val shown = arrayOfNulls<Suggestion>(3)
-        if (slots.any { it.kind == Suggestion.Kind.Typed }) slots.take(3).forEachIndexed { i, slot -> shown[i] = slot }
-        else { shown[1] = slots.getOrNull(0); shown[0] = slots.getOrNull(1); shown[2] = slots.getOrNull(2) }
-        offered = Array(3) { shown[it]?.text }
+        // Typing or swiping started: the suggestions (a swipe's word so far) matter more than the notice, which comes
+        // back in the next field.
+        if (slots.any { it.kind == Suggestion.Kind.Typed } || ime.engine.swiping) notice = null
+        val shown = Suggestion.place(slots)
+        offered = Array(Suggestion.SLOTS) { shown[it]?.text }
         var chip = -1
         for (i in 0..2) {
             val slot = shown[i]
             val s = slot?.text.orEmpty()
             val typed = slot?.kind == Suggestion.Kind.Typed
             val fix = slot?.kind == Suggestion.Kind.Fix
+            val emoji = slot?.kind == Suggestion.Kind.Emoji
             if (fix) chip = i
             this.words[i].text = if (typed) context.getString(R.string.keyboard_literal, s) else s
             this.words[i].background = if (fix) shape(key, dp(15).toFloat()) else null
@@ -216,23 +306,122 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
                 s.isEmpty() -> null
                 typed -> context.getString(R.string.keyboard_keep, s)
                 fix -> context.getString(R.string.keyboard_correction, s)
+                emoji -> context.getString(R.string.keyboard_suggest_emoji, s)
                 else -> context.getString(R.string.keyboard_suggest, s)
             }
             slotViews[i].isEnabled = s.isNotEmpty()
         }
-        dividers[0].visibility = if (chip == 0 || chip == 1) INVISIBLE else VISIBLE
-        dividers[1].visibility = if (chip == 1 || chip == 2) INVISIBLE else VISIBLE
+        // A divider only between two filled slots, and never beside the chip.
+        val filled = (0..2).map { words[it].text.isNotEmpty() }
+        dividers[0].visibility = if (chip == 0 || chip == 1 || !filled[0] || !filled[1]) INVISIBLE else VISIBLE
+        dividers[1].visibility = if (chip == 1 || chip == 2 || !filled[1] || !filled[2]) INVISIBLE else VISIBLE
+        weigh()
         update()
+    }
+    /** Each slot's share of the row follows its word's width, so a short word leaves the room a long
+     * one needs; a word still wider than its share shrinks ([Word]) before it is ellipsized. A slot
+     * never falls below a tappable width. */
+    private fun weigh() {
+        for (i in 0..2) {
+            val word = words[i]
+            val params = slotViews[i].layoutParams as LinearLayout.LayoutParams
+            val weight = if (word.text.isEmpty()) 0f else maxOf(
+                naturalWidth(word) + word.paddingLeft + word.paddingRight, dp(56).toFloat())
+            if (params.weight == weight) continue
+            params.weight = weight; slotViews[i].layoutParams = params
+        }
+    }
+    /** [word]'s width at the strip's own size, whatever size it shrank to for its last slot. */
+    private fun naturalWidth(word: TextView): Float {
+        measurePaint.set(word.paint)
+        measurePaint.textSize = dpToPx(StripText.SIZE, resources.displayMetrics)
+        return measurePaint.measureText(word.text, 0, word.text.length)
     }
     /** Undo dictation shows in the slots' place, or goes. */
     fun undo(shown: Boolean) { undoing = shown; update() }
+    /** Shows [notice] (or none) in the hint's place until typing starts, a tap or its ✕. */
+    fun notice(notice: StripNotice?) {
+        this.notice = notice
+        noticeText.text = notice?.text; noticeText.contentDescription = notice?.text
+        noticeClose.contentDescription = notice?.dismissLabel
+        update()
+    }
+    /** Android's inline autofill suggestions in the slots' place: the service's own views, in its
+     * order, which Hex lays out and never reads. [unpinned] scroll and [pinned] stay at their edge.
+     * Two empty lists bring the slots and their words back; a note or notice still has the line to
+     * itself, and the chips return after it. */
+    fun inlineSuggestions(unpinned: List<View>, pinned: List<View>) {
+        fillInline(inlineChips, unpinned)
+        fillInline(inlinePinned, pinned)
+        update()
+    }
+    /** A chip keeps the size Android inflated it at: InlineContentView has no onMeasure, so its
+     * content would measure nothing if this row wrapped it. */
+    private fun fillInline(row: LinearLayout, views: List<View>) {
+        row.removeAllViews()
+        for (view in views) {
+            val params = LinearLayout.LayoutParams(view.layoutParams
+                ?: ViewGroup.LayoutParams(dp(56), dp(30)))
+            params.marginEnd = dp(6)
+            row.addView(view, params)
+        }
+    }
     fun update() {
-        val undo = idle && !choosing && undoing
-        val show = idle && !choosing && !undo && offered.any { it != null }
-        (undoChip.parent as View).visibility = if (undo) VISIBLE else GONE
+        // A dictation's note wins over the notice (Hex Preview's update line), which returns with the idle hint:
+        // after typing, a tap or the next dictation.
+        val spoken = idle && !choosing && noting
+        val noted = idle && !choosing && notice != null && !spoken
+        val undo = idle && !choosing && undoing && !noted
+        // The service's own chips take the slots' place while it has any, and the strip shows nothing
+        // else beside them.
+        val chips = idle && !choosing && !spoken && !noted && !undo &&
+            (inlineChips.childCount > 0 || inlinePinned.childCount > 0)
+        val show = idle && !choosing && !chips && !undo && !noted && offered.any { it != null }
+        val tools = KeyboardTools.tools(enabled = ime.feedback.keyboardTools,
+            busy = !idle || choosing || show || chips || undo || noted || hint != holdHint, secure = { ime.engine.secure },
+            emoji = { ime.engine.emojiAvailable }, canUndo = { ime.engine.canUndoAutocorrection },
+            clipboard = { clipboard.hasPrimaryClip() }, history = { ime.feedback.clipboardHistory })
+        noticeRow.visibility = if (noted) VISIBLE else GONE
+        undoBox.visibility = if (undo) VISIBLE else GONE
+        // A note that came with text ("Stopped at 1 minute") shares the line with Undo, which then takes only its width,
+        // and the menu key shrinks to ⋯ as it does beside suggestions, so the note isn't cut short.
+        val shared = undo && spoken
+        (undoBox.layoutParams as LinearLayout.LayoutParams).apply {
+            if ((weight == 0f) != shared) { width = if (shared) LinearLayout.LayoutParams.WRAP_CONTENT else 0; weight = if (shared) 0f else 1f; undoBox.layoutParams = this }
+        }
+        // Beside a note, Undo is its ↶ alone, named for TalkBack, so the note can be read whole (on two lines if it
+        // needs them) at 360 dp and large text; once the note goes, the chip has its words again.
+        val look = undoLook(shared)
+        if (undoChip.text.isEmpty() == look.label) {
+            undoChip.text = if (look.label) context.getString(R.string.keyboard_undo_dictation) else ""
+            undoChip.contentDescription = if (look.label) null else context.getString(R.string.keyboard_undo_dictation)
+            undoChip.compoundDrawablePadding = if (look.label) dp(6) else 0
+            undoChip.setPadding(dp(if (look.label) 12 else 13), 0, dp(if (look.label) 14 else 13), 0)
+        }
+        if (statusText.maxLines != look.noteLines) {
+            // Two lines of 14 dp fit the strip's 44 dp only set close together, and Chinese's taller lines only a little
+            // smaller: the note shrinks, down to 10 dp, only as far as it must. In dp as the strip's other words.
+            statusText.maxLines = look.noteLines
+            statusText.includeFontPadding = look.noteLines == 1
+            statusText.setLineSpacing(0f, if (look.noteLines == 1) 1f else 0.85f)
+            if (look.noteLines == 1) {
+                statusText.setAutoSizeTextTypeWithDefaults(TextView.AUTO_SIZE_TEXT_TYPE_NONE)
+                statusText.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14f)
+            } else statusText.setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, TypedValue.COMPLEX_UNIT_DIP)
+        }
+        inlineArea.visibility = if (chips) VISIBLE else GONE
         slotRow.visibility = if (show) VISIBLE else GONE
-        statusText.visibility = if (idle && !show && !undo) VISIBLE else GONE
-        menuKey.text = context.getString(when { choosing -> R.string.keyboard_menu_done; show -> R.string.keyboard_menu_more; else -> R.string.keyboard_menu_open })
+        toolsRow.visibility = if (tools.isNotEmpty()) VISIBLE else GONE
+        toolEmoji.visibility = if (StripTool.Emoji in tools) VISIBLE else GONE
+        toolPaste.visibility = if (StripTool.Paste in tools) VISIBLE else GONE
+        toolClipboard.visibility = if (StripTool.Clipboard in tools) VISIBLE else GONE
+        toolUndo.visibility = if (StripTool.Undo in tools) VISIBLE else GONE
+        statusText.visibility = if (idle && !show && !chips && (!undo || spoken) && !noted && tools.isEmpty()) VISIBLE else GONE
+        menuKey.text = context.getString(when {
+            choosing -> R.string.keyboard_menu_done
+            show || shared || chips -> R.string.keyboard_menu_more
+            else -> R.string.keyboard_menu_open
+        })
         menuKey.contentDescription = context.getString(if (choosing) R.string.keyboard_menu_done else R.string.keyboard_menu)
     }
     /** The menu opened: the hint line shows its page's title and goes back a page when tapped. */
@@ -240,9 +429,11 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
     fun menuClosed() { statusText.isClickable = false; menuKey.text = context.getString(R.string.keyboard_menu_open); statusText.text = hint }
     fun title(text: String) { statusText.text = text }
 
-    /** Shows [phase]'s strip. The caller has already closed the menu if dictation is running. */
-    fun status(phase: SpeechPhase, hint: String, menuVisible: Boolean) {
+    /** Shows [phase]'s strip; [note] says [hint] is a dictation's note. The caller has already closed the menu if
+     * dictation is running. */
+    fun status(phase: SpeechPhase, hint: String, menuVisible: Boolean, note: Boolean = false) {
         this.hint = hint
+        noting = note && phase == SpeechPhase.Idle
         val wasIdle = idleRow.visibility == VISIBLE
         idle = phase == SpeechPhase.Idle
         val processing = phase == SpeechPhase.Transcribing
@@ -264,7 +455,8 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
     fun prepare(phase: SpeechPhase, hint: String) { this.hint = hint; idle = phase == SpeechPhase.Idle }
     fun setLevel(value: Float) = scope.push(value)
 
-    /** Idle: suggestions and the Hex mark. Dictating: the mark is ✓ and the well grows leftwards out of it. */
+    /** Idle: suggestions and the Hex mark. Dictating: the mark is ✓ and the well grows out of it, leftwards (or
+     * rightwards with the Hex key on the left). */
     private fun showIdle(idle: Boolean) {
         reveal?.cancel(); reveal = null
         idleRow.visibility = if (idle) VISIBLE else GONE
@@ -280,7 +472,8 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
             addUpdateListener {
                 val f = it.animatedValue as Float
                 val w = well.width
-                if (w > 0) well.clipBounds = Rect((w * (1 - f)).roundToInt(), 0, w, well.height)
+                if (w > 0) well.clipBounds = if (hexKeyLeft) Rect(0, 0, (w * f).roundToInt(), well.height)
+                    else Rect((w * (1 - f)).roundToInt(), 0, w, well.height)
                 cancelKey.alpha = f
             }
             start()
@@ -293,6 +486,33 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
         hexKey.isPressed = false
     }
 
+    /** A slot's word: [StripText.SIZE] when it fits, smaller (down to [StripText.MIN]) before the
+     * strip ellipsizes it. The slot's width arrives as the measure spec, so nothing waits for layout. */
+    private class Word(context: Context) : TextView(context) {
+        private val measure = TextPaint()
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            if (MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+                val available = MeasureSpec.getSize(widthMeasureSpec) - compoundPaddingLeft - compoundPaddingRight
+                measure.set(paint)
+                val fitted = fitTextSize(available.toFloat(), StripText.SIZE, StripText.MIN) { sp ->
+                    measure.textSize = dpToPx(sp, resources.displayMetrics)
+                    ceil(measure.measureText(text, 0, text.length))
+                }
+                setTextSize(TypedValue.COMPLEX_UNIT_DIP, fitted)
+            }
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        }
+    }
+
+    /** One of the strip's tools: its icon on the strip's line, with the cancel key's round press. */
+    private fun toolButton(res: Int, label: Int, action: () -> Unit) = FrameLayout(context).apply {
+        isFocusable = true; contentDescription = context.getString(label)
+        addView(View(context).apply { isDuplicateParentStateEnabled = true; background = pressable(android.graphics.Color.TRANSPARENT) },
+            LayoutParams(pill, pill, Gravity.CENTER))
+        addView(icon(res), LayoutParams(dp(19), dp(19), Gravity.CENTER))
+        setOnClickListener { action() }
+    }
     private fun icon(res: Int) = ImageView(context).apply { setImageResource(res); imageTintList = ColorStateList.valueOf(ink) }
     private fun shape(fill: Int, radius: Float) = GradientDrawable().apply { setColor(fill); cornerRadius = radius }
     private fun pressable(fill: Int) = android.graphics.drawable.StateListDrawable().apply {
@@ -300,3 +520,13 @@ internal class StripView(context: Context, private val ime: HexKeyboard, private
         addState(intArrayOf(), GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(fill) })
     }
 }
+
+/** [size] in dp as pixels. The strip's words are in dp, not sp: as Gboard's suggestions (Gboard 15.1, emulator),
+ * they keep their size whatever the system font size, so a larger font never crowds the strip. */
+private fun dpToPx(size: Float, metrics: DisplayMetrics): Float =
+    TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, size, metrics)
+
+/** How Undo dictation looks beside the hint line: while a dictation's note shares the line ([shared]) the chip is its
+ * ↶ alone and the note may take two lines; otherwise the chip says "Undo dictation" and the line is one. */
+internal data class UndoLook(val label: Boolean, val noteLines: Int)
+internal fun undoLook(shared: Boolean) = if (shared) UndoLook(label = false, noteLines = 2) else UndoLook(label = true, noteLines = 1)

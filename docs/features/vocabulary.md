@@ -17,10 +17,15 @@ General › Vocabulary   // vocabulary.settings; after Language
 │   (dictation::vocabulary::terms_read: Parakeet's 64-term cap or the
 │   prompt's character budget, the same count transcription takes; scene
 │   vocabulary-budget)
-├── Sheet description -> what the list does, then "Terms with spaces match
-│   only when said in full" (a term is matched whole; "Dax Rad" doesn't help
-│   "Dax" said alone, so a name also said alone gets its own row)
-├── Sheet rows -> Term | Sounds like (comma-separated) | ×; scroll past 8
+├── Sheet description -> one line: "Names and words Hex should spell right.
+│   Phrases match only when said in full." (a term is matched whole; "Dax Rad"
+│   doesn't help "Dax" said alone, so a name also said alone gets its own row)
+├── Sheet rows -> the labels "Spell as" and "Misheard as" (optional) stay above
+│   the fields: term | "sounds like" spellings (comma-separated) | ×; an empty
+│   field shows a short example ("e.g. cappuccino"); scroll past 8, the scroll
+│   bar right of the × column
+│   // scenes mac-settings-vocabulary and -empty; the scroll bar's place is
+│   // from the element tree, not yet observed in a real window
 ├── Empty list -> Opens with one blank row focused; opening never animates rows
 ├── Add term -> New empty row, focused; the list glides to its end and the row
 │   rises 8 pt as it fades in (SETTLE, bounce 0; Reduce Motion: fade only);
@@ -52,6 +57,16 @@ General › Vocabulary   // vocabulary.settings; after Language
 └── Boost -> no control in the window: Normal (default) unless changed with
     `hex settings set vocabulary_boost off|light|normal|strong`
     (settings.json `vocabulary_boost`)  // vocabulary.boost
+
+Menu bar › Vocabulary ▸ (Labs › Vocabulary menu, off by default, macOS)  // vocabulary.menu
+├── Add term… -> Settings' Vocabulary sheet with a new focused row at its end
+│   (the list glides to it as Add term's does), autosaved through the sheet's
+│   draft path; an empty list already opens with one focused blank row
+├── up to the last five saved terms, newest first, as disabled informational
+│   rows on one line each (whitespace collapsed); no separator or rows while
+│   the list is empty
+└── Open vocabulary… -> Settings' Vocabulary sheet
+    (macos_rune/status_item.rs `refresh_vocabulary`, read as the menu opens)
 
 Transcription (Parakeet: RNN-T and TDT, Underdog Bark and Nemotron 3.5 ASR too)  // vocabulary.transcription; transcription::gguf_session::with_vocabulary
 ├── Parakeet takes the list unless the boost is Off (labs.md)
