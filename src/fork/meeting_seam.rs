@@ -112,7 +112,7 @@ fn units(text: &str) -> Vec<Unit> {
         }
         if character.is_alphanumeric() {
             units.push(Unit {
-                text: character.to_string(),
+                text: character.to_lowercase().collect(),
                 end,
             });
         }
@@ -189,6 +189,10 @@ mod tests {
                 "The quarterly numbers, and plan the launch."
             ),
             "and plan the launch."
+        );
+        assert_eq!(
+            strip_repeated_speech("ｑａ ｓｈｉｐ ＩＴ ＮＯＷ", "Ｉｔ ｎｏｗ works"),
+            "works"
         );
     }
 
