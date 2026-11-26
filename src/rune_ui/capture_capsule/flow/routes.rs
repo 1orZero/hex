@@ -1,39 +1,6 @@
 //! In-place routing updates preserve a search, its selection and user actions.
 use super::*;
 
-fn pending_name(route: &Route) -> Option<String> {
-    match route {
-        Route::Rule { to, .. } => Some(to.name.clone()),
-        Route::ResolvingRule { name } => Some(name.clone()),
-        _ => None,
-    }
-}
-
-pub(super) fn undoable(phase: &Phase, now: f64) -> Option<Action> {
-    if let Phase::Routed(r) = phase
-        && !r.delivered
-        && !r.taken_back
-        && let Some(to) = pending_name(&r.route)
-    {
-        return Some(Action::Undo { to });
-    }
-    let (to, at) = match phase {
-        Phase::Routed(Routed {
-            route: Route::Rule { to, .. },
-            at,
-            ..
-        }) => (&to.name, *at),
-        Phase::Sent(Sent {
-            to,
-            at,
-            undoable: true,
-            ..
-        }) => (to, *at),
-        _ => return None,
-    };
-    (now - at < undo_s()).then(|| Action::Undo { to: to.clone() })
-}
-
 pub(super) fn sent_to(to: &str) -> String {
     tr_fill("Sent to {}", &short(to))
 }
@@ -108,11 +75,12 @@ fn keep_rows(shown: &Route, next: Route) -> Route {
     }
     recent.extend(added);
     match next {
-        Route::Rule { to, site, .. } => Route::Rule {
+        Route::Rule { to, site, by, .. } => Route::Rule {
             to,
             suggested,
             recent,
             site,
+            by,
         },
         Route::Guess { site, .. } => Route::Guess {
             suggested,
@@ -190,7 +158,7 @@ mod tests {
         let guess_of = |suggested: Vec<Dest>, recent: Vec<Dest>| Route::Guess {
             suggested,
             recent,
-            site: Some("problems.kitlangton.com".into()),
+            site: Some("example.com".into()),
         };
         let mut flow = Flow::new();
         flow.input(
@@ -203,6 +171,7 @@ mod tests {
             )),
             0.0,
         );
+        flow.input(Input::OpenList, 0.1);
         let shown = sessions(&flow);
         assert_eq!(shown, ["ses_board", "ses_home", "ses_hex"]);
         flow.point(1, true);
@@ -233,10 +202,9 @@ mod tests {
             "rows keep their place and take their new reason; a new one comes last"
         );
         let shown = sessions(&flow);
-        flow.input(Input::OpenList, 0.5);
-        assert_eq!(sessions(&flow), shown, "the search opens on the same rows");
-        flow.input(Input::Escape, 0.6);
-        assert_eq!(sessions(&flow), shown, "and goes back to them");
+        flow.input(Input::Escape, 0.5);
+        flow.input(Input::OpenList, 0.6);
+        assert_eq!(sessions(&flow), shown, "reopening keeps the same rows");
         flow.input(
             Input::Refined(guess_of(
                 vec![Dest::new("Rune", "mentioned").session("ses_rune")],
@@ -272,8 +240,8 @@ mod tests {
             0.0,
         );
         assert_eq!(
-            flow.undoable(10.0),
-            Some(Action::Undo { to: "board".into() })
+            flow.clone().input(Input::Undo, 10.0),
+            [Action::Undo { to: "board".into() }]
         );
         flow.input(
             Input::Refined(Route::Rule {
@@ -281,13 +249,14 @@ mod tests {
                 suggested: Vec::new(),
                 recent: Vec::new(),
                 site: None,
+                by: AutoSendBy::Rule,
             }),
             2.0,
         );
         let Pres::Done(done) = flow.pres(2.0) else {
             panic!("missing capsule");
         };
-        assert_eq!(done.countdown, Some(undo_s()));
+        assert_eq!(done.countdown, Some(send_hold_s()));
         let mut unresolved = Flow::new();
         unresolved.input(
             Input::Routed(Route::ResolvingRule {

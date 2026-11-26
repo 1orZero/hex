@@ -12,6 +12,15 @@ impl MeetingsPane {
             start_ms: seconds * 1_000,
             text: text.into(),
             pause_before_ms: None,
+            entries: vec![crate::meeting::TranscriptEntryKey {
+                source: if mine {
+                    crate::meeting::MeetingSource::Microphone
+                } else {
+                    crate::meeting::MeetingSource::System
+                },
+                start_ms: seconds * 1_000,
+                end_ms: seconds * 1_000 + 1_000,
+            }],
         };
         let mut conversation = vec![
             turn(
@@ -51,7 +60,7 @@ impl MeetingsPane {
         ];
         conversation[8].pause_before_ms = Some(55_000);
         fn preview_folder(id: &str) -> std::path::PathBuf {
-            format!("/Users/kit/Library/Application Support/hex/meetings/{id}").into()
+            format!("~/Library/Application Support/hex/meetings/{id}").into()
         }
         let meeting =
             |id: &str, title: &str, status, day: &str, clock: &str, minutes: u64| Meeting {
@@ -74,7 +83,7 @@ impl MeetingsPane {
                 transcript: Transcript::Loaded(Vec::new()),
                 chapters: Vec::new(),
                 imported: false,
-                kept_for: Some("24 hours"),
+                kept_for: Some("7 days"),
             };
         let mut live = meeting(
             "preview-live",
@@ -96,7 +105,7 @@ impl MeetingsPane {
         );
         notes.app = Some("Zoom".into());
         notes.reveal = crate::meeting::RevealTarget::Markdown(
-            "/Users/kit/Documents/Hex Meetings/Arcade launch plan.md".into(),
+            "~/Documents/Hex Meetings/Arcade launch plan.md".into(),
         );
         notes.summary = Some(
             "One login for every Anomaly Arcade game, aiming for twenty to thirty games over the next couple of months. The build screen needs a proposal before more polish."
@@ -139,7 +148,7 @@ impl MeetingsPane {
         for (id, title, app) in [
             ("preview-meet", "Weekly sync", "Google Meet"),
             ("preview-teams", "Vendor check-in", "teams.microsoft.com"),
-            ("preview-huddle", "Release huddle", "Slack Huddle"),
+            ("preview-huddle", "Release huddle", "Slack huddle"),
         ] {
             let mut meeting = pane.meetings[2].clone();
             meeting.id = id.into();

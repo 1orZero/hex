@@ -1,10 +1,10 @@
 //! Speech models already on this computer: GGUF files in the Hugging Face
 //! hub cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else
 //! `~/.cache/huggingface/hub`). A scan runs only when the model picker or
-//! onboarding's model step opens, never in the background, and reads
-//! headers alone (`gguf_header`, the same checks as an import). Each file's
-//! result is kept per path, size, modification time, and file ID, so an
-//! unchanged file is never read twice.
+//! onboarding's model step opens (or `hex model list`/`hex model status`
+//! runs), never in the background, and reads headers alone (`gguf_header`,
+//! the same checks as an import). Each file's result is kept per path, size,
+//! modification time, and file ID, so an unchanged file is never read twice.
 //!
 //! Hex never writes or deletes inside the cache. A file whose blob name is a
 //! catalog model's pinned SHA-256 (with its size) counts as that model
@@ -12,7 +12,7 @@
 //! under "Found on this computer" and, once chosen, is hashed in full once
 //! and registered as an in-place import (`custom_models`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -23,6 +23,7 @@ use color_eyre::eyre::{Result, bail, eyre};
 use serde::{Deserialize, Serialize};
 
 use super::custom_models::Receipt;
+use super::gguf_header::TensorTypes;
 use super::models::{MODELS, ModelDefinition, ModelRuntime, TranscriptionModelId, models_dir};
 
 /// One compatible GGUF found in the cache.
@@ -48,7 +49,8 @@ pub struct Found {
     pub architecture: String,
     pub variant: String,
     pub languages: Vec<String>,
-    /// The quantization most of its weights use: Q8_0, F16, or F32.
+    /// The quantization most of its weights use: Q8_0, F16, or F32, or the
+    /// K quant a file Labs › Smaller model files allows (Q4_K, Q5_K, Q6_K).
     pub compression: &'static str,
     /// The tensor data it loads, which estimates the memory it needs.
     pub tensor_bytes: u64,
@@ -94,7 +96,10 @@ struct Stamp {
 
 #[derive(Default)]
 struct Cache {
-    files: HashMap<PathBuf, (Stamp, Option<Found>)>,
+    /// Each file's result, keyed by its stamp and the tensor types the scan
+    /// could run: toggling Labs › Smaller model files re-reads the header
+    /// instead of answering from the last scan.
+    files: HashMap<PathBuf, ((Stamp, TensorTypes), Option<Found>)>,
     last: Vec<Found>,
 }
 
@@ -125,8 +130,16 @@ pub fn scan() -> Vec<Found> {
 }
 
 fn scan_in(hub: &Path) -> Vec<Found> {
+    scan_in_where(hub, super::custom_models::tensor_types())
+}
+
+/// [`scan_in`] against `types` rather than this process's Labs switch, so a
+/// test can scan either side of Labs › Smaller model files.
+fn scan_in_where(hub: &Path, types: TensorTypes) -> Vec<Found> {
     let mut found = Vec::new();
+    let mut seen = HashSet::new();
     let Ok(repositories) = std::fs::read_dir(hub) else {
+        prune(hub, &seen);
         return found;
     };
     for repository in repositories.flatten() {
@@ -148,12 +161,16 @@ fn scan_in(hub: &Path) -> Vec<Found> {
                 if path.extension().is_none_or(|extension| extension != "gguf") {
                     continue;
                 }
-                if let Some(model) = read(&path, &repository_name, &revision) {
+                if path.is_file() {
+                    seen.insert(path.clone());
+                }
+                if let Some(model) = read(&path, &repository_name, &revision, types) {
                     found.push(model);
                 }
             }
         }
     }
+    prune(hub, &seen);
     found.sort_by(|left, right| {
         left.catalog
             .is_none()
@@ -162,6 +179,16 @@ fn scan_in(hub: &Path) -> Vec<Found> {
             .then_with(|| left.path.cmp(&right.path))
     });
     found
+}
+
+/// Keep only this scan's files for this hub, including unreadable headers.
+/// A removed snapshot (or a dangling blob link) must release its metadata.
+fn prune(hub: &Path, seen: &HashSet<PathBuf>) {
+    CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .files
+        .retain(|path, _| !path.starts_with(hub) || seen.contains(path));
 }
 
 fn stamp(path: &Path) -> Option<Stamp> {
@@ -204,26 +231,33 @@ pub(crate) fn inode(metadata: &std::fs::Metadata) -> Option<u64> {
     }
 }
 
-/// One file's result, from the cache while its stamp holds.
-fn read(path: &Path, repository: &str, revision: &str) -> Option<Found> {
+/// One file's result, from the cache while its stamp and the runnable tensor
+/// types both hold.
+fn read(path: &Path, repository: &str, revision: &str, types: TensorTypes) -> Option<Found> {
     let stamp = stamp(path)?;
     let cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
     if let Some((cached, found)) = cache.files.get(path)
-        && *cached == stamp
+        && *cached == (stamp, types)
     {
         return found.clone();
     }
     drop(cache);
-    let found = inspect(path, repository, revision, stamp.bytes);
+    let found = inspect(path, repository, revision, stamp.bytes, types);
     CACHE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .files
-        .insert(path.to_path_buf(), (stamp, found.clone()));
+        .insert(path.to_path_buf(), ((stamp, types), found.clone()));
     found
 }
 
-fn inspect(path: &Path, repository: &str, revision: &str, bytes: u64) -> Option<Found> {
+fn inspect(
+    path: &Path,
+    repository: &str,
+    revision: &str,
+    bytes: u64,
+    types: TensorTypes,
+) -> Option<Found> {
     let file_name = path.file_name()?.to_string_lossy().into_owned();
     let blob_sha256 = std::fs::read_link(path)
         .ok()
@@ -254,7 +288,7 @@ fn inspect(path: &Path, repository: &str, revision: &str, bytes: u64) -> Option<
             return None;
         }
     };
-    let profile = match super::custom_models::profile_of(&header, &file_name) {
+    let profile = match super::custom_models::profile_of(&header, &file_name, types) {
         Ok(profile) => profile,
         Err(error) => {
             tracing::debug!(path = %path.display(), %error, "skipping a cached model Hex can't run");
@@ -291,7 +325,7 @@ fn catalog_match(
     MODELS
         .iter()
         .find(|model| {
-            let ModelRuntime::Gguf(artifact) = model.runtime else {
+            let ModelRuntime::Gguf(artifact) = &model.runtime else {
                 return false;
             };
             artifact.bytes == bytes
@@ -305,7 +339,15 @@ fn catalog_match(
 
 fn compression(header: &super::gguf_header::GgufHeader) -> &'static str {
     let count = |kind| header.tensor_types.get(&kind).copied().unwrap_or(0);
-    if count(8) > 0 {
+    // A K-quant file is named for its smallest weights, the ones that make it
+    // smaller than Q8_0; the catalog's files have none of these.
+    if count(12) > 0 {
+        "Q4_K"
+    } else if count(13) > 0 {
+        "Q5_K"
+    } else if count(14) > 0 {
+        "Q6_K"
+    } else if count(8) > 0 {
         "Q8_0"
     } else if count(1) > 0 {
         "F16"
@@ -325,9 +367,9 @@ fn catalog_found(
     model: TranscriptionModelId,
 ) -> Found {
     let definition = super::models::definition(model);
-    let (architecture, variant) = match definition.runtime {
-        ModelRuntime::Gguf(artifact) => (artifact.architecture, artifact.variant),
-        ModelRuntime::AppleSpeech => ("", ""),
+    let (architecture, variant) = match &definition.runtime {
+        ModelRuntime::Gguf(artifact) => (artifact.architecture, artifact.variant.to_string()),
+        ModelRuntime::AppleSpeech => ("", String::new()),
     };
     Found {
         path: path.to_path_buf(),
@@ -337,7 +379,7 @@ fn catalog_found(
         bytes,
         blob_sha256,
         catalog: Some(model),
-        name: definition.name.to_owned(),
+        name: definition.name.to_string(),
         architecture: architecture.to_owned(),
         variant: variant.to_owned(),
         languages: definition
@@ -373,7 +415,7 @@ fn adopted(model: &ModelDefinition) -> Option<Adopted> {
 /// Where a catalog model already used from another app's download is, while
 /// that file is still there at the pinned size.
 pub fn adopted_catalog(model: &ModelDefinition) -> Option<PathBuf> {
-    let ModelRuntime::Gguf(artifact) = model.runtime else {
+    let ModelRuntime::Gguf(artifact) = &model.runtime else {
         return None;
     };
     adopted(model)
@@ -426,7 +468,7 @@ pub fn adopt_catalog(
     path: &Path,
     canceled: &AtomicBool,
 ) -> Result<PathBuf> {
-    let ModelRuntime::Gguf(artifact) = model.runtime else {
+    let ModelRuntime::Gguf(artifact) = &model.runtime else {
         bail!("{} has no file to check", model.name);
     };
     if let Some(adopted) = adopted(model)
@@ -443,7 +485,7 @@ pub fn adopt_catalog(
         );
     }
     let sha256 = super::models::sha256_hex(path, Some(canceled))?;
-    if sha256 != artifact.sha256 {
+    if sha256 != artifact.sha256.as_ref() {
         bail!(
             "{} found on this computer doesn't match the checksum Hex pins",
             model.name
@@ -605,18 +647,56 @@ mod tests {
     }
 
     #[test]
+    fn scans_release_removed_snapshots_and_missing_hubs() {
+        let hub = temporary("prune");
+        for revision in 0..100 {
+            let path = cache(
+                &hub,
+                "someone/model",
+                &revision.to_string(),
+                "model.gguf",
+                &"ab".repeat(32),
+                Some(b"not a gguf"),
+                0,
+            );
+            assert!(scan_in(&hub).is_empty());
+            let count = || {
+                CACHE
+                    .lock()
+                    .unwrap()
+                    .files
+                    .keys()
+                    .filter(|p| p.starts_with(&hub))
+                    .count()
+            };
+            assert_eq!(count(), 1, "old snapshot metadata must not accumulate");
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir_all(&hub).unwrap();
+        assert!(scan_in(&hub).is_empty());
+        assert!(
+            !CACHE
+                .lock()
+                .unwrap()
+                .files
+                .keys()
+                .any(|p| p.starts_with(&hub))
+        );
+    }
+
+    #[test]
     fn a_scan_finds_catalog_matches_and_compatible_files_without_writing() {
         let hub = temporary("scan");
         let v3 = super::super::models::definition(TranscriptionModelId::ParakeetV3);
-        let ModelRuntime::Gguf(artifact) = v3.runtime else {
+        let ModelRuntime::Gguf(artifact) = &v3.runtime else {
             unreachable!("Parakeet v3 is a GGUF model")
         };
         cache(
             &hub,
             artifact.repository,
             artifact.revision,
-            artifact.filename,
-            artifact.sha256,
+            artifact.filename.as_ref(),
+            artifact.sha256.as_ref(),
             None,
             artifact.bytes,
         );
@@ -654,7 +734,10 @@ mod tests {
         let found = scan_in(&hub);
         assert_eq!(found.len(), 2, "{found:#?}");
         assert_eq!(found[0].catalog, Some(TranscriptionModelId::ParakeetV3));
-        assert_eq!(found[0].blob_sha256.as_deref(), Some(artifact.sha256));
+        assert_eq!(
+            found[0].blob_sha256.as_deref(),
+            Some(artifact.sha256.as_ref())
+        );
         let other = &found[1];
         assert_eq!(other.catalog, None);
         assert_eq!(other.name, "Whisper Small");
@@ -668,6 +751,48 @@ mod tests {
         // A second scan answers unchanged files from the cache.
         assert_eq!(scan_in(&hub), found);
         assert_eq!(snapshot_of(&hub), before, "the cache is never written");
+        fs::remove_dir_all(hub).unwrap();
+    }
+
+    /// The per-file cache remembers which tensor types answered, so toggling
+    /// Labs › Smaller model files re-reads the header instead of keeping a
+    /// newly allowed file hidden (or a disallowed one offered).
+    #[test]
+    fn a_scan_re_reads_a_file_when_the_labs_toggle_changes() {
+        let hub = temporary("toggle");
+        let contents = gguf(
+            &[
+                ("general.architecture", "whisper"),
+                ("general.name", "Whisper Small Q6_K"),
+                ("stt.variant", "whisper-small"),
+            ],
+            &[("general.languages", &["en"])],
+            &[],
+            &[("encoder.weight", 14, 512), ("norm", 0, 16)],
+        );
+        cache(
+            &hub,
+            "someone/whisper-small-gguf",
+            "0123456789abcdef",
+            "whisper-small-Q6_K.gguf",
+            &"ab".repeat(32),
+            Some(&contents),
+            0,
+        );
+        // Off: the K types are refused, and the miss is cached.
+        assert!(scan_in_where(&hub, TensorTypes::STANDARD).is_empty());
+        // On: the same unchanged file is offered, named for its weights, and
+        // its K tensor data counts toward the memory estimate.
+        let found = scan_in_where(&hub, TensorTypes::WITH_K_QUANTS);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].compression, "Q6_K");
+        assert!(
+            found[0].tensor_bytes >= 420,
+            "{} bytes of K weights",
+            found[0].tensor_bytes
+        );
+        // Back off: the cached offer must not survive the toggle either.
+        assert!(scan_in_where(&hub, TensorTypes::STANDARD).is_empty());
         fs::remove_dir_all(hub).unwrap();
     }
 
@@ -713,7 +838,7 @@ mod tests {
         assert!(super::super::custom_models::uses_path(&path));
         assert!(super::super::custom_models::usable(id));
         let definition = super::super::custom_models::definition(id);
-        assert_eq!(super::super::models::model_path(definition).unwrap(), path);
+        assert_eq!(super::super::models::model_path(&definition).unwrap(), path);
         assert_eq!(
             super::super::custom_models::verify(id, &AtomicBool::new(false)).unwrap(),
             path
@@ -735,7 +860,7 @@ mod tests {
         let (model, artifact) = MODELS
             .iter()
             .filter(|model| !model.id.is_custom())
-            .filter_map(|model| match model.runtime {
+            .filter_map(|model| match &model.runtime {
                 ModelRuntime::Gguf(artifact) => Some((model, artifact)),
                 ModelRuntime::AppleSpeech => None,
             })
@@ -745,8 +870,8 @@ mod tests {
             &hub,
             artifact.repository,
             artifact.revision,
-            artifact.filename,
-            artifact.sha256,
+            artifact.filename.as_ref(),
+            artifact.sha256.as_ref(),
             None,
             artifact.bytes,
         );
@@ -754,9 +879,9 @@ mod tests {
             &path,
             artifact.repository,
             artifact.revision,
-            artifact.filename.to_owned(),
+            artifact.filename.to_string(),
             artifact.bytes,
-            Some(artifact.sha256.to_owned()),
+            Some(artifact.sha256.to_string()),
             model.id,
         );
         CACHE
@@ -785,6 +910,67 @@ mod tests {
     }
 
     #[test]
+    fn a_found_catalog_model_is_not_ready_until_adopted_in_place() {
+        let hub = temporary("ready");
+        let models = temporary("ready-models");
+        super::super::models::set_test_models_dir(Some(models.clone()));
+        // A model the other tests here don't push, so the shared scan cache
+        // can't answer with their files.
+        let model = super::super::models::definition(TranscriptionModelId::CohereTranscribe);
+        let ModelRuntime::Gguf(artifact) = &model.runtime else {
+            unreachable!("Cohere is a GGUF model")
+        };
+        let path = cache(
+            &hub,
+            artifact.repository,
+            artifact.revision,
+            artifact.filename.as_ref(),
+            artifact.sha256.as_ref(),
+            None,
+            artifact.bytes,
+        );
+        let found = catalog_found(
+            &path,
+            artifact.repository,
+            artifact.revision,
+            artifact.filename.to_string(),
+            artifact.bytes,
+            Some(artifact.sha256.to_string()),
+            model.id,
+        );
+        CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .last
+            .push(found);
+        // Another app's file at the pinned size counts as installed, but
+        // nothing may call it ready before Hex has checked it.
+        assert!(super::super::models::is_installed(&model, "en"));
+        assert!(!super::super::models::is_verified(&model));
+        assert!(!super::super::models::is_ready(&model, "en"));
+        // The record adopt_catalog writes once its full hash matches.
+        fs::create_dir_all(adopted_file(&model).unwrap().parent().unwrap()).unwrap();
+        super::super::models::write_json_atomically(
+            &adopted_file(&model).unwrap(),
+            &Adopted {
+                path: path.clone(),
+                receipt: Receipt::of(&path, artifact.sha256.to_string()).unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(catalog_verified(&model));
+        assert!(super::super::models::is_ready(&model, "en"));
+        CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .last
+            .retain(|found| found.path != path);
+        super::super::models::set_test_models_dir(None);
+        fs::remove_dir_all(hub).unwrap();
+        fs::remove_dir_all(models).unwrap();
+    }
+
+    #[test]
     fn a_catalog_match_is_checked_in_full_before_use() {
         let hub = temporary("catalog");
         let models = temporary("catalog-models");
@@ -793,7 +979,7 @@ mod tests {
         let (v3, artifact) = MODELS
             .iter()
             .filter(|model| !model.id.is_custom())
-            .filter_map(|model| match model.runtime {
+            .filter_map(|model| match &model.runtime {
                 ModelRuntime::Gguf(artifact) => Some((model, artifact)),
                 ModelRuntime::AppleSpeech => None,
             })
@@ -804,8 +990,8 @@ mod tests {
             &hub,
             artifact.repository,
             artifact.revision,
-            artifact.filename,
-            artifact.sha256,
+            artifact.filename.as_ref(),
+            artifact.sha256.as_ref(),
             None,
             artifact.bytes,
         );

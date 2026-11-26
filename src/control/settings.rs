@@ -7,16 +7,17 @@ use serde_json::Value;
 
 use super::ControlError;
 use crate::app_settings::{
-    AppSettings, CALENDAR_LEAD_MINUTES, HotkeyBinding, HotkeyKey, HotkeySlot,
-    MAX_EXTRA_DICTATION_SHORTCUTS,
+    AppSettings, HotkeyBinding, HotkeyKey, HotkeySlot, MAX_EXTRA_DICTATION_SHORTCUTS,
 };
 
+#[cfg(test)]
+mod choice_tests;
 mod hotkeys;
 mod registry;
 
 use hotkeys::check_shortcut;
 pub use hotkeys::{format_hotkey, parse_hotkey};
-use registry::{CAPTURE_KEYS, KEYS, Key, Kind, NUMERIC_CHOICES, RETIRED, needs};
+use registry::{CAPTURE_KEYS, KEYS, Key, Kind, RETIRED, needs};
 
 /// One setting as `hex settings get` reports it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -117,7 +118,6 @@ pub struct ShortcutRules {
 /// Something the host does beyond saving `settings.json`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
-    HistoryRetention(crate::history::HistoryRetention),
     DockIcon,
     /// Check the newly chosen channel now rather than within the hour.
     CheckForUpdates,
@@ -186,6 +186,12 @@ pub fn get(settings: &AppSettings, name: &str) -> Result<Vec<SettingValue>, Cont
 }
 
 fn unknown(name: &str) -> ControlError {
+    if name == "labs.settings_search" {
+        return ControlError::new(
+            "unknown-setting",
+            "Settings search no longer needs a lab. Use Cmd+K (Ctrl+K off macOS) in the Hex window.",
+        );
+    }
     if let Some((_, replacement)) = RETIRED.iter().find(|(retired, _)| *retired == name) {
         return ControlError::new(
             "unknown-setting",
@@ -217,7 +223,7 @@ fn value_of(key: &Key, json: &Value) -> SettingValue {
             Ok(Some(binding)) => Value::String(format_hotkey(&binding)),
             _ => Value::Null,
         },
-        Kind::Choice(_) if NUMERIC_CHOICES.contains(&key.key) => Value::String(raw.to_string()),
+        Kind::NumberChoice(_) => Value::String(raw.to_string()),
         _ => raw,
     };
     SettingValue {
@@ -225,7 +231,9 @@ fn value_of(key: &Key, json: &Value) -> SettingValue {
         value,
         kind: key.kind.name().into(),
         choices: match key.kind {
-            Kind::Choice(choices) => choices.iter().map(|&choice| choice.into()).collect(),
+            Kind::Choice(choices) | Kind::NumberChoice(choices) => {
+                choices.iter().map(|&choice| choice.into()).collect()
+            }
             _ => Vec::new(),
         },
         writable: key.read_only.is_none()
@@ -289,6 +297,9 @@ pub fn apply(
     let mut effects = Vec::new();
     let message = format!("Set {name}");
     match key.key {
+        "sound_effects" if candidate.sound_effects && candidate.sound_effect_volume <= 0.0 => {
+            candidate.sound_effect_volume = AppSettings::default().sound_effect_volume;
+        }
         "meetings.summaries"
             if candidate.meetings.summaries == crate::app_settings::MeetingSummaries::OpenCode
                 && crate::policy::Policy::current()
@@ -310,7 +321,7 @@ pub fn apply(
                     && !candidate.double_tap_modifiers_allowed())
             {
                 let modifier_only = if cfg!(target_os = "macos") {
-                    ", or with Labs › Double-tap on a lone modifier on, a shortcut without a key"
+                    ", or with Labs › Double-tap Option, Command, or Globe on, a shortcut without a key"
                 } else {
                     ""
                 };
@@ -323,40 +334,11 @@ pub fn apply(
                 ));
             }
         }
-        "labs.double_tap_modifiers" => candidate.normalize_double_tap_settings(),
-        "dictation_hotkey"
-        | "paste_last_hotkey"
-        | "raw_dictation_hotkey"
-        | "typed_text_hotkey"
-        | "second_dictation_hotkey"
-        | "terminal_paste_hotkey"
-        | "cancel_hotkey"
-        | "screenshots.hotkey"
-        | "screenshots.record_hotkey"
-        | "capture.hotkey"
-        | "capture.replay_hotkey" => {
+        _ if matches!(key.kind, Kind::Shortcut(_)) => {
             let Kind::Shortcut(slot) = key.kind else {
                 unreachable!("shortcut keys have the shortcut kind");
             };
-            let binding = match slot {
-                HotkeySlot::Dictation => Some(&candidate.dictation_hotkey),
-                HotkeySlot::PasteLast => candidate.paste_last_hotkey.as_ref(),
-                HotkeySlot::RawDictation => candidate.raw_dictation_hotkey.as_ref(),
-                HotkeySlot::TypedText => candidate.typed_text_hotkey.as_ref(),
-                HotkeySlot::SecondDictation => candidate.second_dictation_hotkey.as_ref(),
-                // Each row of `extra_dictation_hotkeys` is validated from
-                // its own JSON list, not a shortcut key.
-                HotkeySlot::ExtraDictation(_) => None,
-                HotkeySlot::TerminalPaste => candidate.terminal_paste_hotkey.as_ref(),
-                HotkeySlot::Cancel => Some(&candidate.cancel_hotkey),
-                HotkeySlot::Screenshot => Some(&candidate.screenshots.hotkey),
-                HotkeySlot::ScreenshotRecord => candidate.screenshots.record_hotkey.as_ref(),
-                #[cfg(hex_capture)]
-                HotkeySlot::Capture => Some(&candidate.capture.hotkey),
-                #[cfg(hex_capture)]
-                HotkeySlot::CaptureReplay => candidate.capture.replay_hotkey.as_ref(),
-            };
-            if let Some(binding) = binding {
+            if let Some(binding) = slot.get(&candidate) {
                 check_shortcut(settings, &candidate, name, slot, binding, shortcuts)?;
             }
             if candidate.dictation_hotkey.key.is_none() && !candidate.double_tap_modifiers_allowed()
@@ -384,7 +366,7 @@ pub fn apply(
                 }
             }
             // A row can't be double-tap only without a key, or with Labs ›
-            // Double-tap on a lone modifier, without a key but modifiers.
+            // Double-tap Option, Command, or Globe, without a key but modifiers.
             let modifiers_allowed = candidate.double_tap_modifiers_allowed();
             for row in &mut candidate.extra_dictation_hotkeys {
                 row.mode = row
@@ -394,6 +376,13 @@ pub fn apply(
         }
         "keyboard_model_switching.mappings" => {
             for choice in candidate.keyboard_model_switching.mappings.values() {
+                choice
+                    .validate()
+                    .map_err(|error| invalid(name, &error.to_string()))?;
+            }
+        }
+        "model_switch_other" => {
+            if let Some(choice) = &candidate.model_switch_other {
                 choice
                     .validate()
                     .map_err(|error| invalid(name, &error.to_string()))?;
@@ -435,17 +424,19 @@ pub fn apply(
                  shortcut first",
             ));
         }
-        "labs.standalone_special_keys" => candidate.repair_special_keys(),
-        "labs.section_key_alone" => candidate.repair_section_key(),
         "labs.parakeet_ultra" if !candidate.labs.parakeet_ultra => {
             if let Some(why) = crate::labs::Feature::ParakeetUltra.off_refusal(settings) {
                 return Err(invalid(name, why));
             }
         }
-        "history_retention" => effects.push(Effect::HistoryRetention(candidate.history_retention)),
         "show_dock_icon" => effects.push(Effect::DockIcon),
         "updates.channel" => effects.push(Effect::CheckForUpdates),
         _ => {}
+    }
+    if let Some(feature) = crate::labs::Feature::for_settings_key(key.key)
+        && feature.settings_key() == key.key
+    {
+        feature.apply_side_effects(&mut candidate);
     }
     Ok(Change {
         settings: candidate,
@@ -593,22 +584,17 @@ fn parse(key: &Key, raw: &str, shortcuts: &ShortcutRules) -> Result<Value, Contr
                     &format!("expected a whole number from {min} to {max}"),
                 )
             }),
-        Kind::Choice(choices) => {
+        Kind::Choice(choices) | Kind::NumberChoice(choices) => {
             let normalized = trimmed.to_ascii_lowercase().replace('-', "_");
             let choice = choices
                 .iter()
                 .find(|choice| choice.to_ascii_lowercase().replace('-', "_") == normalized)
                 .ok_or_else(|| invalid(name, &format!("expected one of {}", choices.join(", "))))?;
-            Ok(if name == "meetings.calendar.lead_minutes" {
-                let minutes: u8 = choice.parse().expect("lead choices are numbers");
-                debug_assert!(CALENDAR_LEAD_MINUTES.contains(&minutes));
-                Value::from(minutes)
-            } else if name == "labs.unload_idle_minutes" {
-                let minutes: u32 = choice.parse().expect("idle choices are numbers");
-                debug_assert!(crate::app_settings::UNLOAD_IDLE_MINUTES.contains(&minutes));
-                Value::from(minutes)
-            } else {
-                Value::String((*choice).into())
+            Ok(match key.kind {
+                Kind::NumberChoice(_) => {
+                    Value::from(choice.parse::<u32>().expect("number choices are numbers"))
+                }
+                _ => Value::String((*choice).into()),
             })
         }
         Kind::Text => Ok(Value::String(raw.into())),
@@ -672,6 +658,15 @@ mod tests {
         } else {
             assert_eq!(refused, Some("unsupported"));
         }
+        // Stop every call recording ships on all three OSes.
+        assert!(
+            unavailable_under(
+                "labs.stop_any_call_recording",
+                crate::policy::Policy::default()
+            )
+            .is_none(),
+            "the lab is refused on this OS"
+        );
     }
 
     /// A saved record shortcut and Annotate's shortcut can't share a chord
@@ -755,6 +750,10 @@ mod tests {
                     code: 123,
                     label: "Left".into(),
                 }),
+                "microphone" => Ok(HotkeyKey {
+                    code: 176,
+                    label: "Mic".into(),
+                }),
                 "menu" => Ok(HotkeyKey {
                     code: 0,
                     label: "Menu".into(),
@@ -801,6 +800,7 @@ mod tests {
                 retention: Some(crate::app_settings::MeetingRetention::Day),
                 audio_retention: Some(crate::app_settings::MeetingRetention::Day),
                 opencode_model: Some("anthropic/claude-haiku".into()),
+                recording_indicator_display: Some(r"\\.\DISPLAY2".into()),
                 ..Default::default()
             },
             ..Default::default()
@@ -832,6 +832,87 @@ mod tests {
         assert_eq!(names.len(), keys().count(), "a key is listed twice");
     }
 
+    /// Fails when a Labs feature's `settings_key()` is missing from `keys()`,
+    /// is not a boolean key, or points to a different `AppSettings` field than
+    /// `Feature::on` / `Feature::set`.
+    #[test]
+    fn every_labs_feature_has_a_matching_bool_cli_key() {
+        for feature in crate::labs::Feature::ALL {
+            let name = feature.settings_key();
+            let key = keys().find(|key| key.key == name).unwrap_or_else(|| {
+                panic!(
+                    "Labs feature `{}` names no `hex settings` key `{name}`",
+                    feature.name()
+                )
+            });
+            assert!(
+                matches!(key.kind, Kind::Bool),
+                "Labs feature `{}` key `{name}` is {:?}, expected Bool",
+                feature.name(),
+                key.kind
+            );
+
+            let default = AppSettings::default();
+            assert!(!feature.on(&default), "{} defaults on", feature.name());
+            assert_eq!(
+                get(&default, name).unwrap()[0].value,
+                Value::Bool(false),
+                "`{name}` did not read false for default {}",
+                feature.name()
+            );
+
+            let mut via_feature = default.clone();
+            feature.set(&mut via_feature, true);
+            assert!(feature.on(&via_feature), "{}", feature.name());
+            assert_eq!(
+                get(&via_feature, name).unwrap()[0].value,
+                Value::Bool(true),
+                "`{name}` does not read the bool `Feature::set` wrote for {}",
+                feature.name()
+            );
+
+            let via_cli = apply(&default, name, "true", &rules()).unwrap().settings;
+            assert!(
+                feature.on(&via_cli),
+                "applying `{name} true` did not turn on `Feature::on` for {}",
+                feature.name()
+            );
+            assert_eq!(
+                via_cli,
+                via_feature,
+                "applying `{name} true` diverged from `Feature::set(true)` for {}",
+                feature.name()
+            );
+
+            let mut off_via_feature = via_feature.clone();
+            feature.set(&mut off_via_feature, false);
+            let off_via_cli = apply(&via_feature, name, "false", &rules())
+                .unwrap()
+                .settings;
+            assert!(!feature.on(&off_via_cli), "{}", feature.name());
+            assert_eq!(
+                off_via_cli,
+                off_via_feature,
+                "applying `{name} false` diverged from `Feature::set(false)` for {}",
+                feature.name()
+            );
+
+            for extra in feature.extra_settings_keys() {
+                assert!(
+                    keys().any(|key| key.key == *extra),
+                    "Labs feature `{}` companion key `{extra}` is missing from `keys()`",
+                    feature.name()
+                );
+                assert_eq!(
+                    crate::labs::Feature::for_settings_key(extra),
+                    Some(feature),
+                    "companion key `{extra}` did not map back to `{}`",
+                    feature.name()
+                );
+            }
+        }
+    }
+
     #[test]
     fn ui_language_accepts_traditional_chinese_in_any_case() {
         for raw in ["zh-Hant", "zh-hant", "ZH_HANT"] {
@@ -842,6 +923,245 @@ mod tests {
         let change = apply(&AppSettings::default(), "ui_language", "zh", &rules()).unwrap();
         let shown = get(&change.settings, "ui_language").unwrap();
         assert_eq!(shown[0].value, Value::String("zh".into()));
+    }
+
+    #[test]
+    fn the_hud_height_gap_is_whole_points_in_range() {
+        let change = apply(
+            &AppSettings::default(),
+            "labs.hud_bottom_gap",
+            "120",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(change.settings.labs.hud_bottom_gap, 120);
+        assert_eq!(
+            apply(
+                &AppSettings::default(),
+                "labs.hud_bottom_gap",
+                "401",
+                &rules()
+            )
+            .unwrap_err()
+            .code,
+            "invalid-value"
+        );
+        assert_eq!(
+            apply(
+                &AppSettings::default(),
+                "labs.hud_bottom_gap",
+                "-1",
+                &rules()
+            )
+            .unwrap_err()
+            .code,
+            "invalid-value"
+        );
+    }
+
+    #[test]
+    fn a_microphone_linger_window_is_seconds_in_settings_json() {
+        let settings = apply(
+            &AppSettings::default(),
+            "labs.keep_microphone_open",
+            "on",
+            &rules(),
+        )
+        .unwrap()
+        .settings;
+        assert!(settings.labs.keep_microphone_open);
+        assert_eq!(
+            settings.labs.keep_microphone_open_for(),
+            Some(std::time::Duration::from_secs(60)),
+            "the default window"
+        );
+        let change = apply(
+            &settings,
+            "labs.keep_microphone_open_seconds",
+            "180",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(change.settings.labs.keep_microphone_open_seconds, 180);
+        assert_eq!(
+            get(&change.settings, "labs.keep_microphone_open_seconds").unwrap()[0].value,
+            Value::String("180".into()),
+            "shown as its choice"
+        );
+        assert_eq!(
+            apply(
+                &settings,
+                "labs.keep_microphone_open_seconds",
+                "45",
+                &rules()
+            )
+            .unwrap_err()
+            .code,
+            "invalid-value"
+        );
+    }
+
+    #[test]
+    fn a_voice_prompt_phrase_needs_two_words_and_six_letters() {
+        let change = apply(&AppSettings::default(), "labs.voice_prompt", "on", &rules()).unwrap();
+        assert!(change.settings.labs.voice_prompt);
+        assert_eq!(
+            change.settings.labs.voice_prompt_phrase,
+            crate::dictation::voice_prompt::DEFAULT_PHRASE
+        );
+        let change = apply(
+            &change.settings,
+            "labs.voice_prompt_phrase",
+            "  say it better ",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.labs.voice_prompt_phrase, "say it better",
+            "a saved phrase is trimmed"
+        );
+        for (raw, reason) in [
+            ("rewrite", "two words"),
+            ("a b c", "six letters"),
+            ("", "two words"),
+        ] {
+            let error =
+                apply(&change.settings, "labs.voice_prompt_phrase", raw, &rules()).unwrap_err();
+            assert_eq!(error.code, "invalid-value", "{raw}");
+            assert!(error.message.contains(reason), "{raw}: {}", error.message);
+        }
+        assert_eq!(
+            change.settings.labs.voice_prompt_phrase, "say it better",
+            "a refused draft leaves the saved phrase"
+        );
+    }
+
+    #[test]
+    fn a_clipboard_phrase_needs_two_words_and_six_letters() {
+        let change = apply(
+            &AppSettings::default(),
+            "labs.clipboard_phrase",
+            "on",
+            &rules(),
+        )
+        .unwrap();
+        assert!(change.settings.labs.clipboard_phrase);
+        assert_eq!(
+            change.settings.labs.clipboard_phrase_text,
+            crate::dictation::clipboard_phrase::DEFAULT_PHRASE
+        );
+        let change = apply(
+            &change.settings,
+            "labs.clipboard_phrase_text",
+            "  what I copied ",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.labs.clipboard_phrase_text, "what I copied",
+            "a saved phrase is trimmed"
+        );
+        for (raw, reason) in [
+            ("clipboard", "two words"),
+            ("a clip", "six letters"),
+            ("", "two words"),
+        ] {
+            let error = apply(
+                &change.settings,
+                "labs.clipboard_phrase_text",
+                raw,
+                &rules(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "invalid-value", "{raw}");
+            assert!(error.message.contains(reason), "{raw}: {}", error.message);
+        }
+        assert_eq!(
+            change.settings.labs.clipboard_phrase_text, "what I copied",
+            "a refused draft leaves the saved phrase"
+        );
+    }
+
+    #[test]
+    fn a_stop_phrase_needs_two_words_and_six_letters() {
+        let change = apply(&AppSettings::default(), "labs.stop_phrase", "on", &rules()).unwrap();
+        assert!(change.settings.labs.stop_phrase);
+        assert_eq!(
+            change.settings.labs.stop_phrase_text,
+            crate::dictation::stop_phrase::DEFAULT_PHRASE
+        );
+        let change = apply(
+            &change.settings,
+            "labs.stop_phrase_text",
+            "  that's all ",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.labs.stop_phrase_text, "that's all",
+            "a saved phrase is trimmed"
+        );
+        for (raw, reason) in [
+            ("stop", "two words"),
+            ("a b c", "six letters"),
+            ("", "two words"),
+        ] {
+            let error =
+                apply(&change.settings, "labs.stop_phrase_text", raw, &rules()).unwrap_err();
+            assert_eq!(error.code, "invalid-value", "{raw}");
+            assert!(error.message.contains(reason), "{raw}: {}", error.message);
+        }
+        assert_eq!(
+            change.settings.labs.stop_phrase_text, "that's all",
+            "a refused draft leaves the saved phrase"
+        );
+        assert_eq!(
+            get(&change.settings, "labs.stop_phrase_text").unwrap()[0].value,
+            Value::String("that's all".into())
+        );
+    }
+
+    #[test]
+    fn a_signature_is_trimmed_and_must_be_one_line() {
+        let change = apply(&AppSettings::default(), "labs.signature", "on", &rules()).unwrap();
+        assert!(change.settings.labs.signature);
+        assert_eq!(
+            change.settings.labs.signature_text,
+            crate::dictation::signature::DEFAULT_TEXT
+        );
+        let change = apply(
+            &change.settings,
+            "labs.signature_text",
+            "  Dax, from Hex ",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.labs.signature_text, "Dax, from Hex",
+            "a saved signature is trimmed"
+        );
+        let error = apply(
+            &change.settings,
+            "labs.signature_text",
+            "two\nlines",
+            &rules(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid-value");
+        assert!(error.message.contains("one line"), "{}", error.message);
+        assert_eq!(
+            change.settings.labs.signature_text, "Dax, from Hex",
+            "a refused draft leaves the saved signature"
+        );
+        let change = apply(&change.settings, "labs.signature_text", "", &rules()).unwrap();
+        assert!(
+            change.settings.labs.signature_text.is_empty(),
+            "empty is allowed and appends nothing"
+        );
+        assert_eq!(
+            get(&change.settings, "labs.signature_text").unwrap()[0].value,
+            Value::String(String::new())
+        );
     }
 
     #[test]
@@ -1059,6 +1379,39 @@ mod tests {
             get(&change.settings, "labs.appearance_theme").unwrap()[0].value,
             Value::String("dark".into())
         );
+        let change = apply(&settings, "labs.dictation_style", "on", &rules()).unwrap();
+        assert!(change.settings.labs.dictation_style);
+        assert_eq!(
+            change.settings.labs.dictation_style_choice,
+            crate::app_settings::DictationStyle::Polished,
+            "polished is the default"
+        );
+        let change = apply(
+            &change.settings,
+            "labs.dictation_style_choice",
+            "notes",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.labs.dictation_style_choice,
+            crate::app_settings::DictationStyle::Notes
+        );
+        assert_eq!(
+            get(&change.settings, "labs.dictation_style_choice").unwrap()[0].value,
+            Value::String("notes".into())
+        );
+        assert_eq!(
+            apply(
+                &change.settings,
+                "labs.dictation_style_choice",
+                "song",
+                &rules()
+            )
+            .unwrap_err()
+            .code,
+            "invalid-value"
+        );
         let change = apply(&settings, "ui_language", "none", &rules()).unwrap();
         assert_eq!(change.settings.ui_language, None);
         let change = apply(
@@ -1125,11 +1478,10 @@ mod tests {
         .unwrap();
         assert_eq!(cleared.settings.meetings.audio_retention, None);
         assert_eq!(
-            history.effects,
-            vec![Effect::HistoryRetention(
-                crate::history::HistoryRetention::Month
-            )]
+            history.settings.history_retention,
+            crate::history::HistoryRetention::Month
         );
+        assert!(history.effects.is_empty());
     }
 
     /// Issue 767: Menu alone (Caps Lock remapped to it) is a Linux
@@ -1175,7 +1527,7 @@ mod tests {
         let settings = AppSettings::default();
         let without_toggle = apply(&settings, "dictation_hotkey", "§", &rules());
         assert_eq!(without_toggle.unwrap_err().code, "invalid-value");
-        if !cfg!(target_os = "linux") {
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
             return;
         }
         let on = apply(&settings, "labs.section_key_alone", "on", &rules())
@@ -1185,6 +1537,55 @@ mod tests {
         assert!(change.settings.dictation_hotkey.is_lone_section_key());
         assert_eq!(format_hotkey(&change.settings.dictation_hotkey), "§");
         let off = apply(&change.settings, "labs.section_key_alone", "off", &rules()).unwrap();
+        assert_eq!(off.settings.dictation_hotkey, HotkeyBinding::default());
+    }
+
+    /// Issue 181: any shortcut on the microphone (dictation) key needs Labs ›
+    /// Microphone key alone on macOS, with or without a modifier. Off, both
+    /// are refused pointing at the lab, and turning the toggle off puts a
+    /// saved one back to its default.
+    #[test]
+    fn the_microphone_key_needs_its_labs_toggle() {
+        let settings = AppSettings::default();
+        let without_toggle = apply(&settings, "dictation_hotkey", "microphone", &rules());
+        assert_eq!(without_toggle.unwrap_err().code, "invalid-value");
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let with_modifier = apply(&settings, "dictation_hotkey", "option+microphone", &rules());
+        let error = with_modifier.unwrap_err();
+        assert_eq!(error.code, "invalid-value");
+        assert!(error.message.contains("mic key"), "{}", error.message);
+        assert!(
+            error.message.contains("microphone-key"),
+            "{}",
+            error.message
+        );
+        for name in ["cancel_hotkey", "screenshots.hotkey"] {
+            let error = apply(&settings, name, "microphone", &rules()).unwrap_err();
+            assert_eq!(error.code, "invalid-value", "{name}");
+            assert!(error.message.contains("mic key"), "{}", error.message);
+        }
+        let on = apply(&settings, "labs.microphone_key", "on", &rules())
+            .unwrap()
+            .settings;
+        assert!(on.labs.microphone_key);
+        let change = apply(&on, "dictation_hotkey", "option+microphone", &rules()).unwrap();
+        assert!(change.settings.dictation_hotkey.uses_microphone_key());
+        assert_eq!(
+            format_hotkey(&change.settings.dictation_hotkey),
+            "option+mic"
+        );
+        // Screenshots never take it: their keys are read after Hex's session
+        // tap has taken the press.
+        let error = apply(&on, "screenshots.hotkey", "microphone", &rules()).unwrap_err();
+        assert_eq!(error.code, "invalid-value");
+        assert!(
+            error.message.contains("mic key") && error.message.contains("screenshot"),
+            "{}",
+            error.message
+        );
+        let off = apply(&change.settings, "labs.microphone_key", "off", &rules()).unwrap();
         assert_eq!(off.settings.dictation_hotkey, HotkeyBinding::default());
     }
 
@@ -1204,6 +1605,18 @@ mod tests {
     }
 
     #[test]
+    fn enabling_tones_restores_a_nonzero_level() {
+        let settings = AppSettings {
+            sound_effects: false,
+            sound_effect_volume: 0.0,
+            ..Default::default()
+        };
+        let change = apply(&settings, "sound_effects", "true", &rules()).unwrap();
+        assert!(change.settings.sound_effects);
+        assert!(change.settings.sound_effect_volume > 0.0);
+    }
+
+    #[test]
     fn zero_volume_turns_tones_off_and_keeps_the_level() {
         let settings = AppSettings::default();
         let change = apply(&settings, "sound_effect_volume", "0", &rules()).unwrap();
@@ -1215,6 +1628,46 @@ mod tests {
         let change = apply(&change.settings, "sound_effect_volume", "0.25", &rules()).unwrap();
         assert!(change.settings.sound_effects);
         assert_eq!(change.settings.sound_effect_volume, 0.25);
+    }
+
+    /// The key's help is a constant, so it can't be formatted from the
+    /// grace; this keeps it saying it.
+    #[test]
+    fn stop_when_call_ends_copy_names_the_grace() {
+        let grace = format!(
+            " {} s ",
+            crate::meeting::detection::AUTO_STOP_GRACE.as_secs()
+        );
+        let key = keys()
+            .find(|key| key.key == "meetings.stop_when_call_ends")
+            .unwrap();
+        assert!(key.about.contains(&grace), "{}", key.about);
+    }
+
+    #[test]
+    fn number_choices_offer_exactly_what_settings_accept() {
+        let choices = |name: &str| {
+            let key = keys().find(|key| key.key == name).unwrap();
+            let Kind::NumberChoice(choices) = key.kind else {
+                panic!("{name} is a number choice");
+            };
+            choices
+                .iter()
+                .map(|choice| choice.parse::<u32>().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            choices("meetings.calendar.lead_minutes"),
+            crate::app_settings::CALENDAR_LEAD_MINUTES.map(u32::from)
+        );
+        assert_eq!(
+            choices("labs.unload_idle_minutes"),
+            crate::app_settings::UNLOAD_IDLE_MINUTES
+        );
+        assert_eq!(
+            choices("labs.keep_microphone_open_seconds"),
+            crate::app_settings::KEEP_MICROPHONE_OPEN_SECONDS
+        );
     }
 
     #[test]
@@ -1480,7 +1933,7 @@ mod tests {
         assert_eq!(
             refused
                 .message
-                .contains("Labs › Double-tap on a lone modifier"),
+                .contains("Labs › Double-tap Option, Command, or Globe"),
             cfg!(target_os = "macos"),
             "{}",
             refused.message

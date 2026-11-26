@@ -70,17 +70,15 @@ pub struct OpenCodeSessionTime {
 }
 
 fn executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        path.is_file()
+            && fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
-        true
+        path.is_file()
     }
 }
 
@@ -156,6 +154,11 @@ pub const HEAVY_MEDIA: [&str; 5] = [
 pub const MEDIA_PENDING: &str = ".media-pending";
 /// Present in a bundle on this Mac while its heavy media is being copied to the agent host.
 pub const MEDIA_SENDING: &str = ".media-sending";
+/// A capture's light zip copy (Labs › Copy a capture as one file) sits inside the
+/// bundle beside its other files: `<bundle folder name>.slim.zip`.
+pub const SLIM_ZIP_SUFFIX: &str = ".slim.zip";
+/// The name that copy is written under, before its rename.
+pub const SLIM_ZIP_TEMP_SUFFIX: &str = ".slim.zip.tmp";
 
 /// A tar of everything in bundle `name` but its heavy media and this Mac's own markers, to
 /// stdout. The recording's `capture.json` goes with it: it describes `recording.mp4`, which
@@ -174,6 +177,13 @@ fn light_files_tar(parent: &Path, name: &std::ffi::OsStr) -> Command {
             // Retries belong to this Mac; a copied marker would only sit there.
             "--exclude=*/.deliver.json",
             "--exclude=*/.deliver.json.tmp",
+            "--exclude=*/..deliver.json.*.tmp",
+            "--exclude=*/.hex-annotate-v1",
+            "--exclude=*/.annotation.json.*.tmp",
+            "--exclude=*/audio.wav.partial",
+            // A light copy is this Mac's own attachment, not part of the capture.
+            "--exclude=*.slim.zip",
+            "--exclude=*.slim.zip.tmp",
         ])
         .arg("-cf")
         .arg("-")
@@ -775,6 +785,12 @@ pub fn normalize_slug(text: &str) -> String {
 /// else the `destination` a Mac capture of a dev site was routed to (`scrawl.json`).
 /// `context.session` only names the session that was on screen, and never chooses a destination.
 pub fn recorded_destination(bundle_dir: &Path) -> Option<String> {
+    if crate::bundle::manifest_name(bundle_dir) == Some(crate::bundle::MANIFEST) {
+        return crate::bundle::read_manifest(bundle_dir)
+            .ok()?
+            .destination
+            .map(|d| d.session);
+    }
     let read = |name: &str| -> Option<serde_json::Value> {
         serde_json::from_slice(&fs::read(bundle_dir.join(name)).ok()?).ok()
     };
@@ -1194,6 +1210,8 @@ mod light_files {
             "frames-full/0001.png",
             ".deliver.json",
             ".media-sending",
+            "a.scrawl.slim.zip",
+            "a.scrawl.slim.zip.tmp",
         ] {
             std::fs::write(bundle.join(file), b"x").unwrap();
         }
@@ -1624,7 +1642,7 @@ mod host_transport {
 
     /// The real host's summary header names the capture folder on this machine.
     fn summary_with_windows_path(_bundle: &ScrawlBundle, directory: &Path) -> String {
-        format!("[scrawl · captured · {}]", directory.display())
+        format!("[hex-annotate · captured · {}]", directory.display())
     }
 
     /// A host transport whose answer and directory mapping a test sets.

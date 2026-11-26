@@ -54,6 +54,7 @@ fn notes_from_either_writer_are_traditional() {
                 written_by: Some(writer.clone()),
             })
         })
+        .unwrap()
         .unwrap();
         assert_eq!(summary.notes.title, "qa-軟件會議");
         assert_eq!(summary.notes.summary, "qa-討論了頭髮和軟件。會後再說。");
@@ -72,6 +73,7 @@ fn a_long_chinese_summary_without_spaces_is_cut_at_a_character() {
             written_by: Some(NotesWriter::AppleIntelligence),
         })
     })
+    .unwrap()
     .unwrap()
     .notes
     .summary;
@@ -119,6 +121,7 @@ fn a_title_the_user_typed_keeps_its_script() {
             written_by: Some(NotesWriter::AppleIntelligence),
         })
     })
+    .unwrap()
     .unwrap()
     .notes;
     let mut manifest = manifest("qa-typed");
@@ -349,14 +352,6 @@ fn a_dropline_meeting_through_the_wav_writer_keeps_times_sources_and_order() {
         ),
     ];
     let origin_ms = system_origin.min(microphone_origin);
-    let in_call = entries[..1]
-        .iter()
-        .map(|entry| TranscriptEntry {
-            start_ms: entry.start_ms - origin_ms,
-            end_ms: entry.end_ms - origin_ms,
-            ..entry.clone()
-        })
-        .collect::<Vec<_>>();
     let join = |mut entries: Vec<TranscriptEntry>, origin_ms: u64, (): ()| {
         entries.retain(|entry| entry.text != "我們 下週 上線");
         entries.sort_by_key(|entry| entry.start_ms);
@@ -441,25 +436,6 @@ fn a_dropline_meeting_through_the_wav_writer_keeps_times_sources_and_order() {
         ["token", "dictate", "dictate", "dictate", "clear"]
     );
     drop(recording);
-
-    // Copy new before Stop pastes the local text; after Stop it pastes only
-    // the rest, in Dropline's words, by the local entries' times.
-    let mut cursor = MeetingPasteCursor::default();
-    let before = cursor
-        .consume_entries("qa-dropline-writer", &in_call, |_| Ok(()))
-        .unwrap();
-    assert!(before.ends_with("qa 今天 我們 討論 頭 髮"), "{before}");
-    let after = cursor
-        .consume_entries("qa-dropline-writer", &merged, |_| Ok(()))
-        .unwrap();
-    assert!(!after.contains("今天"), "{after}");
-    for text in [
-        "還有軟體發佈的時間。",
-        "好的，沒問題！",
-        "qa 斷線 之後 的 本機 句子",
-    ] {
-        assert_eq!(after.matches(text).count(), 1, "{after}");
-    }
 }
 
 /// Upstream joins a hard cut's segments at the middle of the overlap by their

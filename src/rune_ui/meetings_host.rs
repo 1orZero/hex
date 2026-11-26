@@ -42,6 +42,14 @@ impl LocalMeetings {
             }
             MeetingRequest::Stop => crate::meeting::runtime::request(Controller::Stop),
             MeetingRequest::Import(_) => Err("Importing audio is only available on macOS.".into()),
+            MeetingRequest::DeleteTranscript { id, entries } => {
+                crate::meeting::runtime::request(Controller::DeleteTranscript { id, entries })
+            }
+            // The control and its visible states are macOS's; elsewhere the
+            // request is taken and the controller leaves it alone.
+            MeetingRequest::SetMicrophoneMuted(muted) => {
+                crate::meeting::runtime::request(Controller::SetMicrophoneMuted(muted))
+            }
             MeetingRequest::Summarize(id) => {
                 crate::meeting::runtime::request(Controller::Summarize(id))
             }
@@ -50,15 +58,19 @@ impl LocalMeetings {
                 .map_err(failed),
             MeetingRequest::Trash(id) => crate::meeting::trash(&id).map_err(failed),
             MeetingRequest::Reveal(target) => {
-                // Explorer selects the exported Markdown; Linux opens the
-                // folder that holds it.
-                crate::meeting::reveal(target.path());
+                // A file is selected in its folder; a recording folder opens
+                // itself.
+                if target.is_markdown() {
+                    crate::meeting::reveal(target.path());
+                } else {
+                    crate::meeting::open_folder(target.path());
+                }
                 Ok(())
             }
             MeetingRequest::RevealFolder => {
                 let folder = crate::app_settings::meeting_output_folder();
                 std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-                crate::meeting::reveal(&folder);
+                crate::meeting::open_folder(&folder);
                 Ok(())
             }
             MeetingRequest::ChooseFolder => {
@@ -199,9 +211,11 @@ fn pane_meeting(
     }
 }
 
-/// Speaker turns, marking silences of 30 s or more.
+/// Speaker turns, marking silences of 30 s or more. Each turn carries the
+/// published lines it covers so the pane can delete exactly those.
 fn turns(entries: &[crate::meeting::TranscriptEntry]) -> Vec<Turn> {
     let mut previous_end: Option<u64> = None;
+    let mut cursor = 0;
     crate::meeting::coalesce_transcript(entries.iter().cloned())
         .into_iter()
         .map(|turn| {
@@ -209,32 +223,33 @@ fn turns(entries: &[crate::meeting::TranscriptEntry]) -> Vec<Turn> {
                 .map(|end| turn.start_ms.saturating_sub(end))
                 .filter(|pause| *pause >= 30_000);
             previous_end = Some(previous_end.map_or(turn.end_ms, |end| end.max(turn.end_ms)));
+            // The entries are sorted and coalescing keeps their order, so a
+            // turn covers the next contiguous lines inside its own span.
+            let mut covered = Vec::new();
+            while let Some(entry) = entries.get(cursor) {
+                if entry.source != turn.source
+                    || entry.start_ms < turn.start_ms
+                    || entry.end_ms > turn.end_ms
+                {
+                    break;
+                }
+                covered.push(crate::meeting::TranscriptEntryKey::of(entry));
+                cursor += 1;
+            }
             Turn {
                 mine: turn.source == crate::meeting::MeetingSource::Microphone,
                 start_ms: turn.start_ms,
                 text: turn.text,
                 pause_before_ms,
+                entries: covered,
             }
         })
         .collect()
 }
 
-/// A capsule's "Never offer" or "Always record" choice, kept in the window's
-/// live settings so its next save doesn't drop it.
-pub(crate) fn meeting_provider_chosen(
-    ui: &mut Ui,
-    choice: crate::app_settings::MeetingProviderChoice,
-) {
-    crate::app_settings::set_meeting_provider(&mut ui.settings.meetings, choice);
-}
-
-/// The corner the recording capsule was dragged to, kept in the window's live
-/// settings so its next save doesn't move it back.
-pub(crate) fn meeting_corner_moved(
-    ui: &mut Ui,
-    corner: crate::app_settings::MeetingIndicatorCorner,
-) {
-    ui.settings.meetings.recording_indicator_corner = corner;
+/// The capsule committed a choice; adopt the owner's next revision.
+pub(crate) fn meeting_settings_saved(ui: &mut Ui) {
+    ui.send(super::host::Request::ReloadSettings);
 }
 
 /// A meeting recording could not start or finish; the Meetings pane says why.
@@ -244,9 +259,52 @@ pub(crate) fn meeting_failed(ui: &mut Ui, error: String) {
     ui.meetings.runtime_error = Some(error);
 }
 
+/// Transcript lines could not be deleted; the Meetings pane says why.
+pub(crate) fn meeting_edit_failed(ui: &mut Ui, error: String) {
+    ui.meetings.edit_error = Some(error);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting::{MeetingSource, TranscriptEntry, TranscriptEntryKey};
+
+    /// Each displayed turn carries exactly the published lines under it, in
+    /// transcript order, however the speakers interleave.
+    #[test]
+    fn turns_carry_exactly_their_own_published_lines() {
+        let line = |source, start_ms: u64, end_ms: u64, text: &str| TranscriptEntry {
+            source,
+            start_ms,
+            end_ms,
+            text: text.into(),
+        };
+        let entries = vec![
+            line(MeetingSource::Microphone, 0, 4_000, "First."),
+            line(MeetingSource::Microphone, 4_000, 8_000, "Second."),
+            line(MeetingSource::System, 8_000, 12_000, "In between."),
+            line(
+                MeetingSource::Microphone,
+                12_000,
+                16_000,
+                "After the reply.",
+            ),
+            line(MeetingSource::Microphone, 20_000, 23_000, "A pause later."),
+        ];
+        let keys = |turn: &Turn| turn.entries.clone();
+        let of = TranscriptEntryKey::of;
+        let turns = turns(&entries);
+        assert_eq!(
+            turns.iter().map(|turn| turn.start_ms).collect::<Vec<_>>(),
+            [0, 8_000, 12_000, 20_000],
+            "adjacent same-speaker lines join, the other speaker splits them, \
+             and more than three seconds apart stays apart"
+        );
+        assert_eq!(keys(&turns[0]), [of(&entries[0]), of(&entries[1])]);
+        assert_eq!(keys(&turns[1]), [of(&entries[2])]);
+        assert_eq!(keys(&turns[2]), [of(&entries[3])]);
+        assert_eq!(keys(&turns[3]), [of(&entries[4])]);
+    }
 
     #[test]
     fn the_meeting_feed_lists_stored_meetings_once_until_they_change() {
@@ -318,6 +376,15 @@ mod tests {
             .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
             .collect::<String>();
         std::fs::write(directory.join("transcript.ndjson"), ndjson).unwrap();
+        // A final publication includes both files, even though chapter
+        // queries render their own Markdown from the structured entries.
+        std::fs::write(
+            directory.join("transcript.md"),
+            "# Team sync\n\n**You** · 03:01\nNext, the motion lint.\n\n\
+             **You** · 06:26\nThat settles the lint.\n\n\
+             **You** · 06:30\nLast thing: a name for the chat app.\n",
+        )
+        .unwrap();
 
         let library = crate::meeting::query::Library::new(&root);
         let meeting = library.meeting(id).unwrap();
@@ -329,6 +396,7 @@ mod tests {
             let menu = crate::meeting::section_markdown(
                 &chapters[index],
                 &crate::meeting::chapter_entries(&entries, chapters, index),
+                meeting.manifest.imported,
             );
             assert_eq!(chapter.markdown, menu);
             let cli = library.chapter_markdown(id, index + 1, now_ms).unwrap();

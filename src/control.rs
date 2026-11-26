@@ -12,6 +12,9 @@ pub(crate) mod dashboard;
 pub(crate) mod developer_control;
 #[cfg(not(target_os = "macos"))]
 pub(crate) mod host;
+/// `hex meetings record|stop` and `hex status`'s meeting state, as the
+/// state the app mirrors answers them.
+pub(crate) mod meetings;
 pub mod settings;
 pub(crate) mod transcript_cli;
 
@@ -101,6 +104,9 @@ pub enum ControlCommand {
     /// Labs › Transform typed text (Linux): runs the focused field's text
     /// through its Output steps and replaces it, as its shortcut does.
     TypedText,
+    /// Labs › Model switch shortcut: swaps the dictation model with the saved
+    /// other one, as its shortcut does.
+    ModelSwitch,
     /// Labs › Screenshots (macOS): the display under the pointer, or with
     /// `pick` the picker its shortcut opens.
     Screenshot {
@@ -113,6 +119,12 @@ pub enum ControlCommand {
     },
     MeetingStop,
     MeetingCopyLast,
+    /// Move a finished meeting to the Trash, as the Meetings pane's Delete
+    /// does: its exported Markdown and notes file, then its recording folder.
+    MeetingDelete {
+        /// The exact id `hex meetings list --json` prints.
+        id: String,
+    },
     SettingsGet {
         #[serde(default)]
         key: Option<String>,
@@ -286,6 +298,19 @@ impl From<ControlError> for ControlReply {
     }
 }
 
+/// `hex meetings delete`: the meeting module's typed answer as a reply, so
+/// the refusal codes travel with the reply the wire and the CLI print.
+pub fn meeting_deleted(
+    answer: Result<crate::meeting::TrashedMeeting, crate::meeting::DeleteError>,
+) -> ControlReply {
+    match answer {
+        Ok(meeting) => {
+            ControlReply::done(format!("Deleted “{}”; moved to the Trash", meeting.title))
+        }
+        Err(error) => ControlReply::error(error.code(), error.message()),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ControlResponse {
     pub version: u32,
@@ -335,6 +360,10 @@ pub struct ScrawlCaptureOutcome {
     /// Spans of a written capture's audio that went missing.
     #[serde(default)]
     pub gaps: Option<usize>,
+    /// Where a written capture's audio stops (ms on its clock), when Hex had
+    /// to stop keeping it; the rest is silence.
+    #[serde(default)]
+    pub audio_stopped_at_ms: Option<u64>,
     /// Why a written capture has no transcript: `no_audio`, or the engine's
     /// reason.
     #[serde(default)]
@@ -376,6 +405,10 @@ pub struct ScrawlCaptureDetail {
     pub note: Option<String>,
     /// Why there is no transcript although there was audio.
     pub missing_transcript: Option<String>,
+    /// Where the capture's audio stops (ms on its clock), when Hex had to
+    /// stop keeping it; the rest is silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_stopped_at_ms: Option<u64>,
     pub marks: usize,
     pub keyframes: usize,
     pub video: Option<std::path::PathBuf>,
@@ -401,6 +434,8 @@ impl ControlError {
 
 /// How long `hex dictation stop --print` waits for its transcript.
 pub const PRINT_WAIT: Duration = Duration::from_secs(60);
+/// How long `hex dictation start --print` waits for its dictation to end.
+pub const PRINT_START_WAIT: Duration = Duration::from_secs(31 * 60);
 /// How long the app may take to carry out any other control command.
 const CONTROL_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -408,38 +443,55 @@ impl ControlCommand {
     /// How long a transport waits for the app's answer to this command.
     pub fn deadline(&self) -> Duration {
         match self {
+            Self::Dictation {
+                action: CaptureAction::Start,
+                print: true,
+                ..
+            } => PRINT_START_WAIT + Duration::from_secs(5),
             Self::Dictation { print: true, .. } => PRINT_WAIT + Duration::from_secs(5),
             _ => CONTROL_DEADLINE,
         }
     }
 }
 
-/// What a printing stop gets back from the listener once its dictation
-/// finishes: the transcript, processed as a paste would be, or why there is
-/// none. A printed transcript is never pasted.
-#[derive(Debug, Eq, PartialEq)]
+/// What a printing start or stop gets back from the listener once its
+/// dictation finishes: the transcript, processed as a paste would be, or why
+/// there is none. A printed transcript is never pasted.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrintedTranscript {
     Text(String),
     NoSpeech,
+    /// The recording was cancelled before it finished.
+    Cancelled,
     /// The Linux and Windows listeners stop by themselves without a recording.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     NotRecording,
     Failed(String),
 }
 
-/// The one-shot channel a printing stop rides through the listener's queue.
+/// The channel a printing start or stop rides through the listener's queue.
+/// One transcript can answer more than one command: a `stop --print` of a
+/// print-only dictation joins the start's reply.
 #[derive(Clone, Debug)]
-pub struct PrintReply(SyncSender<PrintedTranscript>);
+pub struct PrintReply(Vec<SyncSender<PrintedTranscript>>);
 
 impl PrintReply {
     pub fn channel() -> (Self, Receiver<PrintedTranscript>) {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        (Self(sender), receiver)
+        (Self(vec![sender]), receiver)
     }
 
-    /// Answers the waiting command; one that gave up is not told.
+    /// Answers both this reply's command and `other`'s with one transcript.
+    pub fn join(mut self, other: Self) -> Self {
+        self.0.extend(other.0);
+        self
+    }
+
+    /// Answers every waiting command; one that gave up is not told.
     pub fn send(self, transcript: PrintedTranscript) {
-        let _ = self.0.send(transcript);
+        for reply in self.0 {
+            let _ = reply.send(transcript.clone());
+        }
     }
 }
 
@@ -459,6 +511,9 @@ pub fn await_printed(receiver: &Receiver<PrintedTranscript>, wait: Duration) -> 
         Ok(PrintedTranscript::Text(text)) => ControlReply::Transcript { text },
         Ok(PrintedTranscript::NoSpeech) => {
             ControlReply::error("no-speech", "no speech was recorded; nothing to print")
+        }
+        Ok(PrintedTranscript::Cancelled) => {
+            ControlReply::error("failed", "the dictation was cancelled; nothing to print")
         }
         Ok(PrintedTranscript::NotRecording) => ControlReply::error(
             "not-recording",
@@ -481,16 +536,16 @@ pub fn await_printed(receiver: &Receiver<PrintedTranscript>, wait: Duration) -> 
     }
 }
 
-/// The action a request asks for; `print` applies only to `stop`.
+/// The action a request asks for; `print` applies only to `start` and `stop`.
 pub fn check_flags(
     action: CaptureAction,
     print: bool,
     raw: bool,
 ) -> Result<CaptureAction, ControlError> {
-    if print && action != CaptureAction::Stop {
+    if print && !matches!(action, CaptureAction::Start | CaptureAction::Stop) {
         return Err(ControlError::new(
             "invalid-value",
-            "--print works only with `hex dictation stop`",
+            "--print works only with `hex dictation start` and `hex dictation stop`",
         ));
     }
     if raw && !matches!(action, CaptureAction::Start | CaptureAction::Toggle) {
@@ -640,7 +695,7 @@ impl From<CaptureSnapshot> for CaptureReport {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MeetingReport {
-    /// idle, starting, recording, or transcribing.
+    /// idle, starting, recording, stopping, or transcribing.
     pub state: String,
     pub title: Option<String>,
     pub elapsed_seconds: Option<u64>,
@@ -656,6 +711,46 @@ pub struct ModelReport {
     pub preparing: Option<String>,
     pub downloaded_bytes: u64,
     pub error: Option<String>,
+    /// The loaded model's device, when the running Hex has one to report.
+    #[serde(default)]
+    pub backend: Option<crate::transcription::SpeechBackend>,
+    /// The model Hex runs in place of the saved one while that can't run.
+    #[serde(default)]
+    pub fallback: Option<FallbackReport>,
+}
+
+impl ModelReport {
+    /// The saved `selection`, and the fallback Hex runs while it can't run;
+    /// no preparation.
+    pub fn saved(selection: &crate::transcription::models::TranscriptionSelection) -> Self {
+        use crate::transcription::{custom_models, models, readiness};
+        let definition = models::definition(selection.model);
+        let status = readiness::readiness(&definition, &selection.language);
+        Self {
+            id: selection.model.as_str().into(),
+            name: definition.name.to_string(),
+            language: selection.language.clone(),
+            installed: status.installed,
+            fallback: custom_models::fallback_reason(selection).map(|reason| {
+                let running = custom_models::fallback();
+                FallbackReport {
+                    id: running.model.as_str().into(),
+                    name: models::definition(running.model).name.to_string(),
+                    language: running.language,
+                    reason,
+                }
+            }),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct FallbackReport {
+    pub id: String,
+    pub name: String,
+    pub language: String,
+    pub reason: crate::transcription::custom_models::FallbackReason,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -691,7 +786,7 @@ pub struct ModelInfo {
     pub selected: bool,
     pub streams: bool,
     /// How transcription takes the vocabulary: `prompt` (Whisper,
-    /// Qwen3-ASR), `bias` (Parakeet, with Labs › Vocabulary biasing), or
+    /// Qwen3-ASR), `bias` (Parakeet), or
     /// `none`.
     pub vocabulary: String,
     /// Deprecated: whether the model reads the vocabulary as its prompt,
@@ -705,56 +800,27 @@ pub struct ModelInfo {
     pub source: String,
 }
 
-/// Where `model`'s file is or comes from, as `hex model list` and the local
-/// API say it: `found: owner/name@abcdef1`, `imported`, `hex`, or `download`.
-pub fn model_source(
-    model: &crate::transcription::models::ModelDefinition,
-    language: &str,
-) -> String {
-    use crate::transcription::found_models::describe;
-    use crate::transcription::models::{is_installed, model_path};
-    let installed = is_installed(model, language);
-    let here = model_path(model)
-        .ok()
-        .filter(|_| installed)
-        .and_then(|path| describe(&path));
-    match (model.id.is_custom(), here) {
-        (true, Some(origin)) => format!("found: {origin} (not tested by Hex)"),
-        (false, Some(origin)) => format!("found: {origin}"),
-        (true, None) => "imported".into(),
-        (false, None) if installed => "hex".into(),
-        (false, None) => "download".into(),
-    }
-}
-
-/// Every model `hex model` can name, with what this Mac has installed.
+/// Every model `hex model` can name, with what this computer has installed.
 pub fn model_infos(
     selection: &crate::transcription::models::TranscriptionSelection,
 ) -> Vec<ModelInfo> {
-    use crate::transcription::found_models;
     use crate::transcription::models::VocabularyUse;
+    use crate::transcription::{found_models, readiness};
     // Listing models looks for ones already on this computer: headers only.
     let found = found_models::scan();
-    let source = |model| model_source(model, &selection.language);
-    let mut infos: Vec<ModelInfo> = crate::transcription::models::all_models()
+    let mut infos: Vec<ModelInfo> = readiness::catalog_models(&selection.language)
         .into_iter()
-        .filter(|model| model.available())
         .map(|model| ModelInfo {
-            source: source(model),
             id: model.id.as_str().into(),
             name: model.name.into(),
-            languages: model.languages.iter().map(|&code| code.into()).collect(),
-            size: model.size_label(),
-            installed: crate::transcription::models::is_installed(model, &selection.language),
+            languages: model.languages.into_iter().map(Into::into).collect(),
+            size: model.size,
+            installed: model.readiness.installed,
             selected: model.id == selection.model,
             streams: model.streams,
-            vocabulary: match model.vocabulary_use() {
-                VocabularyUse::Prompt => "prompt",
-                VocabularyUse::Bias => "bias",
-                VocabularyUse::None => "none",
-            }
-            .into(),
-            supports_recognition_hints: model.vocabulary_use() == VocabularyUse::Prompt,
+            vocabulary: readiness::vocabulary_use_label(model.vocabulary).into(),
+            supports_recognition_hints: model.vocabulary == VocabularyUse::Prompt,
+            source: model.source,
         })
         .collect();
     // Compatible files that aren't catalog models and aren't in use yet:
@@ -765,6 +831,7 @@ pub fn model_infos(
         let Some(sha256) = &model.blob_sha256 else {
             continue;
         };
+        let vocabulary = readiness::vocabulary_use_for_architecture(&model.architecture);
         infos.push(ModelInfo {
             id: format!("custom-{}", &sha256[..16]),
             name: model.name.clone(),
@@ -773,18 +840,8 @@ pub fn model_infos(
             installed: true,
             selected: false,
             streams: false,
-            vocabulary: if matches!(model.architecture.as_str(), "whisper" | "qwen3_asr") {
-                "prompt"
-            } else if model.architecture == "parakeet" {
-                "bias"
-            } else {
-                "none"
-            }
-            .into(),
-            supports_recognition_hints: matches!(
-                model.architecture.as_str(),
-                "whisper" | "qwen3_asr"
-            ),
+            vocabulary: readiness::vocabulary_use_label(vocabulary).into(),
+            supports_recognition_hints: vocabulary == VocabularyUse::Prompt,
             source: format!("found: {} (not tested by Hex)", model.source()),
         });
     }
@@ -798,6 +855,17 @@ pub fn model_selection(
     settings: &crate::app_settings::AppSettings,
     model: &str,
     language: Option<&str>,
+) -> Result<crate::transcription::models::TranscriptionSelection, ControlError> {
+    model_selection_where(settings, model, language, crate::labs::k_quant_models())
+}
+
+/// [`model_selection`] against `k_quants` rather than this process's Labs
+/// switch, so a test can run either side of Labs › Smaller model files.
+fn model_selection_where(
+    settings: &crate::app_settings::AppSettings,
+    model: &str,
+    language: Option<&str>,
+    k_quants: bool,
 ) -> Result<crate::transcription::models::TranscriptionSelection, ControlError> {
     use crate::transcription::custom_models::{self, Status};
     use crate::transcription::models::TranscriptionModelId;
@@ -850,8 +918,22 @@ pub fn model_selection(
             ),
         ));
     }
+    // An import whose weights use the K quants runs only on macOS, with its
+    // Labs toggle on.
+    if let Some(TranscriptionModelId::Custom(id)) = parsed
+        && custom_models::uses_k_quants(id)
+        && !k_quants
+    {
+        return Err(ControlError::new(
+            "model-unavailable",
+            format!(
+                "`{model}` can't be used: its weights need Labs › Smaller model files on macOS: \
+                 hex labs on k-quant-models"
+            ),
+        ));
+    }
     let id = parsed
-        .filter(|id| crate::transcription::models::definition(*id).available())
+        .filter(|id| crate::transcription::models::definition(*id).available_where(k_quants))
         .ok_or_else(|| {
             ControlError::new(
                 "unknown-model",
@@ -865,7 +947,7 @@ pub fn model_selection(
         selection.language = language.into();
     }
     let definition = crate::transcription::models::definition(id);
-    crate::transcription::models::validate(&selection).map_err(|error| {
+    crate::transcription::models::validate_where(&selection, k_quants).map_err(|error| {
         let supported = if definition.languages.contains(&"*") {
             "any language code Hex knows (en, de, fr, ja, …)".to_owned()
         } else {
@@ -891,12 +973,16 @@ pub fn check_quit(
         return Ok(());
     }
     if meeting.state != "idle" {
+        // A stop under way has nothing to stop, and a transcription has
+        // already begun: both finish before Hex can quit with them saved.
+        let advice = if matches!(meeting.state.as_str(), "stopping" | "transcribing") {
+            "wait for it to finish, or pass --force"
+        } else {
+            "stop it first (`hex meetings stop`) or pass --force"
+        };
         return Err(ControlError::new(
             "meeting-active",
-            format!(
-                "a meeting is {}; stop it first (`hex meetings stop`) or pass --force",
-                meeting.state
-            ),
+            format!("a meeting is {}; {advice}", meeting.state),
         ));
     }
     match capture {
@@ -979,6 +1065,80 @@ pub fn memory_footprint() -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// A K-quant import can't be chosen while Labs › Smaller model files is
+    /// off; an ordinary import is unaffected. The explicit flag keeps this off
+    /// the process-wide switch.
+    #[test]
+    fn a_k_quant_import_is_refused_without_its_lab() {
+        use crate::transcription::gguf_header::TensorTypes;
+        use crate::transcription::gguf_header::tests::gguf;
+        let models =
+            std::env::temp_dir().join(format!("hex-control-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&models);
+        std::fs::create_dir_all(&models).unwrap();
+        crate::transcription::models::set_test_models_dir(Some(models.clone()));
+        let write = |name: &str, kind: u32, elements: u64| {
+            let path = models.join(name);
+            std::fs::write(
+                &path,
+                gguf(
+                    &[
+                        ("general.architecture", "parakeet"),
+                        ("stt.variant", "tdt-0.6b-primeline"),
+                    ],
+                    &[("general.languages", &["en"])],
+                    &[],
+                    &[("encoder.weight", kind, elements)],
+                ),
+            )
+            .unwrap();
+            path
+        };
+        let import = |path: &std::path::Path, types| {
+            crate::transcription::custom_models::import_with_types(
+                path,
+                None,
+                &std::sync::atomic::AtomicBool::new(false),
+                types,
+            )
+            .unwrap()
+        };
+        let k_quant = import(&write("k.gguf", 14, 256), TensorTypes::WITH_K_QUANTS);
+        let plain = import(&write("plain.gguf", 8, 64), TensorTypes::STANDARD);
+        let settings = crate::app_settings::AppSettings::default();
+        let error =
+            model_selection_where(&settings, k_quant.as_str(), Some("en"), false).unwrap_err();
+        assert_eq!(error.code, "model-unavailable");
+        assert!(
+            error
+                .message
+                .contains("Labs › Smaller model files on macOS"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("hex labs on k-quant-models"),
+            "{}",
+            error.message
+        );
+        let chosen = model_selection_where(&settings, k_quant.as_str(), Some("en"), true).unwrap();
+        assert_eq!(
+            chosen.model,
+            crate::transcription::models::TranscriptionModelId::Custom(k_quant)
+        );
+        // The lab gates only these weights: an Q8_0 import is chosen with it
+        // off.
+        let chosen = model_selection_where(&settings, plain.as_str(), Some("en"), false).unwrap();
+        assert_eq!(
+            chosen.model,
+            crate::transcription::models::TranscriptionModelId::Custom(plain)
+        );
+        crate::transcription::custom_models::remove(k_quant).unwrap();
+        crate::transcription::custom_models::remove(plain).unwrap();
+        crate::transcription::models::set_test_models_dir(None);
+        std::fs::remove_dir_all(models).unwrap();
+    }
+
     #[test]
     fn a_printing_stop_answers_through_its_reply_channel() {
         let wait = Duration::from_millis(50);
@@ -1008,11 +1168,47 @@ mod tests {
             await_printed(&printed, wait),
             ControlReply::Error { code, .. } if code == "failed"
         ));
-        // Only `stop` prints, and older requests without the field still parse.
-        assert!(check_flags(CaptureAction::Start, true, false).is_err());
+        // A joined reply answers every waiting command with one transcript.
+        let (start, started) = PrintReply::channel();
+        let (stop, stopped) = PrintReply::channel();
+        start
+            .join(stop)
+            .send(PrintedTranscript::Text("Ship it.".into()));
+        for printed in [&started, &stopped] {
+            assert_eq!(
+                await_printed(printed, wait),
+                ControlReply::Transcript {
+                    text: "Ship it.".into()
+                }
+            );
+        }
+        // Both start and stop print; toggle and cancel take no flag.
+        assert!(check_flags(CaptureAction::Start, true, false).is_ok());
+        assert!(check_flags(CaptureAction::Start, true, true).is_ok());
         assert!(check_flags(CaptureAction::Stop, true, false).is_ok());
+        assert!(check_flags(CaptureAction::Toggle, true, false).is_err());
+        assert!(check_flags(CaptureAction::Cancel, true, false).is_err());
         assert!(check_flags(CaptureAction::Toggle, false, true).is_ok());
         assert!(check_flags(CaptureAction::Stop, false, true).is_err());
+        // A printing start waits for the dictation, not for a paste.
+        assert_eq!(
+            ControlCommand::Dictation {
+                action: CaptureAction::Start,
+                print: true,
+                raw: false,
+            }
+            .deadline(),
+            PRINT_START_WAIT + Duration::from_secs(5)
+        );
+        assert_eq!(
+            ControlCommand::Dictation {
+                action: CaptureAction::Stop,
+                print: true,
+                raw: false,
+            }
+            .deadline(),
+            PRINT_WAIT + Duration::from_secs(5)
+        );
         assert_eq!(
             serde_json::from_str::<ControlRequest>(
                 r#"{"version":4,"command":"dictation","action":"stop"}"#
@@ -1075,6 +1271,7 @@ mod tests {
             },
             ControlCommand::PasteLast,
             ControlCommand::TypedText,
+            ControlCommand::ModelSwitch,
             ControlCommand::Screenshot { pick: false },
             ControlCommand::Screenshot { pick: true },
             ControlCommand::MeetingRecord {
@@ -1082,6 +1279,9 @@ mod tests {
             },
             ControlCommand::MeetingStop,
             ControlCommand::MeetingCopyLast,
+            ControlCommand::MeetingDelete {
+                id: "1790000500000-1002".into(),
+            },
             ControlCommand::SettingsGet { key: None },
             ControlCommand::SettingsSet {
                 key: "release_microphone_while_idle".into(),
@@ -1184,6 +1384,16 @@ mod tests {
             json,
             serde_json::json!({"version": 4, "command": "meeting-record", "title": "Standup"})
         );
+        // A meeting delete names its id, and nothing else.
+        let json = serde_json::to_value(ControlRequest::new(ControlCommand::MeetingDelete {
+            id: "1790000500000-1002".into(),
+        }))
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"version": 4, "command": "meeting-delete",
+                "id": "1790000500000-1002"})
+        );
         // Optional fields may be left out.
         let request: ControlRequest =
             serde_json::from_str(r#"{"version":4,"command":"quit"}"#).unwrap();
@@ -1210,6 +1420,42 @@ mod tests {
                 always: false,
             }
         );
+    }
+
+    #[test]
+    fn deleting_a_meeting_answers_its_refusal_code() {
+        let deleted = meeting_deleted(Ok(crate::meeting::TrashedMeeting {
+            id: "1790000500000-1002".into(),
+            title: "Design sync".into(),
+            markdown: true,
+        }));
+        assert_eq!(
+            deleted,
+            ControlReply::done("Deleted “Design sync”; moved to the Trash")
+        );
+        for (refusal, code) in [
+            (crate::meeting::DeleteRefusal::Unknown, "not-found"),
+            (
+                crate::meeting::DeleteRefusal::Recording,
+                "meeting-recording",
+            ),
+            (
+                crate::meeting::DeleteRefusal::Transcribing,
+                "meeting-transcribing",
+            ),
+            (crate::meeting::DeleteRefusal::Notes, "meeting-notes"),
+            (
+                crate::meeting::DeleteRefusal::FinalPending,
+                "meeting-final-pending",
+            ),
+            (crate::meeting::DeleteRefusal::Busy, "busy"),
+        ] {
+            assert_eq!(
+                meeting_deleted(Err(refusal.into())),
+                ControlReply::error(code, refusal.message()),
+                "{refusal:?}"
+            );
+        }
     }
 
     #[test]
@@ -1247,6 +1493,7 @@ mod tests {
                     stage: "done".into(),
                     words: Some(3),
                     gaps: Some(1),
+                    audio_stopped_at_ms: None,
                     missing_transcript: None,
                 }),
             })),
@@ -1328,6 +1575,17 @@ mod tests {
             check_quit(&recording, quiet(), false).unwrap_err().code,
             "meeting-active"
         );
+        // A stop under way still holds the recorder, and a transcription has
+        // nothing left to stop: both wait rather than name a stop.
+        for waiting in ["stopping", "transcribing"] {
+            let state = MeetingReport {
+                state: waiting.into(),
+                ..Default::default()
+            };
+            let refusal = check_quit(&state, quiet(), false).unwrap_err();
+            assert_eq!(refusal.code, "meeting-active");
+            assert!(refusal.message.contains("wait for it to finish"));
+        }
         assert!(check_quit(&recording, quiet(), true).is_ok());
         let busy = CaptureSnapshot {
             recording: None,

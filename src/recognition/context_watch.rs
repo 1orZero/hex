@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 
+use crate::continuation::InputActivity;
 use crate::desktop::events::{EventLog, VoiceEvent, now_ms};
+use crate::dictation::caret_text::CaretTextRead;
 use crate::dictation::context::{CaptureRefresh, ContextMonitor, ContextSnapshot};
-use crate::suppression::InputActivity;
+use crate::dictation::screen_vocabulary::ScreenVocabulary;
 
 /// How long a finished shortcut waits for the page its capture asked to
 /// refresh before handing the worker a context with no page.
@@ -25,6 +27,10 @@ pub(super) struct ContextWatch {
     activity: InputActivity,
     /// The one refresh this capture owes, if any.
     capture: CaptureRefresh,
+    /// Labs › Words on screen's one read, for this capture.
+    screen: ScreenVocabulary,
+    /// Labs › Rewrite reads nearby text's one read, for this capture.
+    caret: CaretTextRead,
     /// The fork's screen text read, for this capture (FORK.md).
     pub(super) screen_text: crate::fork::screen_text::ScreenTextRead,
 }
@@ -36,6 +42,8 @@ impl ContextWatch {
             snapshot: ContextSnapshot::default(),
             activity,
             capture: CaptureRefresh::default(),
+            screen: ScreenVocabulary::default(),
+            caret: CaretTextRead::default(),
             screen_text: crate::fork::screen_text::ScreenTextRead::start(),
         }
     }
@@ -65,23 +73,32 @@ impl ContextWatch {
     }
 
     /// A shortcut's press started a capture. It may still be a provisional
-    /// press a chord discards, so nothing reads the page yet.
+    /// press a chord discards, so nothing reads the page or the screen yet.
     pub(super) fn begin(&mut self) {
+        self.screen.cancel();
+        self.caret.cancel();
         self.capture.begin();
         self.screen_text.begin();
     }
 
     /// The capture became real: a control start (no hold to judge), a hold
     /// past its threshold, or a released microphone finally opening. Ask for
-    /// its page now, once per capture.
+    /// its page and its screen's vocabulary now, once per capture, and never
+    /// for an intend without a pending capture.
     pub(super) fn intend(&mut self) {
+        let pending = self.capture.pending();
+        self.screen.start(pending);
+        self.caret.start(pending);
         let monitor = &self.monitor;
         self.capture.intend(|| monitor.request_refresh());
         self.screen_text.intend();
     }
 
-    /// The capture ended without transcribing: no finish waits for its page.
+    /// The capture ended without transcribing: no finish waits for its page,
+    /// and a late screen vocabulary read is discarded.
     pub(super) fn cancel(&mut self) {
+        self.screen.cancel();
+        self.caret.cancel();
         self.capture.cancel();
         self.screen_text.cancel();
     }
@@ -94,6 +111,13 @@ impl ContextWatch {
     pub(super) fn finish(&mut self, events: &mut EventLog) -> Result<ContextSnapshot> {
         let screen_text = self.screen_text.finish();
         let mut snapshot = self.finish_snapshot(events)?;
+        let terms = self.screen.take();
+        if !terms.is_empty() {
+            snapshot.screen_terms = terms;
+        }
+        if let Some(caret) = self.caret.take() {
+            snapshot.caret_text = Some(caret);
+        }
         snapshot.fork_screen_text = screen_text;
         Ok(snapshot)
     }

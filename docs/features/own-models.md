@@ -17,7 +17,9 @@ Picker header -> "Add model file…" -> native dialog (GGUF, All files)   // set
 │   says the file was made for another program and needs a transcribe.cpp
 │   conversion, or the catalog's download; #1299);
 │   stt.variant; general.languages with a code Hex knows; only F32, F16, and
-│   Q8_0 tensors (the types every build runs on Metal and Vulkan); the tensor
+│   Q8_0 tensors (the types every build runs on Metal and Vulkan), plus
+│   Q4_K, Q5_K, and Q6_K while Labs › Smaller model files is on (macOS; the
+│   Vulkan builds embed no shaders for them); the tensor
 │   data fits the file. Anything else -> "<file> can't be imported: <reason>"
 ├── Copy -> models/custom/<16 hex>.gguf while hashing; the copy is checked again;
 │   receipt <16 hex>.gguf.verified.json (size, SHA-256, mtime, inode where
@@ -32,9 +34,8 @@ Picker header -> "Add model file…" -> native dialog (GGUF, All files)   // set
 │   Auto when its header says it detects the language (as Parakeet v3-type
 │   files do), no benchmark; Use prepares it like a catalog model (verifies
 │   Hex's copy against its receipt instead of downloading). General's Language menu
-│   lists every language the file declares: Hex's usual list first, then the
-│   rest of Whisper's codes by English name (Norwegian `no`, Norwegian
-│   Nynorsk `nn`, …; #1148)
+│   lists every language the file declares alongside Hex's usual ones,
+│   alphabetical by name (Norwegian `no`, Norwegian Nynorsk `nn`, …; #1148)
 ├── Remove -> Hex's copy, receipt, and manifest only; not the active model
 ├── Changed (a copy replaced by a link or hard link to the same file reads as
 │   changed: its file ID and mtime moved) -> "Check again" rehashes the file:
@@ -48,7 +49,9 @@ Picker header -> "Add model file…" -> native dialog (GGUF, All files)   // set
 └── Saved import missing or changed (size, mtime, or file ID) -> the choice
     stays saved; the listener runs a downloaded fallback (the system language's
     recommendation if downloaded, else the first downloaded catalog model;
-    custom_models::runnable); General's model row names the fallback and says
+    custom_models::runnable); launch and setup wait only for that fallback
+    (onboarding::model_ready), and `hex status` names it under
+    model.fallback with its reason; General's model row names the fallback and says
     to check it again in the picker (not "can't listen until downloaded",
     while the fallback is downloaded); the card warns
 ```
@@ -83,6 +86,51 @@ Picker header -> "Use model file where it is…" beside "Add model file…" -> t
 Off, the picker has no such button and Hex copies every added file as before.
 Shared folders and catalog models from a shared folder are not built.
 
+## Smaller Model Files (Labs, macOS)
+
+```ts
+Labs › Smaller model files on (labs.k_quant_models, off by default, macOS)  // labs.k-quant-models
+├── Add model file… and Use model file where it is… accept Q6_K, Q5_K, and
+│   Q4_K tensors too, beside F32, F16, and Q8_0; the header check is the same
+│   one (custom_models::profile, given the types this build can run), so a
+│   file is refused or accepted before anything loads
+├── The import's manifest records `k_quants: true`; manifests written before
+│   the field read as false
+├── The card stays in the picker with Rename and Remove, but no Use, while
+│   the lab is off, and says "Turn on Labs › Smaller model files to use it.";
+│   its availability folds in the lab (as Parakeet Ultra's does), so
+│   `hex model list`, the trays, and the menu bar leave it out
+├── Saving it as the model while the lab is off (or on Linux and Windows,
+│   where the lab does not exist) -> the choice stays saved and the listener
+│   runs the default model, as for a missing import: General says it needs
+│   Labs › Smaller model files, and `hex status` says "its Labs toggle is
+│   off" (custom_models::fallback_reason)
+├── `hex model use <custom-…>` while the lab is off -> refused, naming
+│   `hex labs on k-quant-models`
+└── Off -> exactly the F32, F16, and Q8_0 rule and its message, byte for byte
+```
+
+Metal has the K-quant kernels (mul_mat and get_rows); the Linux and Windows
+Vulkan builds embed shaders only for the catalog's types and ggml aborts a
+Vulkan run whose weights use another type, so those builds refuse these files
+whatever the setting says. A file another tool quantized may mix in types
+neither list holds — Q5_0 and Q4_0 are the common ones from old-style
+quantizers — and those are still refused with the type named. Turning the lab
+off while a K-quant model is selected falls back to the default model at once
+(the choice stays saved), and turning it back on runs the saved import again.
+Hex has not measured any import's accuracy; a Q6_K, Q5_K, or Q4_K file may
+transcribe worse than its Q8_0 source.
+
+Checks:
+`k_quants_are_known_only_where_the_caller_runs_them` and
+`k_quant_tensors_are_measured_in_their_ggml_block_sizes` in
+[transcription/gguf_header.rs](../../src/transcription/gguf_header.rs), and
+`a_k_quant_import_needs_the_lab_and_falls_back_without_it` in
+[transcription/custom_models.rs](../../src/transcription/custom_models.rs);
+`smaller_model_files_is_its_own_switch_and_macos_only` in
+[labs.rs](../../src/labs.rs). Not observed: a real K-quant file on Metal, and
+the row on a Mac screen.
+
 The local digest identifies the file Hex copied; it is not a publisher
 checksum. The selection, recent models, and keyboard-language mappings keep an
 import while it can't run (`models::validate_saved`), and a build that doesn't
@@ -95,16 +143,23 @@ registry rereads `models/custom/` when its folder changes).
 ## Found On This Computer
 
 ```ts
-Picker opens, or onboarding starts -> one scan (found_models::scan)   // setup.found-models
+Picker opens, onboarding starts, or `hex model list`/`hex model status` runs
+one scan (found_models::scan)                                // setup.found-models
 ├── Where: $HF_HUB_CACHE, else $HF_HOME/hub, else ~/.cache/huggingface/hub
 │   (Windows %USERPROFILE%\.cache\huggingface\hub); models--*/snapshots/*/*.gguf
 ├── Cheap: headers only, through the import's checks; each file's result is kept
 │   by path, size, mtime, and file ID, so an unchanged file is never read twice.
-│   Never in the background, never a full hash during the scan
+│   Never in the background, and never a full hash during the scan
 ├── Exact catalog match: the snapshot links to blobs/<sha256> and that digest and
 │   size are a catalog pin (a plain copy: repository, file name, and size)
 │   -> that catalog model counts as downloaded; its card says "Found on this
-│   computer" and offers Use, never Download
+│   computer" and offers Use, never Download. It is not ready yet: only Hex's
+│   receipt for the full check (models/found/<model>.json) makes it ready, so
+│   Setup, Settings, and every listener agree (models::is_ready)
+├── Only what this build offers is kept: the window drops a found file naming a
+│   catalog model its Labs switch hides (Parakeet Ultra with the lab off), so
+│   the model step never lists it and never holds the recommended download for
+│   it (rune_ui::found::keep_usable)
 ├── Other compatible files -> "Found on this computer" at the top of the picker:
 │   name · Not tested by Hex · Q8_0/F16/F32 · owner/name@revision · languages,
 │   "It may be too big for this computer's GPU memory." when the tensor data
@@ -123,8 +178,10 @@ Picker opens, or onboarding starts -> one scan (found_models::scan)   // setup.f
 ```
 
 `hex model list` scans too and shows each model's source: `download`, `hex`,
-`imported`, or `found: owner/name@abcdef1`; a compatible file not yet used is
-listed as `custom-<first 16 hex of its blob>` with `(not tested by Hex)`, and
+`imported`, or `found: owner/name@abcdef1`. `hex model status` scans for the
+same installed/unverified answer but prints no source. A compatible file not
+yet used is listed as `custom-<first 16 hex of its blob>` with `(not tested by
+Hex)`, and
 `hex model use <that id>` checks it in full and uses it in place. The local
 API's `/models` and the SDK's `ModelInfo.source` carry the same field.
 
@@ -132,8 +189,8 @@ API's `/models` and the SDK's `ModelInfo.source` carry the same field.
 
 ```ts
 Onboarding opens -> scan; its own download waits until it answers  // setup.found-choice
-├── Nothing compatible found -> Setting up Hex, unchanged: the recommended
-│   model downloads by itself, and the model step never shows
+├── Nothing this build can run found -> Setting up Hex, unchanged: the
+│   recommended model downloads by itself, and the model step never shows
 └── Something found -> the first run's model step in place of Setting up Hex:
     "Choose a speech model", one card of radio rows, no buttons inside
     ├── Hex's recommended model first, selected, [Recommended] -> "731 MB
@@ -141,13 +198,25 @@ Onboarding opens -> scan; its own download waits until it answers  // setup.foun
     │   in the cache (one row, never two)
     ├── Then each found file -> its name, "On this computer" (a catalog model)
     │   or "On this computer · not tested by Hex"; no hashes, repositories,
-    │   revisions, or compression
+    │   revisions, or compression. Only what this build offers: a Parakeet Ultra
+    │   file with its Labs switch off is never a row and never holds the
+    │   recommended download
     ├── Picking a row starts it: ours downloads ("Downloading… 42%" on the row)
     │   or, already here, is checked in place; a found file is used where it
     │   is ("Checking…"). A later pick supersedes one still preparing
     ├── Continue starts the selected row if none was picked, then the story
     │   moves on once the pick is under way: ours with its download pill on
     │   top, a found one with no download page or pill at all
+    ├── A pick that can't run (an import that is gone, a model its Labs switch
+    │   hides) never reads as a download: the tour marks it failed and the
+    │   pick clears, so the list returns to the recommended row. The plain
+    │   download page, which shows without a list, names the reason with Try
+    │   again, Use a model file…, and Continue without a model; Try again
+    │   forgets that reason and asks again for the choice the language
+    │   capsule last set (live.choice). A model file the person chooses, or
+    │   any model the service is already preparing, ends it: the reason and
+    │   its actions go, so Try again never cancels the import
+    │   (tour.flow.model_failed, Flow::pick_failed, Flow::pick_replaced)
     ├── A pick that fails asks again on the list
     ├── Back on the pages after it returns to the list to change the pick,
     │   even with the model ready
@@ -172,13 +241,82 @@ in-place use and forgetting, a forgotten catalog file no longer counting as
 downloaded, the full check refusing a mismatched file),
 `transcription::gguf_header::tests`, `transcription::custom_models::tests`
 (including `a_relinked_copy_reads_as_changed_and_check_again_accepts_only_the_same_contents`,
-`a_receipt_survives_a_renumbered_volume_but_not_another_file`, and `a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`),
+`a_receipt_survives_a_renumbered_volume_but_not_another_file`,
+`a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`,
+`renaming_many_times_keeps_one_entry_and_frees_earlier_definitions`,
+`a_held_snapshot_keeps_its_name_across_a_rename`,
+`removing_an_import_frees_its_definition_after_the_last_reader`, and
+`an_in_place_path_change_rebuilds_the_definition`),
 `desktop::onboarding::tests::a_held_download_waits_for_the_person`,
+`a_pick_that_cannot_start_stays_failed_until_another_pick`,
+`a_scan_keeps_only_the_models_this_build_can_run`,
 `a_found_model_moves_on_without_a_download_and_back_returns_to_it`,
+`a_found_model_this_build_cannot_run_is_not_offered`,
+`an_unavailable_pick_fails_the_page_instead_of_downloading_forever`,
+`retrying_after_a_refused_pick_shows_the_next_download_failure`,
+`a_failed_pick_keeps_its_actions_without_a_reason`,
+`a_model_being_prepared_hides_the_refused_pick`,
+`a_chosen_file_ends_the_refused_pick_without_a_new_download`,
+`try_again_after_a_network_failure_asks_once`,
 `the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one`,
+`linux::app::tests::a_model_this_build_cannot_run_says_why_and_starts_nothing`,
 `labs::tests::graduated_features_answer_by_name`, and the goldens
 `rune-picker-custom-models-light`, `rune-picker-found-light`, and
 `rune-onboarding-model-found-light`,
 `rune-onboarding-model-found-downloading-light`,
 `rune-onboarding-model-found-recommended-light`, and
 `rune-onboarding-model-found-back-light`.
+
+## Readiness And Enable
+
+```ts
+Saved model ready? one check everywhere  // models::is_ready, model_ready
+├── Hex's own download or import -> installed, and its receipt is the check
+├── Catalog file in another app's cache, not checked yet -> installed but not
+│   ready; onboarding, Settings, and `hex status` never call it ready
+├── Enable while it is not ready ->
+│   ├── Its file is here -> the existing installed-only preparation checks it
+│   │   against its pin (adopting it as models/found/<model>.json), then the
+│   │   listener starts. No scan and no download run here
+│   └── No file, or none a scan has found yet -> Model required, unchanged
+│       (no preparation and no error)
+├── A check is verify-only: it never replaces the saved selection with a
+│   lost import's fallback (Windows, Linux, and macOS commit no settings)
+├── `hex model use` on the saved, unverified model -> the same check runs
+│   instead of answering "already in use", and reports success only once the
+│   model is ready
+└── macOS launch with the listener waiting -> recognition starts with an
+    installed model, as before (the macOS loader does not require the pinned
+    check); Settings' speech model row still checks and adopts a found file
+    when chosen
+```
+
+Observed: not run on Windows or macOS hardware. Checks:
+`transcription::models::tests::readiness_needs_the_pinned_files_verification_receipt`
+and
+`transcription::found_models::tests::a_found_catalog_model_is_not_ready_until_adopted_in_place`.
+
+## A Download Another Process Runs
+
+```ts
+models/.download.lock held by `hex model install` (a terminal) or another Hex,
+writing models/<file>.gguf.partial  // transcription::models::lock_downloads
+├── Onboarding, Settings, or `hex model install` starts the same model -> it
+│   waits for that lock instead of failing or downloading a second copy
+├── While it waits, downloaded_bytes comes from the partial file's size, so
+│   `hex status --json`, the picker, and onboarding show that process's
+│   progress rather than 0%
+├── The lock covers the whole models folder, so the progress shown is this
+│   model's partial file; while the other process fetches a different model
+│   it stays flat
+├── Cancel stops only the wait; the other process's download continues
+└── The lock is released -> the finished file is verified against its
+    receipt and adopted, with no second download
+```
+
+Checks: `transcription::models::tests::waiting_for_another_processs_download_reports_its_partial_bytes`
+holds the lock and writes three bytes of the partial, then asserts a waiting
+download reports those bytes and stops canceled without fetching anything.
+That a foreign lock makes `hex model install`/onboarding show it in the real
+service has **not** been run; the Linux app's snapshot was checked by reading
+`linux::app::snapshot`.

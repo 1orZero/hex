@@ -1,6 +1,7 @@
 use crate::desktop::events::{
     CommandOutcome, DictationPhase, EventReader, TranscriptPhase, VoiceEvent, VoiceState,
 };
+use crate::desktop::host::ListenerStatus;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DesktopActivity {
@@ -21,13 +22,13 @@ impl DesktopActivity {
         *self = Self::from_events(reader.events().iter().rev());
     }
 
-    pub(crate) fn state_label(&self) -> Option<&'static str> {
+    pub(crate) fn state_label(&self) -> Option<ListenerStatus> {
         self.state.map(|state| match state {
-            VoiceState::Listening => "Enabled",
-            VoiceState::Sleeping => "Sleeping",
-            VoiceState::Dictating => "Recording",
-            VoiceState::Transcribing => "Transcribing",
-            VoiceState::Stopping => "Disabling…",
+            VoiceState::Listening => ListenerStatus::Enabled,
+            VoiceState::Sleeping => ListenerStatus::Sleeping,
+            VoiceState::Dictating => ListenerStatus::Recording,
+            VoiceState::Transcribing => ListenerStatus::Transcribing,
+            VoiceState::Stopping => ListenerStatus::Disabling,
         })
     }
 
@@ -105,6 +106,8 @@ pub(crate) fn failure_explanation(message: &str) -> String {
         .to_owned()
     } else if message.contains(crate::audio::NO_MICROPHONE_ERROR) {
         crate::desktop::i18n::tr("No microphone is available. Connect a microphone.").to_owned()
+    } else if crate::paste::refused_by_macos(message) {
+        crate::desktop::i18n::tr(crate::paste::POST_EVENT_REFUSED).to_owned()
     } else {
         message.to_owned()
     }
@@ -156,14 +159,22 @@ pub(crate) fn event_summary(event: &VoiceEvent) -> String {
             phase,
             text,
             processing,
+            reason,
             ..
         } => {
             let description = match phase {
                 DictationPhase::Started => "Dictation started".into(),
+                DictationPhase::Discarded
+                    if reason.as_deref()
+                        == Some(crate::desktop::events::VOICE_PROMPT_NOTHING_REASON) =>
+                {
+                    crate::desktop::i18n::tr("The voice prompt asked for nothing").to_owned()
+                }
                 DictationPhase::Discarded => "A brief dictation was discarded".into(),
                 DictationPhase::Cancelled => "Dictation was cancelled".into(),
                 DictationPhase::Transcribing => "Dictation is being transcribed".into(),
                 DictationPhase::Pasted => text_or("Dictation paste sent", text),
+                DictationPhase::Copied => text_or("Dictation copied to the clipboard", text),
                 DictationPhase::Printed => text_or("Dictation was printed", text),
                 DictationPhase::Edited => text_or("Selected text was edited", text),
                 DictationPhase::VoiceAction => text_or("Voice Action completed", text),
@@ -216,6 +227,21 @@ fn text_or(prefix: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_voice_prompt_nothing_discard_says_so() {
+        let event = VoiceEvent::Dictation {
+            timestamp_ms: 1,
+            phase: DictationPhase::Discarded,
+            text: String::new(),
+            processing: None,
+            reason: Some(crate::desktop::events::VOICE_PROMPT_NOTHING_REASON.into()),
+        };
+        assert_eq!(
+            event_summary(&event),
+            crate::desktop::i18n::tr("The voice prompt asked for nothing")
+        );
+    }
 
     #[test]
     fn projects_latest_state_and_device() {
@@ -371,6 +397,11 @@ mod tests {
         assert_eq!(
             failure_explanation("OpenCode generation failed"),
             "OpenCode generation failed"
+        );
+        assert_eq!(
+            failure_explanation(crate::paste::POST_EVENT_REFUSED),
+            crate::desktop::i18n::tr(crate::paste::POST_EVENT_REFUSED),
+            "a refused paste names the pane to add Hex to"
         );
     }
 }

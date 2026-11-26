@@ -9,14 +9,15 @@ use rune::{El, TextEdit, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, TextInput};
 
 use super::controls::{
-    ButtonKind, CardRow, DESCRIPTION, METRICS, Paint, PushSize, button, card, folding, note, page,
-    raised, status_dot,
+    ButtonKind, CardRow, Choice, DESCRIPTION, METRICS, Paint, PushSize, button, card, folding,
+    note, page, raised, select_sized, setting_row, status_dot,
 };
 use super::icons::MIC;
 use super::lists::{Tone, tone_tag};
 use super::modes::{application_icon, monogram};
+use super::settings::toggle_menu;
 use super::spark::{Spark, spark};
-use super::{ShortcutTarget, Ui};
+use super::{Menu, ShortcutTarget, Ui};
 use crate::app_settings::DictationMode;
 use crate::desktop::i18n::{tr, tr_fill};
 use crate::dictation::text_replacements::ReplacementSet;
@@ -25,6 +26,9 @@ mod examples;
 
 /// The agent card's spark, this many points square.
 const SPARK: f32 = 30.0;
+/// The narrowest the agent card's lead (spark and copy) gets before its
+/// actions wrap below it.
+const AGENT_TEXT_MIN: f32 = 160.0;
 /// Each app rule's folding steps, by its place in the list.
 const RULE_STEPS: [&str; 8] = [
     "rule0-steps",
@@ -40,6 +44,8 @@ const RULE_STEPS: [&str; 8] = [
 const TRANSFORMS_DOCS: &str = "https://anoma.ly/hex/docs/transforms";
 /// A step's number sits in a disc this wide, on the row text's edge.
 const STEP_BADGE: f32 = 20.0;
+/// The Try input's height, the kit's regular field.
+const TRY_FIELD: f32 = 28.0;
 
 #[derive(Default)]
 pub(super) struct OutputPane {
@@ -190,13 +196,17 @@ fn preview(mode: &DictationMode, input: &str) -> String {
 // ---------------------------------------------------------------------------
 // View
 
-pub(super) fn pane(ui: &Ui, p: Paint, reduced: bool) -> El {
+pub(super) fn pane(ui: &Ui, p: Paint, reduced: bool, layer: &mut Vec<El>) -> El {
     let processing = &ui.settings.dictation_processing;
     let mut content = page("output-content")
         .children(trust_card(ui, p))
-        .child(agent_card(ui, p, reduced))
-        .child(every_dictation(ui, p, &processing.default_mode))
-        .child(try_card(ui, p, &processing.default_mode));
+        .child(agent_card(ui, p, reduced));
+    // Labs › Dictation style writes every dictation after the corrections
+    // and any rewrite, before the transformations below.
+    if ui.settings.labs.dictation_style {
+        content = content.child(dictation_style(ui, p, layer));
+    }
+    content = content.child(every_dictation(ui, p, &processing.default_mode));
     #[cfg(target_os = "macos")]
     {
         content = content.child(super::fork_output::section(ui, p));
@@ -254,8 +264,8 @@ fn agent_card(ui: &Ui, p: Paint, reduced: bool) -> El {
             .child(
                 row()
                     .key("lead")
-                    .w(200.0)
                     .grow(1.0)
+                    .min_w(AGENT_TEXT_MIN)
                     .gap(12.0)
                     .center_y()
                     .child(mark)
@@ -266,6 +276,11 @@ fn agent_card(ui: &Ui, p: Paint, reduced: bool) -> El {
                     .key("actions")
                     .gap(4.0)
                     .center_y()
+                    // Below the window's usual minimum width the two labels
+                    // no longer fit side by side; stack them instead of
+                    // running past the card.
+                    .shrink()
+                    .flex_wrap()
                     .child(open)
                     .child(edit),
             ),
@@ -346,16 +361,19 @@ fn trust_card(ui: &Ui, p: Paint) -> Option<El> {
     )
 }
 
-/// The steps every dictation goes through, numbered in order.
+/// The steps every dictation goes through, numbered in order, then Try,
+/// which runs them on a sentence.
 fn every_dictation(ui: &Ui, p: Paint, mode: &DictationMode) -> El {
     let steps = steps(ui, mode);
-    let rows: Vec<CardRow> = if steps.is_empty() {
+    let mut rows: Vec<CardRow> = if steps.is_empty() {
         vec![
             note(
                 "no-steps",
                 tr("No steps yet. Hex pastes your words as it heard them"),
                 p.muted(),
             )
+            .min_h(METRICS.row_h)
+            .center_y()
             .into(),
         ]
     } else {
@@ -365,12 +383,60 @@ fn every_dictation(ui: &Ui, p: Paint, mode: &DictationMode) -> El {
             .map(|(index, step)| step_row(p, &format!("step{index}"), index, step).into())
             .collect()
     };
+    rows.push(try_row(ui, p, mode).into());
     labeled(
         p,
         "every-dictation",
         tr("Every dictation"),
         tr("Runs top to bottom"),
         rows,
+    )
+}
+
+/// Labs › Dictation style: which of the iPhone app's four styles every
+/// dictation is written as. The row is here only while the lab is on.
+fn dictation_style(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
+    use crate::app_settings::DictationStyle;
+    let current = ui.settings.labs.dictation_style_choice;
+    let choices = DictationStyle::ALL
+        .into_iter()
+        .map(|style| Choice {
+            label: tr(style.name()).to_owned(),
+            detail: Some(tr(style.hint()).to_owned()),
+            selected: style == current,
+            choose: Box::new(move |ui| {
+                ui.open = None;
+                ui.update(|settings| settings.labs.dictation_style_choice = style);
+            }),
+        })
+        .collect();
+    let control = select_sized(
+        p,
+        "dictation-style-choice",
+        tr("Style"),
+        tr(current.name()),
+        None,
+        ui.open == Some(Menu::Pick("dictation-style")),
+        choices,
+        |ui| toggle_menu(ui, Menu::Pick("dictation-style")),
+        layer,
+        200.0,
+    );
+    labeled(
+        p,
+        "dictation-style",
+        tr("Dictation style"),
+        tr("After the rewrite"),
+        vec![
+            setting_row(
+                p,
+                "dictation-style-row",
+                tr("Style"),
+                Some(tr(current.hint())),
+                control,
+            )
+            .into(),
+        ],
     )
 }
 
@@ -484,8 +550,9 @@ fn typed_text(ui: &Ui, p: Paint) -> El {
     )
 }
 
-/// A sentence in, and what Hex would paste for it out.
-fn try_card(ui: &Ui, p: Paint, mode: &DictationMode) -> El {
+/// Every dictation's last row: a sentence in, and what Hex would paste for
+/// it out, read-only, so it is text rather than a second field.
+fn try_row(ui: &Ui, p: Paint, mode: &DictationMode) -> El {
     let c = &p.k.c;
     let input = TextInput::new(&ui.output.trial)
         .placeholder(tr("Type what you might say"))
@@ -499,15 +566,12 @@ fn try_card(ui: &Ui, p: Paint, mode: &DictationMode) -> El {
     } else {
         (preview(mode, trial), p.text())
     };
+    // As tall as the input, so the row keeps its height when text appears.
     let result = row()
         .key("try-result")
-        .min_h(28.0)
-        .px(8.0)
+        .min_h(TRY_FIELD)
         .py(4.0)
         .center_y()
-        .radius(p.k.radius.md)
-        .fill(c.layer_01)
-        .border(p.hair, c.border_muted)
         .child(
             text(result)
                 .key("text")
@@ -516,31 +580,33 @@ fn try_card(ui: &Ui, p: Paint, mode: &DictationMode) -> El {
                 .wrap()
                 .grow(1.0),
         );
-    let mut rows = vec![
-        row()
-            .key("try")
-            .px(METRICS.row_px)
-            .py(12.0)
-            .gap(10.0)
-            .center_y()
-            .child(
-                text(tr("Try"))
-                    .key("label")
-                    .font(p.k.ty.ui)
-                    .color(p.muted()),
-            )
-            .child(col().key("in").w(0.0).grow(1.0).child(input))
-            .child(
-                rune::icon(&rune_kit::glyphs::ARROW_RIGHT, 16.0)
-                    .key("arrow")
-                    .color(c.icon_faint),
-            )
-            .child(col().key("out").w(0.0).grow(1.0).child(result)),
-    ];
-    if ui.settings.labs.output_fixes {
-        rows.push(fix_row(ui, p, trial));
+    let try_row = row()
+        .key("try")
+        .min_h(METRICS.row_h)
+        .px(METRICS.row_px)
+        .py((METRICS.row_h - TRY_FIELD) / 2.0)
+        .gap(10.0)
+        .center_y()
+        .child(
+            text(tr("Try"))
+                .key("label")
+                .font(p.k.ty.ui)
+                .color(p.muted()),
+        )
+        .child(col().key("in").w(0.0).grow(1.0).child(input))
+        .child(
+            rune::icon(&rune_kit::glyphs::ARROW_RIGHT, 16.0)
+                .key("arrow")
+                .color(c.icon_faint),
+        )
+        .child(col().key("out").w(0.0).grow(1.0).child(result));
+    if !ui.settings.labs.output_fixes {
+        return try_row;
     }
-    card(p, "try-card", rows)
+    col()
+        .key("try-row")
+        .child(try_row)
+        .child(fix_row(ui, p, trial))
 }
 
 /// Labs › Fix results in Output: Vocabulary opens the shared vocabulary
@@ -746,6 +812,10 @@ fn agent_prompt(fix: Option<(&str, &str)>) -> String {
         |_| "Hex's settings.json".into(),
         |path| path.display().to_string(),
     );
+    let builtins = crate::personal_commands::builtin_transformation_ids()
+        .map(|id| format!("\"{id}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "I use Hex for dictation. Change what it does to my words before it pastes them.\n\
          \n\
@@ -765,8 +835,7 @@ fn agent_prompt(fix: Option<(&str, &str)>) -> String {
          model (`opencode2 models` lists them). \
          If the rewrite fails or runs past the deadline, Hex pastes the text without it.\n\
          \n\
-         Built-in transformations: \"lowercase\", \"no-trailing-punctuation\", \
-         \"spongebob-case\". Others are functions in ~/.config/hex/hex.config.ts \
+         Built-in transformations: {builtins}. Others are functions in ~/.config/hex/hex.config.ts \
          (run `hex commands init` for its typings; the API, including fetch and \
          node:child_process, is documented at {TRANSFORMS_DOCS}).\n\
          \n\
@@ -841,6 +910,13 @@ pub(super) fn trust_fixture(ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_built_in_transformation_has_a_step_name() {
+        for id in crate::personal_commands::builtin_transformation_ids() {
+            assert!(builtin(id).is_some(), "{id:?} has no step name");
+        }
+    }
 
     #[test]
     fn the_preview_runs_corrections_then_built_in_steps_in_order() {

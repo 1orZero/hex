@@ -23,57 +23,49 @@ const ADVANCE_BEAT: Duration = Duration::from_millis(700);
 pub(super) struct Tour {
     pub(super) flow: Flow,
     advance_at: Option<Instant>,
-    completed: bool,
 }
 
 impl Tour {
-    fn new(flow: Flow, completed: bool) -> Self {
+    fn new(flow: Flow) -> Self {
         Self {
             flow,
             advance_at: None,
-            completed,
         }
     }
 
     /// The tour from Welcome, as on a new install: Run setup again.
     pub(super) fn replay(settings: &AppSettings, platform: &PlatformState) -> Tour {
-        let installed = super::picker::Picker::default().selected_installed(settings);
-        Tour::new(
-            Flow::new(
-                Step::Welcome,
-                platform.setup_status(installed),
-                platform.caps.permissions,
-                platform.caps.practice_dictation,
-            ),
-            false,
-        )
+        let ready = super::picker::Picker::default().selected_ready(settings);
+        Tour::new(Flow::new(
+            Step::Welcome,
+            platform.setup_status(ready),
+            platform.caps.permissions,
+            platform.caps.practice_dictation,
+        ))
     }
 
     /// The tour when this run still needs it.
     pub(super) fn start(settings: &AppSettings, platform: &PlatformState) -> Option<Tour> {
-        let installed = super::picker::Picker::default().selected_installed(settings);
-        let status = platform.setup_status(installed);
+        let ready = super::picker::Picker::default().selected_ready(settings);
+        let status = platform.setup_status(ready);
         let completed = crate::desktop::onboarding::completion_recorded();
         let resume = crate::desktop::onboarding::take_resume();
         let saved = (!completed)
             .then(crate::desktop::onboarding::saved_step)
             .flatten();
         (resume.is_some() || (!completed && (!status.ready() || saved.is_some()))).then(|| {
-            Tour::new(
-                Flow::new(
-                    resume.or(saved).unwrap_or(Step::Welcome),
-                    status,
-                    platform.caps.permissions,
-                    platform.caps.practice_dictation,
-                ),
-                completed,
-            )
+            Tour::new(Flow::new(
+                resume.or(saved).unwrap_or(Step::Welcome),
+                status,
+                platform.caps.permissions,
+                platform.caps.practice_dictation,
+            ))
         })
     }
 }
 
 pub(super) fn progress(ui: &Ui) -> (bool, ModelProgress) {
-    let installed = ui.picker.selected_installed(&ui.settings);
+    let ready = ui.picker.selected_ready(&ui.settings);
     let selected = crate::transcription::models::validate(&ui.settings.transcription).ok();
     let transcription = ui.view.as_ref().map(|view| &view.transcription);
     let downloading = selected.and_then(|model| {
@@ -85,9 +77,8 @@ pub(super) fn progress(ui: &Ui) -> (bool, ModelProgress) {
         })
     });
     (
-        installed,
+        ready,
         ModelProgress {
-            installed,
             downloading,
             failed: downloading.is_none() && transcription.is_some_and(|t| t.error.is_some()),
         },
@@ -121,17 +112,21 @@ pub(super) fn poll(ui: &mut Ui) -> bool {
             tour.flow.hold_download(held);
         }
     }
-    let (installed, model) = progress(ui);
-    let status = ui.platform.setup_status(installed);
+    let (ready, model) = progress(ui);
+    let status = ui.platform.setup_status(ready);
     let accessibility_stale = ui
         .platform
         .stale(crate::desktop::onboarding::PermissionKind::Accessibility);
-    let live = ui.live();
+    let accessibility_split = ui.platform.accessibility_split;
+    let accessibility_restart_done = ui.platform.accessibility_restart_done;
     let Some(tour) = &mut ui.tour else {
         return false;
     };
     let before = tour.flow.view();
     let step = before.step;
+    tour.flow.set_post_event_split(accessibility_split);
+    tour.flow
+        .set_post_event_restart_done(accessibility_restart_done);
     let mut effect = tour.flow.on(Input::Status(status, model));
     tour.flow.set_accessibility_stale(accessibility_stale);
     if tour
@@ -141,12 +136,6 @@ pub(super) fn poll(ui: &mut Ui) -> bool {
         tour.advance_at = None;
         if tour.flow.step() == Step::Setup {
             effect = tour.flow.on(Input::Continue);
-        }
-    }
-    if status.ready() && !tour.completed {
-        tour.completed = true;
-        if live && let Err(error) = crate::desktop::onboarding::record_completion() {
-            tracing::warn!(%error, "could not record onboarding completion");
         }
     }
     let practicing = tour.flow.step() == Step::TryIt;
@@ -191,11 +180,21 @@ fn apply(ui: &mut Ui, effect: Effect) {
                 .choice
                 .take()
                 .unwrap_or_else(|| ui.settings.transcription.clone());
-            if crate::transcription::models::validate(&selection).is_ok() {
-                ui.send(Request::ChooseModel {
+            match crate::transcription::models::validate(&selection) {
+                Ok(_) => ui.send(Request::ChooseModel {
                     model: selection.model,
                     language: selection.language,
-                });
+                }),
+                // A model this build can't run (a found file whose Labs switch
+                // is off, an import that is gone) must say so: left alone, the
+                // tour waits on a download that never starts.
+                Err(error) => {
+                    ui.found.picked = None;
+                    ui.found.error = Some(format!("{error:#}"));
+                    if let Some(tour) = &mut ui.tour {
+                        tour.flow.model_failed();
+                    }
+                }
             }
         }
         Effect::AdvanceSoon => {
@@ -213,12 +212,22 @@ fn apply(ui: &mut Ui, effect: Effect) {
             crate::desktop::onboarding::PermissionAction::ResetAndPrompt(kind),
         )),
         Effect::Relaunch => ui.ask(PlatformRequest::Relaunch),
-        Effect::Finish => {
-            ui.tour = None;
-            ui.first_run = None;
-        }
+        Effect::Finish => close(ui, true),
         Effect::None => {}
     }
+}
+
+/// Closes onboarding. Only a `finished` tour is recorded complete; until
+/// then its saved step is the record, so a relaunch resumes there.
+pub(super) fn close(ui: &mut Ui, finished: bool) {
+    if finished
+        && ui.live()
+        && let Err(error) = crate::desktop::onboarding::record_completion()
+    {
+        tracing::warn!(%error, "could not record onboarding completion");
+    }
+    ui.tour = None;
+    ui.first_run = None;
 }
 
 /// A first run at `step`, with the selected model not yet installed.
@@ -235,7 +244,7 @@ pub(super) fn fixture(ui: &mut Ui, step: Step, downloading: bool) {
     if step != Step::Welcome {
         flow.on(Input::Continue);
     }
-    ui.tour = Some(Tour::new(flow, false));
+    ui.tour = Some(Tour::new(flow));
     if downloading {
         input(ui, Input::Grant(SetupItem::Model));
         set_downloaded(ui, 62);
@@ -308,10 +317,7 @@ pub(super) fn mac_fixture(ui: &mut Ui, state: MacStep) {
     };
     ui.platform.permissions = fresh;
     ui.picker.installed = Some(Vec::new());
-    ui.tour = Some(Tour::new(
-        Flow::new(Step::Welcome, fresh, true, true),
-        false,
-    ));
+    ui.tour = Some(Tour::new(Flow::new(Step::Welcome, fresh, true, true)));
     // The tour starts the download as soon as it sees no model.
     poll(ui);
     input(ui, Input::Continue);
@@ -359,10 +365,9 @@ mod tests {
     fn mac_stale_fixture_marks_accessibility_stale_and_dispatches_reset() {
         let mut ui = crate::rune_ui::mac_fixture();
         mac_fixture(&mut ui, MacStep::SetupStale);
-        let rows = ui.tour.as_ref().unwrap().flow.view().rows;
-        assert!(
-            rows.iter()
-                .any(|row| row.item == SetupItem::Accessibility && row.status == ItemStatus::Stale)
+        assert_eq!(
+            ui.tour.as_ref().unwrap().flow.view().accessibility,
+            ItemStatus::Stale
         );
         input(&mut ui, Input::Grant(SetupItem::Accessibility));
         assert!(
