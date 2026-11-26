@@ -4,9 +4,10 @@
 //! its long pauses, encoded as Ogg Opus, and sent to Dropline; the text it
 //! returns replaces the local model's. The access token comes from a token
 //! endpoint (Derek Voice Worker) with a bearer kept in the Keychain; Hex
-//! never refreshes Dropline tokens itself. The local model transcribes every
-//! clip as before, so any Dropline failure answers with the local text of the
-//! same clip and records why.
+//! never refreshes Dropline tokens itself. The local model transcribes the
+//! clip only after Dropline fails, so a failure answers with the local text of
+//! the same clip and records why. While a hotkey capture records, Dropline
+//! also gives its live text (`live`, called by `dictation::fork_dropline_live`).
 
 mod audio;
 mod client;
@@ -16,10 +17,12 @@ mod store;
 mod text;
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::transcription::engine::{PendingTranscript, Source, Transcribed};
+use crate::transcription::engine::{
+    LiveStream, Offline, PendingTranscript, Source, Transcribed, TranscriptionEngine,
+};
 
 pub use store::DEFAULT_ENDPOINT;
 pub(crate) use text::traditional;
@@ -89,12 +92,27 @@ pub fn provider() -> Option<Provider> {
     state().provider.clone()
 }
 
-/// Whether dictation goes to Dropline.
+/// Whether dictation goes to Dropline. Tests never read the saved provider:
+/// each test thread starts unselected ([`select_for_test`]).
 pub fn selected() -> bool {
+    #[cfg(test)]
+    return SELECTED_FOR_TEST.with(std::cell::Cell::get);
+    #[cfg(not(test))]
     state()
         .provider
         .as_ref()
         .is_some_and(|provider| provider.selected)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SELECTED_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes [`selected`] answer `selected` on this test thread.
+#[cfg(test)]
+pub(crate) fn select_for_test(selected: bool) {
+    SELECTED_FOR_TEST.with(|cell| cell.set(selected));
 }
 
 pub fn last_fallback() -> Option<Fallback> {
@@ -236,10 +254,49 @@ pub fn job(samples: &[f32], submitted: Instant) -> Option<Job> {
     })
 }
 
+/// A dictation's local transcript: running, or waiting for Dropline to fail.
+pub enum Local {
+    Running(PendingTranscript),
+    Deferred(Box<dyn FnOnce() -> Result<PendingTranscript, String> + Send>),
+}
+
+impl Local {
+    fn wait(self) -> Result<Transcribed, String> {
+        match self {
+            Self::Running(pending) => pending.wait(),
+            Self::Deferred(start) => start()?.wait(),
+        }
+    }
+}
+
+/// The clip's local transcript. While Dropline transcribes the clip
+/// (`dropline` is `Some`) and the capture streamed nothing, the local model
+/// runs only if Dropline fails; otherwise the engine starts it now.
+pub fn local(
+    dropline: &Option<Job>,
+    engine: &Arc<TranscriptionEngine>,
+    stream: Option<LiveStream>,
+    clip: Vec<f32>,
+    offline: Offline,
+) -> color_eyre::eyre::Result<Local> {
+    if dropline.is_none() || stream.is_some() {
+        return engine
+            .finish_with(stream, clip, offline)
+            .map(Local::Running);
+    }
+    let engine = engine.clone();
+    Ok(Local::Deferred(Box::new(move || {
+        engine
+            .finish_with(None, clip, offline)
+            .map_err(|error| error.to_string())
+    })))
+}
+
 /// Dropline's text for `job`, else the local model's for the same clip.
-/// When Dropline answers, the local transcript is still waited for off this
-/// thread, so its deadlines keep a wedged engine from holding later jobs.
-pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, String> {
+/// When Dropline answers, a local transcript already running is still waited
+/// for off this thread, so its deadlines keep a wedged engine from holding
+/// later jobs; a deferred one never starts.
+pub fn wait(job: Option<Job>, local: Local) -> Result<Transcribed, String> {
     answer(job, local, transcribe, |fallback| {
         state().fallback = fallback
     })
@@ -248,7 +305,7 @@ pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, S
 /// [`wait`] with Dropline's request and General's fallback status passed in.
 fn answer(
     job: Option<Job>,
-    local: PendingTranscript,
+    local: Local,
     transcribe: impl FnOnce(&Job) -> Result<String, client::Failure>,
     status: impl FnOnce(Option<Fallback>),
 ) -> Result<Transcribed, String> {
@@ -268,13 +325,15 @@ fn answer(
             );
             status(None);
             remember(job.submitted, NAME.to_owned());
-            let watched = std::thread::Builder::new()
-                .name("hex-dropline-local".into())
-                .spawn(move || {
-                    let _ = local.wait();
-                });
-            if let Err(error) = watched {
-                tracing::warn!(%error, "could not watch the local transcript");
+            if let Local::Running(pending) = local {
+                let watched = std::thread::Builder::new()
+                    .name("hex-dropline-local".into())
+                    .spawn(move || {
+                        let _ = pending.wait();
+                    });
+                if let Err(error) = watched {
+                    tracing::warn!(%error, "could not watch the local transcript");
+                }
             }
             Ok(Transcribed {
                 text,
@@ -321,6 +380,48 @@ pub fn history_model(submitted: Instant) -> Option<String> {
     answer
         .map(|(_, model)| model)
         .or_else(crate::history::dictation_model)
+}
+
+/// Dropline's text for the recording so far, for live text (blocks on the
+/// network). It goes in the session the dictation's final request uses,
+/// with the same vocabulary; a failure is only logged, by reason.
+pub(crate) fn live(samples: Vec<f32>) -> Option<String> {
+    let job = Job {
+        samples,
+        session: live_session(),
+        vocabulary: crate::dictation::vocabulary::terms(),
+        submitted: Instant::now(),
+    };
+    let started = Instant::now();
+    match transcribe(&job) {
+        Ok(text) => {
+            tracing::debug!(
+                provider = "dropline-private",
+                finish_ms = started.elapsed().as_millis() as u64,
+                audio_ms = job.samples.len() / 16,
+                chars = text.chars().count(),
+                "Dropline live text"
+            );
+            Some(text)
+        }
+        Err(failure) => {
+            tracing::debug!(provider = "dropline-private", reason = %failure, "Dropline live text failed");
+            None
+        }
+    }
+}
+
+/// The capture's prepared session, made now when its prepare didn't run.
+fn live_session() -> String {
+    let mut state = state();
+    if let Some((session, at)) = &state.prepared
+        && at.elapsed() < SESSION_AGE
+    {
+        return session.clone();
+    }
+    let session = new_session();
+    state.prepared = Some((session.clone(), Instant::now()));
+    session
 }
 
 fn transcribe(job: &Job) -> Result<String, client::Failure> {
@@ -429,14 +530,28 @@ mod tests {
         assert_ne!(session, new_session());
     }
 
-    #[test]
-    fn local_dictation_keeps_its_original_script() {
-        let engine =
-            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
-        let local = engine
-            .foreground(vec![], Box::new(|_, _| Ok("qa-本机软件".into())))
-            .unwrap();
-        assert_eq!(wait(None, local).unwrap().text, "qa-本机软件");
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn engine() -> Arc<TranscriptionEngine> {
+        Arc::new(TranscriptionEngine::start(Default::default()).unwrap())
+    }
+
+    /// The local model's offline run, counted in `runs`.
+    fn counted(runs: &Arc<AtomicUsize>, delay: Duration) -> Offline {
+        let runs = runs.clone();
+        Box::new(move |_, _| {
+            runs.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(delay);
+            Ok("qa-本機".into())
+        })
+    }
+
+    fn running(engine: &TranscriptionEngine, delay: Duration) -> Local {
+        Local::Running(
+            engine
+                .foreground(vec![], counted(&Arc::default(), delay))
+                .unwrap(),
+        )
     }
 
     fn qa_job() -> Job {
@@ -448,32 +563,57 @@ mod tests {
         }
     }
 
-    fn local(
-        engine: &crate::transcription::engine::TranscriptionEngine,
-        delay: Duration,
-    ) -> PendingTranscript {
-        engine
-            .foreground(
-                vec![],
-                Box::new(move |_, _| {
-                    std::thread::sleep(delay);
-                    Ok("qa-本機".into())
-                }),
-            )
-            .unwrap()
+    #[test]
+    fn local_dictation_keeps_its_original_script() {
+        let engine = engine();
+        let local = engine
+            .foreground(vec![], Box::new(|_, _| Ok("qa-本机软件".into())))
+            .unwrap();
+        assert_eq!(
+            wait(None, Local::Running(local)).unwrap().text,
+            "qa-本机软件"
+        );
     }
 
     #[test]
-    fn history_names_dropline_when_it_answers() {
-        let engine =
-            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+    fn without_dropline_the_local_model_starts_with_the_clip() {
+        let engine = engine();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let local = local(
+            &None,
+            &engine,
+            None,
+            vec![0.0; 1_600],
+            counted(&runs, Duration::ZERO),
+        )
+        .unwrap();
+        assert!(matches!(local, Local::Running(_)));
+        let submitted = Instant::now();
+        assert_eq!(wait(None, local).unwrap().text, "qa-本機");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(history_model(submitted), crate::history::dictation_model());
+    }
+
+    #[test]
+    fn a_dropline_answer_never_runs_the_local_model() {
+        let engine = engine();
+        let runs = Arc::new(AtomicUsize::new(0));
         let job = qa_job();
         let submitted = job.submitted;
+        let job = Some(job);
+        let local = local(
+            &job,
+            &engine,
+            None,
+            vec![0.0; 1_600],
+            counted(&runs, Duration::ZERO),
+        )
+        .unwrap();
         let mut fallback = None;
         let started = Instant::now();
         let transcribed = answer(
-            Some(job),
-            local(&engine, Duration::from_secs(3)),
+            job,
+            local,
             |_| {
                 std::thread::sleep(Duration::from_millis(200));
                 Ok("qa-Dropline".into())
@@ -481,30 +621,50 @@ mod tests {
             |status| fallback = Some(status),
         )
         .unwrap();
-        let waited = started.elapsed();
         assert_eq!(transcribed.text, "qa-Dropline");
         assert!(matches!(fallback, Some(None)));
         assert!(transcribed.finish_ms >= 200, "{}", transcribed.finish_ms);
-        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(history_model(submitted).as_deref(), Some(NAME));
-        assert_eq!(history_model(submitted), crate::history::dictation_model());
+        // The engine is idle: a local run started now would have counted.
+        engine
+            .foreground(vec![], Box::new(|_, _| Ok(String::new())))
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn history_marks_the_local_model_after_dropline_fails() {
-        let engine =
-            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+    fn a_dropline_failure_runs_the_local_model_once() {
+        let engine = engine();
+        let runs = Arc::new(AtomicUsize::new(0));
         let job = qa_job();
         let submitted = job.submitted;
+        let job = Some(job);
+        let local = local(
+            &job,
+            &engine,
+            None,
+            vec![0.0; 1_600],
+            counted(&runs, Duration::ZERO),
+        )
+        .unwrap();
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "nothing runs before Dropline fails"
+        );
         let mut fallback = None;
         let transcribed = answer(
-            Some(job),
-            local(&engine, Duration::ZERO),
+            job,
+            local,
             |_| Err(client::Failure::Timeout),
             |status| fallback = status,
         )
         .unwrap();
         assert_eq!(transcribed.text, "qa-本機");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
         assert_eq!(
             fallback.map(|fallback| fallback.reason),
             Some(client::Failure::Timeout.to_string())
@@ -517,13 +677,28 @@ mod tests {
     }
 
     #[test]
-    fn history_names_the_local_model_without_dropline() {
-        let engine =
-            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
-        let submitted = Instant::now();
-        let transcribed = wait(None, local(&engine, Duration::ZERO)).unwrap();
-        assert_eq!(transcribed.text, "qa-本機");
-        assert_eq!(history_model(submitted), crate::history::dictation_model());
+    fn a_running_local_transcript_is_not_waited_for_when_dropline_answers() {
+        let engine = engine();
+        let job = qa_job();
+        let started = Instant::now();
+        let transcribed = answer(
+            Some(job),
+            running(&engine, Duration::from_secs(3)),
+            |_| Ok("qa-Dropline".into()),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(transcribed.text, "qa-Dropline");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn tests_never_read_the_saved_selection() {
+        assert!(!selected());
+        select_for_test(true);
+        assert!(selected());
+        select_for_test(false);
+        assert!(!selected());
     }
 
     #[test]
