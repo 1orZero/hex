@@ -175,13 +175,20 @@ fn covered(entry: &TranscriptEntry, answered: &[Answered<'_>]) -> bool {
     reached >= entry.end_ms
 }
 
-/// `shares` in order, with a space where two ASCII words would meet.
+/// `shares` in order, with a space where a word of a script written with
+/// spaces, such as `café`, meets the next word, and none after an opening
+/// bracket or before closing punctuation.
 fn joined(shares: &[String]) -> String {
+    let opening = |character: char| matches!(character, '(' | '[' | '{');
     let mut text = String::new();
     for share in shares.iter().filter(|share| !share.is_empty()) {
-        if text.ends_with(|character: char| character.is_ascii_graphic())
-            && share.starts_with(|character: char| character.is_ascii_graphic())
-        {
+        let ends_word = text.chars().next_back().is_some_and(|character| {
+            !character.is_whitespace() && !unspaced(character) && !opening(character)
+        });
+        let starts_word = share.chars().next().is_some_and(|character| {
+            (character.is_alphanumeric() || opening(character)) && !unspaced(character)
+        });
+        if ends_word && starts_word {
             text.push(' ');
         }
         text.push_str(share);
@@ -274,10 +281,10 @@ fn near_punctuation(
 }
 
 /// A boundary at byte `cut` of `text` moved out of a word it falls inside,
-/// a run of ASCII letters, digits, and marks: to the word's end when that
-/// comes no later than `next`, else to its start.
+/// a run of characters of scripts written with spaces, marks included: to
+/// the word's end when that comes no later than `next`, else to its start.
 fn outside_word(text: &str, cut: usize, next: usize) -> usize {
-    let word = |character: char| character.is_ascii_graphic();
+    let word = |character: char| !character.is_whitespace() && !unspaced(character);
     let (before, after) = text.split_at(cut);
     if !before.ends_with(word) || !after.starts_with(word) {
         return cut;
@@ -288,6 +295,19 @@ fn outside_word(text: &str, cut: usize, next: usize) -> usize {
     } else {
         before.trim_end_matches(word).len()
     }
+}
+
+/// A character of a script written without spaces between words (Chinese,
+/// Japanese) or a full-width form, such as `，`.
+fn unspaced(character: char) -> bool {
+    matches!(
+        character,
+        '\u{2E80}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE30}'..='\u{FE4F}'
+            | '\u{FF00}'..='\u{FFEF}'
+            | '\u{20000}'..='\u{3FFFF}'
+    )
 }
 
 /// Punctuation that ends a phrase, unlike a mark inside a word or number
@@ -463,6 +483,11 @@ mod tests {
                 "QA see the preview",
                 ["QA see the", "preview"],
             ),
+            (
+                ["qa un cafe", "noir"],
+                "QA un café noir",
+                ["QA un café", "noir"],
+            ),
         ] {
             let (_, shared) = shares(&local, remote).unwrap();
             assert_eq!(shared, expected);
@@ -598,6 +623,25 @@ mod tests {
             texts(&merged),
             [(YOU, 4_000, "qa We will deploy tomorrow morning")]
         );
+    }
+
+    #[test]
+    fn shares_join_with_a_space_only_between_words_of_scripts_written_with_spaces() {
+        for (shares, expected) in [
+            (["we will", "deploy."], "we will deploy."),
+            (
+                ["Nous aimons le café", "vraiment délicieux."],
+                "Nous aimons le café vraiment délicieux.",
+            ),
+            (["OK,", "then"], "OK, then"),
+            (["hello (", "world)"], "hello (world)"),
+            (["done", "."], "done."),
+            (["我們下週", "一起上線。"], "我們下週一起上線。"),
+            (["上線。", "OK"], "上線。OK"),
+            (["", "alone"], "alone"),
+        ] {
+            assert_eq!(joined(&shares.map(String::from)), expected);
+        }
     }
 
     #[test]
