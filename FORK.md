@@ -124,7 +124,7 @@ heard no speech, so the dictation inserts nothing and does not fall back.
 - History's Speech model names what made each dictation's text: `Dropline 私人 API` when Dropline
   answered, the local model followed by `（Dropline 失敗後改用）` when it fell back (for example
   `Qwen3-ASR 1.7B（Dropline 失敗後改用）`), and the local model alone when Dropline wasn't selected.
-  `hex history` and History's search read the same text. Inference is how long the text took: Dropline's
+  History's search matches the same text (`hex history` doesn't print the model). Inference is how long the text took: Dropline's
   request when it answered (the local transcript isn't waited for), or Dropline's attempt plus the rest of
   the local transcript when it fell back. The answers live in memory by submission instant, the newest
   16 kept, until History records the dictation.
