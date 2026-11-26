@@ -197,6 +197,10 @@ pub(super) fn pane(ui: &Ui, p: Paint, reduced: bool) -> El {
         .child(agent_card(ui, p, reduced))
         .child(every_dictation(ui, p, &processing.default_mode))
         .child(try_card(ui, p, &processing.default_mode));
+    #[cfg(target_os = "macos")]
+    {
+        content = content.child(super::fork_output::section(ui, p));
+    }
     #[cfg(target_os = "linux")]
     if ui.settings.labs.typed_text {
         content = content.child(typed_text(ui, p));
