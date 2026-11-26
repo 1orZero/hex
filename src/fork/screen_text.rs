@@ -3,11 +3,13 @@
 //! snapshot that dictation finishes with hands them to its transformations as
 //! `context.screenLines`. Only a capture that may run a script transformation
 //! reads, and only with Screen Recording already allowed: nothing here asks.
+//! Output's 讀取螢幕文字 switch (`enabled`) turns all of it off.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +34,57 @@ unsafe extern "C" {
     fn hex_fork_screen_text_free(text: *mut c_char);
     #[cfg(test)]
     fn hex_fork_screen_text_read_image(path: *const c_char, status: *mut i32) -> *mut c_char;
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Setting {
+    enabled: bool,
+}
+
+/// Whether dictations read the screen at all, saved in
+/// `fork/screen-text.json` in the data folder; on until turned off.
+pub fn enabled() -> bool {
+    switch().load(Ordering::Acquire)
+}
+
+/// Saves the switch. Turning it on loads Vision, as a listener start would.
+pub fn set_enabled(on: bool) -> std::io::Result<()> {
+    let path = setting_path().ok_or_else(|| std::io::Error::other("no data folder"))?;
+    save_setting(&path, on)?;
+    switch().store(on, Ordering::Release);
+    tracing::info!(enabled = on, "fork screen text: switched");
+    if on {
+        prewarm();
+    }
+    Ok(())
+}
+
+fn switch() -> &'static AtomicBool {
+    static SWITCH: OnceLock<AtomicBool> = OnceLock::new();
+    SWITCH.get_or_init(|| AtomicBool::new(setting_path().is_none_or(|path| load_setting(&path))))
+}
+
+fn setting_path() -> Option<PathBuf> {
+    crate::app_paths::support_dir()
+        .ok()
+        .map(|support| support.join("fork").join("screen-text.json"))
+}
+
+/// The saved switch; on when nothing readable is saved.
+fn load_setting(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Setting>(&bytes).ok())
+        .is_none_or(|setting| setting.enabled)
+}
+
+fn save_setting(path: &Path, on: bool) -> std::io::Result<()> {
+    if let Some(folder) = path.parent() {
+        crate::app_paths::create_private_dir(folder)?;
+    }
+    let bytes =
+        serde_json::to_vec_pretty(&Setting { enabled: on }).map_err(std::io::Error::other)?;
+    crate::durable::write(path, &bytes)
 }
 
 /// One capture's read, carried by the snapshot that capture finished with.
@@ -138,11 +191,14 @@ enum Capture {
 }
 
 impl ScreenTextRead {
-    /// The listener's reader. With a script transformation set up and Screen
-    /// Recording allowed, Vision loads now rather than at the first read.
+    /// The listener's reader. With the switch on, a script transformation set
+    /// up, and Screen Recording allowed, Vision loads now rather than at the
+    /// first read.
     pub fn start() -> Self {
         prewarm();
-        Self::reading_with(|| start_read(crate::dictation::config::reads_window_title()))
+        Self::reading_with(|| {
+            start_read(enabled() && crate::dictation::config::reads_window_title())
+        })
     }
 
     fn reading_with(read: impl FnMut() -> ScreenText + 'static) -> Self {
@@ -188,10 +244,11 @@ impl ScreenTextRead {
     }
 }
 
-/// This capture's read, on its own thread, when a script transformation is
-/// set up (`scripts`): the window frontmost now, never another.
-fn start_read(scripts: bool) -> ScreenText {
-    if !scripts {
+/// This capture's read, on its own thread, when the switch is on and a
+/// script transformation is set up (`wanted`): the window frontmost now,
+/// never another.
+fn start_read(wanted: bool) -> ScreenText {
+    if !wanted {
         return ScreenText::default();
     }
     let (text, job) = ScreenText::pending();
@@ -339,11 +396,11 @@ fn taken(text: *mut c_char, status: i32) -> Result<Vec<String>, Failure> {
     Ok(joined.split('\n').map(str::to_owned).collect())
 }
 
-/// Loads Vision's text model off the listener when a read can happen: a
-/// script transformation is set up and Screen Recording is allowed. Vision
-/// keeps it in Hex's memory.
+/// Loads Vision's text model off the listener when a read can happen: the
+/// switch is on, a script transformation is set up, and Screen Recording is
+/// allowed. Vision keeps it in Hex's memory.
 fn prewarm() {
-    if !crate::dictation::config::reads_window_title() || !Native.permitted() {
+    if !enabled() || !crate::dictation::config::reads_window_title() || !Native.permitted() {
         return;
     }
     let spawned = thread::Builder::new()
@@ -503,6 +560,21 @@ mod tests {
         });
         assert_eq!(text.lines(), Some(strings(&["qa-arrived-1180"])));
         finisher.join().unwrap();
+    }
+
+    #[test]
+    fn the_switch_is_on_until_saved_off() {
+        let folder = std::env::temp_dir().join(format!("qa-screen-text-{}", std::process::id()));
+        let path = folder.join("fork").join("screen-text.json");
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(load_setting(&path), "nothing saved reads on");
+        save_setting(&path, false).unwrap();
+        assert!(!load_setting(&path));
+        save_setting(&path, true).unwrap();
+        assert!(load_setting(&path));
+        std::fs::write(&path, b"qa-not-json").unwrap();
+        assert!(load_setting(&path), "an unreadable file reads on");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
