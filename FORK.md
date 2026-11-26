@@ -12,11 +12,12 @@ Fork code lives in files upstream does not have; upstream files carry only the h
 fork change has to touch an upstream file, add a row here with the file, the hook (the function or
 line), and the purpose, so whoever resolves a release merge knows what to keep. The hooks belong to
 the Dropline private API provider (see "Dropline private API"), the iPhone vocabulary link (see
-"Vocabulary"), screen text (see "Screen text"), and Traditional Chinese in Annotate and meetings (see
-"Traditional Chinese in Annotate and meetings"). Every hook in a file all three OSes build runs only on macOS
-(behind `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build
-upstream's code unchanged. The `crates/capture/build.rs` row and the `clean_summary` cut in
-`src/meeting/notes.rs` are upstream fixes carried before a release has them, not hooks.
+"Vocabulary"), screen text (see "Screen text"), Traditional Chinese in Annotate and meetings (see
+"Traditional Chinese in Annotate and meetings"), and meetings through Dropline (see "Meetings through
+Dropline"). Every hook in a file all three OSes build runs only on macOS (behind
+`#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build upstream's
+code unchanged. The `crates/capture/build.rs` row and the `clean_summary` cut in `src/meeting/notes.rs`
+are upstream fixes carried before a release has them, not hooks.
 
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
@@ -34,6 +35,10 @@ upstream's code unchanged. The `crates/capture/build.rs` row and the `clean_summ
 | `src/meeting/notes.rs` | `clean_summary`: `.unwrap_or_else(\|\| text.floor_char_boundary(MAX_SUMMARY_CHARS))` in place of `.unwrap_or(MAX_SUMMARY_CHARS)` (1 line) | Upstream fix: a summary over 400 bytes without a space (Chinese) was cut inside a character and panicked (`meeting::fork_tests::a_long_chinese_summary_without_spaces_is_cut_at_a_character`). Upstream `dev` still has the bug; take upstream's line once a release fixes it. |
 | `src/meeting/chapters.rs` | `clean_summary`: `let summary = &crate::fork::traditional::text(summary);` first (macOS, 2 lines) | Live chapter summaries. |
 | `src/meeting.rs` | `#[cfg(all(test, target_os = "macos"))] mod fork_tests;` at the end (3 lines) | The fork's tests that need the meeting module's private functions. |
+| `src/meeting.rs` | `record`: `let _dropline = crate::fork::dropline::meeting::start(&meeting_dir);` after `let given_title = …;` (macOS, 2 lines) | A meeting that starts while Dropline is selected sends its audio to Dropline; the guard lives until `record` returns, after the final pass. |
+| `src/meeting.rs` | `write_tracks`: `crate::fork::dropline::meeting::offer(directory, packet.source, packet.position, packet.sample_rate, &packet.samples)` after the packet's samples are written (macOS, 8 lines) | Hands each packet, at its place in the WAV (gaps padded), to the meeting's cutter without waiting. |
+| `src/meeting/sweep.rs` | `remove_orphaned_imports`: `crate::fork::dropline::meeting::clear_owed();` first (macOS, 2 lines); the sweep runs once per launch, and upstream `dev` calls it from `src/meeting/recovery.rs` | Once per launch: finds each meeting that sent audio and has no clear outcome, before retention expiry runs, and clears for it on its own thread, including meetings waiting for a final pass that may not run. |
+| `src/meeting/transcript.rs` | `transcribe`: `let join_entries = \|entries, origin_ms, envelope\| { crate::fork::dropline::meeting::join(directory, manifest, entries, origin_ms, envelope, join_entries) };` before `Ok(join_entries(…))` (macOS, 11 lines) | The final pass, also when the next launch finishes a meeting: the local merge and echo suppression run as before, then answered segments put Dropline's words in the entries they cover. |
 | `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The iPhone dictation-finish point: Dropline first, the local engine on failure. |
 | `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: vocabularyTerms)` after `let vocabularyTerms = …` | Opens the Dropline session early (best effort). |
 | `ios/HEXMobile/ContentView.swift` | `standaloneView`: `ForkDroplineSettingsCard()` between `settingsCard` and `ExperimentsCard()` | Adds, selects, and deletes the provider. |
@@ -54,7 +59,10 @@ Apart from screen text's hooks (see "Screen text"), a trial merge of upstream `d
 (2026-11-25, not pushed) conflicts only at earlier hooks:
 `src/parakeet.rs`, `src/recognition.rs`, `src/rune_ui.rs`, `src/rune_ui/general.rs`, and
 `src/rune_ui/picker.rs` (Dropline dictation), and three files under `ios/`, which this branch no longer
-builds. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
+builds. The meeting Dropline hooks merge cleanly: `dev` still has `write_tracks` in `src/meeting.rs` and an
+unchanged `src/meeting/sweep.rs`, and
+it adds a quit check and a `Recording` guard right after `ActiveMeeting::acquire` in `record`, so the
+`start` hook sits after `let given_title = …;` to stay clear of them. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
 `src/capture_host/words.rs`, but `scrawl_engine` and the replay's `let transcriber = ChosenTranscriber;`
 are still where the hooks expect them.
 
@@ -74,6 +82,7 @@ are still where the hooks expect them.
   `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
+- `src/fork/dropline/meeting.rs` and `src/fork/dropline/meeting/`: meetings through Dropline.
 - `fork/docs/`: the glossary (`GLOSSARY.md`) and the decisions (`adr/`) behind the fork's meeting, Annotate,
   and screen text features, in Traditional Chinese as Derek accepted them.
 
@@ -135,9 +144,9 @@ so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same
 
 - Timed words convert as one run without separators, then each word gets back as many characters as it had:
   the conversion reads context, and a phrase a model split across words (`头` + `发`) would otherwise become
-  `頭發` instead of `頭髮`. A word's own leading and trailing spaces stay in place; between two Chinese
-  words they don't split the run, but beside an identifier, code, kana, or Hangul they still do, as in the
-  transcript's text. When the run's conversion changes its length, each word converts on its own and only
+  `頭發` instead of `頭髮`. A word's own leading and trailing spaces stay in place. A space joins the run
+  only where a Chinese character meets a Chinese character and neither word holds an identifier's `_`, a
+  backtick, kana, or Hangul; anywhere else it still separates the words, as in the transcript's text. When the run's conversion changes its length, each word converts on its own and only
   their count is logged. A transcript's text and each segment convert whole.
 - Annotate: the capture engine's transcriber and the 15 s replay's convert `text`, `segments`, and `words`,
   so `summary.md`, `scrawl.json`, each keyframe's narration, the clipboard, and Paste read converted text.
@@ -150,6 +159,75 @@ so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same
   convert in the shared cleaners, whichever writer produced them. A title the user typed, calendar names,
   hand-edited notes, links, and exported files are left alone.
 - The summary prompt is English and names no output language, so a writer may still answer in English.
+
+## Meetings through Dropline
+
+Mac only. A meeting that starts while Dropline is selected sends its audio to Dropline in segments while it
+records, and the final transcript takes Dropline's words where they line up with the local transcript. The
+in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/meeting.rs` runs it;
+`fork/docs/adr/` has the decisions.
+
+- Start: the selection, the token endpoint, the bearer, and the vocabulary are read once, when the meeting
+  starts, and hold for the whole meeting. Without Dropline selected, nothing starts: no threads, no file,
+  no network.
+- Segments: each track's packets come from the WAV writer with their positions in the WAV, resampled to
+  16 kHz. A segment ends in the middle of the first pause of 0.5 s or more (25 blocks of 20 ms) once it is
+  70% of 178 s long, and at 178 s otherwise. A block counts as a pause below the 10th-percentile level of
+  the segment's first 70% plus 6 dB, and never below 45 on the 20 ms level scale that dictation uses
+  (`src/fork/dropline/audio.rs`). A gap in the positions ends a segment, and segment times are WAV
+  positions, gaps included. A tail shorter than 500 ms isn't sent, and a segment with no block above the
+  threshold is recorded as answered with no text and isn't sent. Packets the cutter can't take in time
+  (4,096 behind) become a gap that keeps local text.
+- Sending: each segment is encoded as Ogg Opus and queued; at most 20 wait, and later ones fail. The meeting
+  sends one segment at a time on its own threads with its own token, and never touches dictation's
+  prepared session or the status General shows. The vocabulary goes as context. The text is
+  `transcript.text`, else `final_text`, through the same Traditional conversion.
+- Retries (ADR-0005): each request gets 60 s. A 429 waits for `Retry-After` (5 s without it, at most 60 s,
+  at most 10 times) and doesn't count as a send; a 502–504, a network error, or a timeout is sent at most
+  twice; a 401 fetches a new token once; other statuses and bad answers aren't resent. An authorization
+  failure (no provider, the token endpoint refusing, the Worker refusing the bearer, a second 401, or
+  Dropline answering 403) stops the meeting's sends.
+- Final pass: Stop cuts each track's tail and waits up to 3 minutes for the queue, and gives up at once when
+  Hex is quitting; segments still unanswered fail. The local transcript is merged and echo-suppressed as
+  before. Then each local entry takes part in the alignment of every answered segment it overlaps and takes
+  the part of Dropline's text aligned with it (characters compared in Simplified form, without spaces or
+  punctuation, lower case), its ends moved to nearby punctuation (not an ASCII mark or `’` between two
+  ASCII letters or digits, as in `1.5` or `can't`) and never inside a word (letters and digits of a
+  script written with spaces, with ASCII marks and `’`), so a word Dropline corrected or joined stays
+  whole. An entry spanning segments joins its parts in order, with a space between two words of a script
+  written with spaces; Thai, Lao, Tibetan, Burmese, Khmer, Chinese, Japanese, and full-width forms get
+  none. Where a letter or digit meets another, the entry's local text decides, since a 178 s cut can fall
+  inside a word: a space when it writes the two words apart, none when it writes them as one word, and the
+  local text is kept when it writes them neither way. It keeps its local text when a stretch it overlaps
+  has no answer (failed, unsent, or in no segment, such as a tail under 500 ms or a gap) or aligned too
+  weakly, or when the segment holding its middle had no speech or Dropline heard none there; a segment
+  without speech that it only crosses into adds nothing. Its words still don't go to a neighbour.
+  Dropline's words for entries dropped as echo are dropped too.
+  A segment whose alignment ratio is below 0.4 keeps local text (ADR-0008), as do failed, unsent, and
+  uncovered stretches. The ratio is logged as a number; no text is logged.
+- `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,
+  `[start, end)` in samples of the track resampled to 16 kHz (not the WAV's own rate), whether it was sent,
+  its state and text, and the memory clear's outcome. It holds no audio or credentials, skips a last line cut
+  short (even inside a character), starts the next record on a line of its own after one, and goes to the
+  Trash with the meeting.
+- Memory clear (ADR-0004, ADR-0007): once per meeting, after its last possible send, when a segment was sent
+  and no clear outcome is recorded, Hex posts to `…/dropline-private/memory/clear` beside the token
+  endpoint with the saved bearer. A token endpoint that doesn't end in `/dropline-private/token` is skipped.
+  `cleared: true` is recorded as `cleared`, `cleared: false` as `not_cleared`, and a 403, a 429, or
+  any other failure as `failed` with its HTTP status or failure reason; the answer's other content isn't
+  kept. When the final pass ends with a request still in flight, the clear waits for it (at most 65 s) on its
+  own thread. When Hex is quitting, the clear runs at once (at most 10 s); if a request was still in flight,
+  its outcome isn't recorded. At launch, Hex clears once for each meeting that sent audio and has no clear
+  outcome, such as one Hex quit while its clear waited, or one waiting for a final pass that doesn't run
+  while Meetings is off or the model is missing. These meetings are found before retention moves expired
+  meetings to the Trash, so one that moves still gets its clear. The launch clear and a final pass check for
+  a recorded clear under one lock, so they never both clear one meeting.
+- Quit and the next launch: quitting while a meeting records stops its sends. The next launch finishes the
+  meeting from its WAV files as before; the final pass reads the file, reuses the answered segments, sends
+  no audio, and runs the memory clear if it never ran. A meeting dropped without its final pass stops
+  sending and clears once its request in flight is over. Transcribing a Dropline meeting again reuses its
+  answered segments the same way and sends no audio. Imported meetings and meetings recorded without
+  Dropline have no file and stay local.
 
 ## Vocabulary
 

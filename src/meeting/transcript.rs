@@ -1827,6 +1827,17 @@ pub(super) fn transcribe(
     .unwrap_or_default()
         / 1_000;
     let entries = tracks.into_iter().flat_map(|track| track.entries).collect();
+    #[cfg(target_os = "macos")]
+    let join_entries = |entries, origin_ms, envelope| {
+        crate::fork::dropline::meeting::join(
+            directory,
+            manifest,
+            entries,
+            origin_ms,
+            envelope,
+            join_entries,
+        )
+    };
     Ok(join_entries(entries, origin_ms, &envelope))
 }
 
