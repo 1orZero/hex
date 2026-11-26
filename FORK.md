@@ -66,7 +66,10 @@ unchanged `src/meeting/sweep.rs`, and
 it adds a quit check and a `Recording` guard right after `ActiveMeeting::acquire` in `record`, so the
 `start` hook sits after `let given_title = …;` to stay clear of them. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
 `src/capture_host/words.rs`, but `scrawl_engine` and the replay's `let transcriber = ChosenTranscriber;`
-are still where the hooks expect them.
+are still where the hooks expect them. For History's speech source and the picker's 失敗時改用, a trial merge of
+`dev` at 2548a1b87 (2026-11-26, not pushed) merges `src/rune_ui/picker/compare.rs` and
+`src/rune_ui/picker/list.rs` cleanly; `src/parakeet.rs` already conflicted, and `dev` no longer has
+`record_history` there (its row says where the hook goes).
 
 ## Fork-only files
 
@@ -435,3 +438,78 @@ fork/daily.sh [--continue] [--continue-ios] [--allow-identity-change] [--no-push
 | 44 | Reading the Mac's vocabulary or copying it to the iPhone failed |
 
 ### Merge conflicts
+
+On exit 20 the merge stays in progress in `~/.hex-fork/repo`. Resolve each file by taking upstream's
+version and re-applying only the fork hooks listed under "Upstream files the fork changes". Commit,
+then run `fork/daily.sh --continue`, which builds both apps, pushes, and installs. When the right
+resolution isn't clear, run `git -C ~/.hex-fork/repo merge --abort` and report the conflict; the next
+run aborts any merge still in progress and tries again.
+
+On exit 23 the `ios-stable` merge stays in `~/.hex-fork/ios-src`. App Store tags are release trees beside
+upstream's `dev`, so the script merges against the App Store tag `ios-stable` last merged rather than
+git's merge base: it applies the fork's changes (`ios-stable` against that tag) to the new tag, and only
+those changes can conflict. `HEAD` there is the new tag; resolve each file by taking upstream's version
+and re-applying only the hooks in `ios-stable`'s `FORK.md`, `git add` it (don't commit), then run
+`fork/daily.sh --continue-ios`, which commits the merge with `ios-stable` and the tag as parents, builds,
+pushes, and installs. When the right resolution isn't clear, run
+`git -C ~/.hex-fork/ios-src cherry-pick --abort` and report the conflict; the next run drops any merge
+still in progress and tries again.
+
+## Mac app
+
+- Built by upstream's `scripts/build-app.sh` with `HEX_RELEASE_UNSIGNED=1` (Hex, `anomaly.hex`),
+  `HEX_BUILD_CHANNEL=stable`, and `HEX_VERSION` set to the release tag, so it behaves as a stable release
+  and dev-only Labs stay hidden. The bundle ID and the data folder (`~/Library/Application Support/hex`)
+  are the official app's.
+- Updates are off through `HEX_DISABLE_UPDATES=1` in `Info.plist`'s `LSEnvironment`, the runtime switch
+  upstream's updater reads (`updates_off_by_env` in `src/updater.rs`). `HEX_LOCAL_BUILD=1` also turns updates off,
+  but it makes the app a dev build. `HexForkCommit` in `Info.plist` records the fork commit.
+- Signed with the Apple Development identity of team 67A6AV33K9, because `scripts/macos-signing.sh` accepts
+  only a Developer ID identity, which the team doesn't have. The app needs no provisioning profile, and
+  its designated requirement stays the same across rebuilds, so macOS permissions survive them.
+- The install waits while Hex records, transcribes, or runs a meeting (up to `HEX_FORK_IDLE_WAIT` seconds,
+  default 600), quits it with `hex quit`, replaces `/Applications/Hex.app`, and reopens it if it was running.
+  Replacing a Hex signed by another identity needs `--allow-identity-change`: the old app moves to
+  `~/.hex-fork/backup/Hex.app` and `tccutil` resets its permissions, so Hex asks for them again.
+- The clone builds in its own `target/`, because `build-app.sh` copies from `<repo>/target/release` and would
+  ship a stale binary with a shared `CARGO_TARGET_DIR`. Rust comes from `~/.hex-fork/rustup` (stable, updated
+  each run), which leaves the Mac's own toolchains alone.
+
+## iPhone app
+
+- Built from `ios-stable` in a staging worktree, `~/.hex-fork/ios-src`, so the repo is never rewritten. The
+  script reads the app's bundle ID from `ios/project.yml` (`anomaly.hex.mobile` since the App Store
+  releases) and replaces it under `ios/` (Swift, entitlements, `project.yml`) with `io.veraze.hex.mobile`,
+  which moves the keyboard and widget extensions, the App Group, and any keychain group with it.
+  `ios/project.fork.yml` includes `project.yml` and sets team 67A6AV33K9 and the names "Hex Fork" and
+  "Hex Fork Keyboard". As upstream's App Store build does, the version is the tag's (`1.0.4` for
+  `ios-beta-appstore-1.0.4`).
+- The build is checked before it installs: the app's ID and team, the `group.io.veraze.hex.mobile`
+  entitlement on the app and the keyboard, and every extension's ID under `io.veraze.hex.mobile`.
+- `xcodebuild -allowProvisioningUpdates` builds Release with the team's profiles for `io.veraze.hex.mobile`,
+  and `xcrun devicectl device install app` installs it on Derek888 over Wi-Fi.
+- The iPhone app has no in-app updater.
+
+## The Mac's vocabulary on the iPhone
+
+One way, Mac to iPhone, each run after the installs:
+
+1. Read the Mac's vocabulary in its order (`hex vocabulary list --json`, from the running Hex) into
+   `~/.hex-fork/state/ios-vocabulary/next/fork-mac-vocabulary.json` as `{"terms": [...]}`. When Hex
+   isn't running, the step is skipped (`skipped-hex-not-running`) and the next run copies.
+2. When the terms differ from the last copy (`~/.hex-fork/state/ios-vocabulary/fork-mac-vocabulary.json`),
+   the iPhone app was installed in this run, or `--force` is given, copy the file to
+   `Library/fork-mac-vocabulary.json` in the App Group `group.io.veraze.hex.mobile` with
+   `xcrun devicectl device copy to --domain-type appGroupDataContainer`. devicectl can't write to the
+   container's root (CoreDeviceError 7000), so the file goes under `Library/`.
+   The iPhone app folds it into its list as `ios-stable`'s `FORK.md` describes, the next time the keyboard
+   or Hex comes on screen, without Derek opening Hex.
+3. `--no-push` reads and compares only (`changed` or `up-to-date`).
+
+The file holds names and email addresses, so it is written owner-only under `~/.hex-fork/state/` and never
+inside a repository or a build. Copying rather than building it into the app means a changed vocabulary
+needs no rebuild or reinstall, which would close the keyboard and Hex on the iPhone each night. The nightly
+vocabulary upkeep (`fork/vocabulary.py apply`) should run before `daily.sh`, so the iPhone gets the
+same night's order.
+
+Environment overrides: `HEX_FORK_HOME`, `HEX_FORK_BRANCH`, `HEX_FORK_IOS_BRANCH`, `HEX_FORK_REPO`, `HEX_FORK_UPSTREAM_REPO`, `HEX_FORK_TEAM_ID`, `HEX_FORK_IPHONE`, `HEX_FORK_IOS_BUNDLE_PREFIX`, `HEX_FORK_IOS_APP_NAME`, `HEX_FORK_IDLE_WAIT`, `HEX_FORK_HEX` (the `hex` command the vocabulary is read with).
