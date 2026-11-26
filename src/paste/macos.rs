@@ -270,6 +270,10 @@ impl Paster {
         note_paste();
         let revision = self.activity.revision();
         let joinable = !matches!(mode, PasteMode::Standalone);
+        crate::history::fork_continued::paste(
+            text,
+            self.continuation.join(revision, joinable, text).is_some(),
+        );
         let text = self
             .continuation
             .join(revision, joinable, text)

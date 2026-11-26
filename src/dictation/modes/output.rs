@@ -422,7 +422,11 @@ pub(crate) fn record_history(
         #[cfg(not(target_os = "macos"))]
         model: crate::history::dictation_model(),
     };
-    match history.record(draft) {
+    #[cfg(target_os = "macos")]
+    let recorded = crate::history::fork_continued::record(history, draft, &input.text);
+    #[cfg(not(target_os = "macos"))]
+    let recorded = history.record(draft);
+    match recorded {
         Ok(id) => id,
         Err(error) => {
             tracing::warn!(%error, "could not record dictation history");

@@ -14,7 +14,8 @@ line), and the purpose, so whoever resolves a release merge knows what to keep. 
 the Dropline private API provider (see "Dropline private API"), the iPhone vocabulary link (see
 "Vocabulary"), screen text (see "Screen text"), Traditional Chinese in Annotate and meetings (see
 "Traditional Chinese in Annotate and meetings"), meetings through Dropline (see "Meetings through
-Dropline"), and the Output pane's switches (see "Output switches"). Every hook in a file all three OSes build runs only on macOS (behind
+Dropline"), the Output pane's switches (see "Output switches"), and continued dictations in History (see
+"Continued dictations in History"). Every hook in a file all three OSes build runs only on macOS (behind
 `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build upstream's
 code unchanged. The `clean_summary` cut in `src/meeting/notes.rs` and the
 `keep_across` hook in `src/meeting/transcript.rs` are upstream fixes carried before a release has
@@ -59,6 +60,9 @@ them, not features.
 | `src/personal_commands/hex.d.ts` | `screenLines?: readonly string[]` at the end of `HandlerContext` (2 lines) | Types the field for configs. |
 | `src/rune_ui.rs` | `#[cfg(target_os = "macos")] mod fork_output;` after `mod fork_dropline;` (2 lines) | Compiles the Output switches' section. |
 | `src/rune_ui/output.rs` | `pane`: a `#[cfg(target_os = "macos")]` block with `content = content.child(super::fork_output::section(ui, p));` right after `content = content.child(every_dictation(…));` (4 lines) | Output's 轉換選項 section, below Every dictation, with 讀取螢幕文字 and 使用 Jev. |
+| `src/dictation/modes/output.rs` | `record_history`: `match history.record(draft)` becomes `match recorded`, with `#[cfg(target_os = "macos")] let recorded = crate::history::fork_continued::record(history, draft, &input.text);` and `#[cfg(not(target_os = "macos"))] let recorded = history.record(draft);` before it (5 lines) | A dictation whose paste joined the previous dictation's paste is added to that dictation's entry instead of becoming a new one. The other OSes keep upstream's call. |
+| `src/paste/macos.rs` | `Paster::insert_text`: `crate::history::fork_continued::paste(text, self.continuation.join(revision, joinable, text).is_some());` after `let joinable = …;` (4 lines) | Tells History whether each paste continues the one before it, with the same check the join right after it makes (`Continuation::join` changes nothing). |
+| `src/history.rs` | `#[cfg(target_os = "macos")] #[path = "fork/history_continued.rs"] pub(crate) mod fork_continued;` at the end of the file (4 lines) | The module sits in `src/fork/` but is `history`'s child, so it changes the store's entries, recordings, and rollup the way `record` does. |
 | `scripts/file-size-exceptions.txt`, `scripts/folder-shape-exceptions.txt` | `src/dictation.rs 1503` and `src/meeting.rs 1501` added, `src/meeting/transcript.rs` raised from upstream's ceiling to 1943; `src/rune_ui 62` added (4 lines) | Upstream's code-shape check (`scripts/code-shape.py`, and the `code_shape_tests::repo_satisfies_code_shape` test) fails files over 1,500 non-test lines and folders over 60 files. The hooks above push these three files past their limits, and `src/rune_ui/fork_dropline.rs` and `src/rune_ui/fork_output.rs` push `src/rune_ui` past 60. On a conflict, take upstream's files and set these entries to the counts `python3 scripts/code-shape.py --check` reports. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
@@ -85,6 +89,7 @@ anomalyco/hex#1734, so the fork no longer carries it in `crates/capture/build.rs
 - `src/fork/screen_text.rs`, `src/fork/screen_text.swift`, `src/fork/screen_text/transformation_tests.rs`, and
   `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
 - `src/rune_ui/fork_output.rs`: the Output switches (see "Output switches").
+- `src/fork/history_continued.rs`: continued dictations in History (see "Continued dictations in History").
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
 - `src/fork/dropline/meeting.rs` and `src/fork/dropline/meeting/`: meetings through Dropline.
@@ -400,6 +405,29 @@ Every dictation, holding two switches:
 
 Both hooks are macOS-only, so Linux and Windows build the Output pane unchanged and the goldens (rendered
 on Linux) don't change.
+
+## Continued dictations in History
+
+Upstream joins back-to-back dictations into one sentence when nothing happened between them: no typing,
+clicking, or focus change (`src/continuation.rs`). The second paste gets a leading space and the
+capitalization the first one's end calls for. Upstream's History still records each dictation on its own,
+so a sentence spoken in two holds of the shortcut became two entries. On the Mac, History keeps it as one
+(`src/fork/history_continued.rs`):
+
+- The paster reports every paste and whether it joined the paste before it. A dictation whose paste
+  joined, and came right after the paste of the dictation that made the newest entry, is added to that
+  entry. Any other paste in between (Paste Last, the recent-dictations picker), an Annotate paste, a
+  dictation that only copied or printed, or a History record that failed starts a new entry.
+- Only a Dictation or Raw entry of the same kind is continued, never a Send, a cancelled entry, or one
+  transcribed again (it has versions).
+- The entry keeps its id, time, application, model, and processing. Its raw and final texts are joined the
+  way the paste joined them, and its audio, inference, and total times add up.
+- With Labs › Keep recordings on, the new audio is appended to the entry's WAV (written next to it as
+  `history-audio/18446744073709551615.wav`, merged, and removed), so Transcribe again hears the whole
+  sentence. When the entry has no audio, or the new part has none, the entry keeps none.
+- With Labs › Dictation stats on, the day's rollup gets the new words and audio without counting another
+  dictation.
+- Paste Last still pastes the newest dictation's own text, as upstream does.
 
 ## Daily pipeline
 

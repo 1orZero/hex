@@ -2069,3 +2069,7 @@ mod tests {
         assert!(text.starts_with(&truncated));
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "fork/history_continued.rs"]
+pub(crate) mod fork_continued;
