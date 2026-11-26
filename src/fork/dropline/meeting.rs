@@ -258,9 +258,10 @@ pub(crate) fn join<E>(
 }
 
 /// At launch: the memory clear a quit cut short, for each meeting that sent
-/// audio and has no clear outcome recorded. The meetings are found before
-/// retention can move any of them to the Trash, then cleared on their own
-/// thread. Meetings still waiting for their final pass clear when it runs.
+/// audio and has no clear outcome recorded. That includes meetings waiting
+/// for their final pass, which sends no audio and may not run while Meetings
+/// is off or the model is missing. The meetings are found before retention
+/// can move any of them to the Trash, then cleared on their own thread.
 pub(crate) fn clear_owed() {
     if cfg!(test) {
         return;
@@ -268,7 +269,7 @@ pub(crate) fn clear_owed() {
     let Ok(root) = crate::meeting::root() else {
         return;
     };
-    let owed = owed_clears(&root, &crate::meeting::pending_final_transcripts());
+    let owed = owed_clears(&root);
     if owed.is_empty() {
         return;
     }
@@ -281,14 +282,13 @@ pub(crate) fn clear_owed() {
 }
 
 /// The meeting folders under `root` that sent audio and have no clear
-/// outcome, leaving out `pending` meetings and any Hex is recording.
-fn owed_clears(root: &Path, pending: &[String]) -> Vec<PathBuf> {
+/// outcome, leaving out any Hex is recording.
+fn owed_clears(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .filter(|entry| !pending.iter().any(|id| entry.file_name() == id.as_str()))
         .map(|entry| entry.path())
         .filter(|directory| sidecar::exists(directory))
         .filter(|directory| {

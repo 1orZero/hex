@@ -624,23 +624,14 @@ fn the_next_launch_clears_once_for_each_meeting_a_quit_left_uncleared() {
     let owed = meeting("qa-owed", std::slice::from_ref(&sent));
     let done = meeting("qa-done", &[sent.clone(), cleared]);
     let waiting = meeting("qa-waiting", &[sent]);
+    std::fs::write(waiting.join("final.pending"), b"").unwrap();
     std::fs::create_dir_all(root.join("qa-local")).unwrap();
-    clear_owed_in(
-        &owed_clears(&root, &["qa-waiting".into()]),
-        &*fake,
-        Some(&credentials()),
-    );
-    assert_eq!(fake.log(), ["clear"]);
+    clear_owed_in(&owed_clears(&root), &*fake, Some(&credentials()));
+    assert_eq!(fake.log(), ["clear", "clear"]);
     assert!(summary(&owed).clear_recorded);
-    assert_eq!(sidecar::read(&done).len(), 2);
-    assert!(!summary(&waiting).clear_recorded);
-    clear_owed_in(
-        &owed_clears(&root, &[]),
-        &Fake::texts(&[]),
-        Some(&credentials()),
-    );
     assert!(summary(&waiting).clear_recorded);
-    assert_eq!(fake.log(), ["clear"]);
+    assert_eq!(sidecar::read(&done).len(), 2);
+    assert!(owed_clears(&root).is_empty());
 }
 
 #[test]
@@ -658,7 +649,7 @@ fn a_meeting_moved_to_the_trash_after_the_launch_scan_still_gets_its_clear() {
         text: None,
         reason: Some("Hex 結束".into()),
     }));
-    let owed = owed_clears(&root, &[]);
+    let owed = owed_clears(&root);
     std::fs::rename(&directory, scratch("owed-trash").join("qa-expired")).unwrap();
     let fake = Fake::texts(&[]);
     clear_owed_in(&owed, &fake, Some(&credentials()));
