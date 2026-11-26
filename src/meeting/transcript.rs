@@ -297,7 +297,7 @@ impl TrackTranscript {
                 let seam = chunk_ms + samples_ms(chunk.overlap) / 2;
                 self.entries.retain(|entry| entry.start_ms < seam);
                 #[cfg(target_os = "macos")]
-                crate::fork::meeting_seam::keep_across(&mut incoming, self.entries.last(), seam);
+                crate::fork::meeting_seam::keep_across(&mut incoming, &self.entries, seam);
                 incoming.retain(|entry| entry.start_ms >= seam);
             }
             if let (Some(previous), Some(first)) = (self.entries.last(), incoming.first_mut()) {

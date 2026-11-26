@@ -16,11 +16,12 @@ const WINDOW: usize = 32;
 const SLACK: usize = 2;
 
 /// Moves the segment that straddles `seam` to start there, without the speech
-/// `previous` already ends with, so the join keeps it. A segment left with no
-/// new speech stays before the seam, and the join drops it as before.
+/// the `previous` entries already end with, so the join keeps it. A segment
+/// left with no new speech stays before the seam, and the join drops it as
+/// before.
 pub(crate) fn keep_across(
     incoming: &mut [TranscriptEntry],
-    previous: Option<&TranscriptEntry>,
+    previous: &[TranscriptEntry],
     seam: u64,
 ) {
     let Some(entry) = incoming
@@ -29,10 +30,14 @@ pub(crate) fn keep_across(
     else {
         return;
     };
-    let text = match previous {
-        Some(previous) => strip_repeated_speech(&previous.text, &entry.text),
-        None => entry.text.trim(),
-    };
+    let mut ending = String::new();
+    for previous in previous.iter().rev() {
+        ending = format!("{} {ending}", previous.text);
+        if units(&ending).len() >= WINDOW {
+            break;
+        }
+    }
+    let text = strip_repeated_speech(&ending, &entry.text);
     if text.is_empty() {
         return;
     }
@@ -85,15 +90,16 @@ struct Unit {
     end: usize,
 }
 
-/// Words, lowercased, with every Han, kana, or Hangul character a unit of its
-/// own; punctuation and spaces separate units and are not compared.
+/// Words, lowercased, with every letter of a script `compared_one_by_one` a
+/// unit of its own; punctuation, marks, and spaces separate units and are not
+/// compared.
 fn units(text: &str) -> Vec<Unit> {
     let mut units = Vec::new();
     let mut word = String::new();
     let mut word_end = 0;
     for (index, character) in text.char_indices() {
         let end = index + character.len_utf8();
-        if character.is_alphanumeric() && !written_one_by_one(character) {
+        if character.is_alphanumeric() && !compared_one_by_one(character) {
             word.extend(character.to_lowercase());
             word_end = end;
             continue;
@@ -104,7 +110,7 @@ fn units(text: &str) -> Vec<Unit> {
                 end: word_end,
             });
         }
-        if written_one_by_one(character) {
+        if character.is_alphanumeric() {
             units.push(Unit {
                 text: character.to_string(),
                 end,
@@ -120,16 +126,20 @@ fn units(text: &str) -> Vec<Unit> {
     units
 }
 
-/// Scripts written without spaces between words.
-fn written_one_by_one(character: char) -> bool {
+/// Scripts written without spaces between words (Thai, Lao, Tibetan, Burmese,
+/// Khmer, Chinese, Japanese, full-width forms), and Hangul, whose words carry
+/// their particles and so are often cut inside by a seam.
+fn compared_one_by_one(character: char) -> bool {
     matches!(
         character,
-        '\u{3040}'..='\u{30FF}'
-            | '\u{3400}'..='\u{4DBF}'
-            | '\u{4E00}'..='\u{9FFF}'
+        '\u{0E00}'..='\u{0FFF}'
+            | '\u{1000}'..='\u{109F}'
+            | '\u{1780}'..='\u{17FF}'
+            | '\u{2E80}'..='\u{9FFF}'
             | '\u{AC00}'..='\u{D7AF}'
             | '\u{F900}'..='\u{FAFF}'
-            | '\u{20000}'..='\u{2FFFF}'
+            | '\u{FF00}'..='\u{FFEF}'
+            | '\u{20000}'..='\u{3FFFF}'
     )
 }
 
@@ -183,6 +193,17 @@ mod tests {
     }
 
     #[test]
+    fn thai_written_without_spaces_is_not_repeated() {
+        assert_eq!(
+            strip_repeated_speech(
+                "qa การประชุมวันนี้เราจะคุยเรื่องงบประมาณ",
+                "เรื่องงบประมาณและแผนงานของปีหน้า"
+            ),
+            "และแผนงานของปีหน้า"
+        );
+    }
+
+    #[test]
     fn without_a_clear_repeat_the_text_is_kept_whole() {
         assert_eq!(
             strip_repeated_speech("qa-會議開始", "  大家好，我們開始吧 "),
@@ -208,7 +229,7 @@ mod tests {
             entry(8_900, 12_000, "修正方式需要保留"),
             entry(12_000, 18_000, "後面的文字"),
         ];
-        keep_across(&mut incoming, Some(&previous), 9_000);
+        keep_across(&mut incoming, &[previous], 9_000);
         assert_eq!(
             incoming,
             [
@@ -223,7 +244,19 @@ mod tests {
     fn a_segment_with_nothing_new_stays_before_the_seam() {
         let previous = entry(0, 10_000, "qa-今天我們討論會議逐字稿的修正方式");
         let mut incoming = [entry(8_000, 9_500, "逐字稿的修正方式")];
-        keep_across(&mut incoming, Some(&previous), 9_000);
+        keep_across(&mut incoming, &[previous], 9_000);
         assert_eq!(incoming, [entry(8_000, 9_500, "逐字稿的修正方式")]);
+    }
+
+    #[test]
+    fn speech_split_over_several_previous_entries_is_not_repeated() {
+        let previous = [
+            entry(0, 8_000, "qa-我們先看上週的數字"),
+            entry(8_000, 8_500, "測試結果"),
+            entry(8_500, 10_000, "很好"),
+        ];
+        let mut incoming = [entry(8_000, 18_000, "測試結果很好，我們繼續討論")];
+        keep_across(&mut incoming, &previous, 9_000);
+        assert_eq!(incoming, [entry(9_000, 18_000, "我們繼續討論")]);
     }
 }
