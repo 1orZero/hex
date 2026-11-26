@@ -59,6 +59,7 @@ them, not features.
 | `src/personal_commands/hex.d.ts` | `screenLines?: readonly string[]` at the end of `HandlerContext` (2 lines) | Types the field for configs. |
 | `src/rune_ui.rs` | `#[cfg(target_os = "macos")] mod fork_output;` after `mod fork_dropline;` (2 lines) | Compiles the Output switches' section. |
 | `src/rune_ui/output.rs` | `pane`: a `#[cfg(target_os = "macos")]` block with `content = content.child(super::fork_output::section(ui, p));` right after `content = content.child(every_dictation(…));` (4 lines) | Output's 轉換選項 section, below Every dictation, with 讀取螢幕文字 and 使用 Jev. |
+| `scripts/file-size-exceptions.txt`, `scripts/folder-shape-exceptions.txt` | `src/dictation.rs 1503` and `src/meeting.rs 1501` added, `src/meeting/transcript.rs` raised from upstream's ceiling to 1943; `src/rune_ui 62` added (4 lines) | Upstream's code-shape check (`scripts/code-shape.py`, and the `code_shape_tests::repo_satisfies_code_shape` test) fails files over 1,500 non-test lines and folders over 60 files. The hooks above push these three files past their limits, and `src/rune_ui/fork_dropline.rs` and `src/rune_ui/fork_output.rs` push `src/rune_ui` past 60. On a conflict, take upstream's files and set these entries to the counts `python3 scripts/code-shape.py --check` reports. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
 
