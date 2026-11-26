@@ -257,54 +257,56 @@ pub(crate) fn join<E>(
     (kept, dropped)
 }
 
-/// At launch, on its own thread: the memory clear a quit cut short, for
-/// each meeting that sent audio and has no clear outcome recorded. Meetings
-/// still waiting for their final pass clear when it runs.
+/// At launch: the memory clear a quit cut short, for each meeting that sent
+/// audio and has no clear outcome recorded. The meetings are found before
+/// retention can move any of them to the Trash, then cleared on their own
+/// thread. Meetings still waiting for their final pass clear when it runs.
 pub(crate) fn clear_owed() {
     if cfg!(test) {
         return;
     }
+    let Ok(root) = crate::meeting::root() else {
+        return;
+    };
+    let owed = owed_clears(&root, &crate::meeting::pending_final_transcripts());
+    if owed.is_empty() {
+        return;
+    }
     let started = thread::Builder::new()
         .name("hex-dropline-owed-clears".into())
-        .spawn(|| {
-            let Ok(root) = crate::meeting::root() else {
-                return;
-            };
-            clear_owed_in(
-                &root,
-                &crate::meeting::pending_final_transcripts(),
-                &*production(),
-                saved_credentials().as_ref(),
-            );
-        });
+        .spawn(move || clear_owed_in(&owed, &*production(), saved_credentials().as_ref()));
     if let Err(error) = started {
         tracing::warn!(%error, "could not start Dropline's owed memory clears");
     }
 }
 
-fn clear_owed_in(
-    root: &Path,
-    pending: &[String],
-    transport: &dyn Transport,
-    credentials: Option<&Credentials>,
-) {
+/// The meeting folders under `root` that sent audio and have no clear
+/// outcome, leaving out `pending` meetings and any Hex is recording.
+fn owed_clears(root: &Path, pending: &[String]) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
-        return;
+        return Vec::new();
     };
-    for entry in entries.flatten() {
+    entries
+        .flatten()
+        .filter(|entry| !pending.iter().any(|id| entry.file_name() == id.as_str()))
+        .map(|entry| entry.path())
+        .filter(|directory| sidecar::exists(directory))
+        .filter(|directory| {
+            let summary = sidecar::Summary::of(sidecar::read(directory));
+            summary.sent() && !summary.clear_recorded
+        })
+        .filter(|directory| !lock(&LIVE).iter().any(|live| live.directory == *directory))
+        .collect()
+}
+
+/// One clear for each of `owed`, recorded in its sidecar unless the folder
+/// has moved since; stops when Hex quits.
+fn clear_owed_in(owed: &[PathBuf], transport: &dyn Transport, credentials: Option<&Credentials>) {
+    for directory in owed {
         if crate::desktop::process_exit::quitting() {
             return;
         }
-        let directory = entry.path();
-        let waiting = pending.iter().any(|id| entry.file_name() == id.as_str());
-        if waiting || !sidecar::exists(&directory) {
-            continue;
-        }
-        let summary = sidecar::Summary::of(sidecar::read(&directory));
-        let live = lock(&LIVE).iter().any(|live| live.directory == directory);
-        if summary.sent() && !summary.clear_recorded && !live {
-            sidecar::Writer::new(&directory).write(&clear(transport, credentials));
-        }
+        sidecar::Writer::new(directory).write(&clear(transport, credentials));
     }
 }
 

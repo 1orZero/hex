@@ -625,14 +625,45 @@ fn the_next_launch_clears_once_for_each_meeting_a_quit_left_uncleared() {
     let done = meeting("qa-done", &[sent.clone(), cleared]);
     let waiting = meeting("qa-waiting", &[sent]);
     std::fs::create_dir_all(root.join("qa-local")).unwrap();
-    clear_owed_in(&root, &["qa-waiting".into()], &*fake, Some(&credentials()));
+    clear_owed_in(
+        &owed_clears(&root, &["qa-waiting".into()]),
+        &*fake,
+        Some(&credentials()),
+    );
     assert_eq!(fake.log(), ["clear"]);
     assert!(summary(&owed).clear_recorded);
     assert_eq!(sidecar::read(&done).len(), 2);
     assert!(!summary(&waiting).clear_recorded);
-    clear_owed_in(&root, &[], &Fake::texts(&[]), Some(&credentials()));
+    clear_owed_in(
+        &owed_clears(&root, &[]),
+        &Fake::texts(&[]),
+        Some(&credentials()),
+    );
     assert!(summary(&waiting).clear_recorded);
     assert_eq!(fake.log(), ["clear"]);
+}
+
+#[test]
+fn a_meeting_moved_to_the_trash_after_the_launch_scan_still_gets_its_clear() {
+    let root = scratch("owed-expired");
+    let directory = root.join("qa-expired");
+    std::fs::create_dir_all(&directory).unwrap();
+    sidecar::Writer::new(&directory).write(&Line::Segment(SegmentLine {
+        track: SYSTEM,
+        seq: 1,
+        start: 0,
+        end: 16_000,
+        state: State::Failed,
+        sent: true,
+        text: None,
+        reason: Some("Hex 結束".into()),
+    }));
+    let owed = owed_clears(&root, &[]);
+    std::fs::rename(&directory, scratch("owed-trash").join("qa-expired")).unwrap();
+    let fake = Fake::texts(&[]);
+    clear_owed_in(&owed, &fake, Some(&credentials()));
+    assert_eq!(fake.log(), ["clear"]);
+    assert!(!directory.exists());
 }
 
 #[test]
