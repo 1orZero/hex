@@ -16,8 +16,9 @@ the Dropline private API provider (see "Dropline private API"), the iPhone vocab
 "Traditional Chinese in Annotate and meetings"), meetings through Dropline (see "Meetings through
 Dropline"), and the Output pane's switches (see "Output switches"). Every hook in a file all three OSes build runs only on macOS (behind
 `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build upstream's
-code unchanged. The `crates/capture/build.rs` row and the `clean_summary` cut in `src/meeting/notes.rs`
-are upstream fixes carried before a release has them, not hooks.
+code unchanged. The `crates/capture/build.rs` row, the `clean_summary` cut in `src/meeting/notes.rs`, and the
+`keep_across` hook in `src/meeting/transcript.rs` are upstream fixes carried before a release has
+them, not features.
 
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
@@ -35,6 +36,7 @@ are upstream fixes carried before a release has them, not hooks.
 | `src/capture_host.rs` | `scrawl_engine`: `let transcriber = crate::fork::annotate::traditional(transcriber);` first (macOS, 2 lines) | Annotate's capture engine transcribes through the conversion, whichever of Hex's model or Apple Speech `ChosenTranscriber` picks. |
 | `src/capture_host/replay.rs` | after `let transcriber = ChosenTranscriber;` in the replay's finish: `let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));` (macOS, 2 lines) | The 15 s replay transcribes with its own `ChosenTranscriber`, outside the engine. |
 | `src/meeting/transcript.rs` | `TrackTranscript::accept`: `let transcript = crate::fork::traditional::transcript(transcript);` first (macOS, 2 lines) | Every meeting chunk before its words are joined with spaces: the in-call draft, Copy new and ⌥⌃V, the final pass, a track rebuilt from its WAV, and imports. |
+| `src/meeting/transcript.rs` | `TrackTranscript::accept`, a segmented chunk after a hard cut: `crate::fork::meeting_seam::keep_across(&mut incoming, &self.entries, seam);` between `self.entries.retain(…)` and `incoming.retain(…)` (macOS, 2 lines) | Upstream fix: the join keeps an incoming segment only if it starts after the middle of the 2 s overlap, so a segment that starts inside the overlap and runs past it was dropped with all of its new speech. A model that answers a chunk as one segment (Qwen3-ASR, also Whisper's longer segments) lost every chunk after a hard cut, which speech with no pause between 6 s and 10 s into a chunk causes. The hook moves that segment to the seam without the speech the kept entries end with; when the two chunks hear the overlap too differently to find that repeat, the segment is kept whole and up to 2 s can show twice (`fork::meeting_seam`, `meeting::fork_tests::a_hard_cut_keeps_the_new_speech_of_a_chunk_answered_as_one_segment`). v3.4.0 and upstream `dev` at df3f3e41b (2026-11-26) have the bug, with the same two `retain` lines; drop the row once a release keeps such segments. |
 | `src/meeting/notes.rs` | `clean_title` and `clean_summary`: `let title = &crate::fork::traditional::text(title);` (and `summary`) first (macOS, 2 lines each) | Generated text from either notes writer (Apple Intelligence or OpenCode): the final title and summary, the provisional title, and chapter titles (`chapters::clean_topic` calls `clean_title`). |
 | `src/meeting/notes.rs` | `clean_summary`: `.unwrap_or_else(\|\| text.floor_char_boundary(MAX_SUMMARY_CHARS))` in place of `.unwrap_or(MAX_SUMMARY_CHARS)` (1 line) | Upstream fix: a summary over 400 bytes without a space (Chinese) was cut inside a character and panicked (`meeting::fork_tests::a_long_chinese_summary_without_spaces_is_cut_at_a_character`). Upstream `dev` still has the bug; take upstream's line once a release fixes it. |
 | `src/meeting/chapters.rs` | `clean_summary`: `let summary = &crate::fork::traditional::text(summary);` first (macOS, 2 lines) | Live chapter summaries. |
@@ -93,6 +95,8 @@ are still where the hooks expect them. For History's speech source and the picke
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
 - `src/fork/dropline/meeting.rs` and `src/fork/dropline/meeting/`: meetings through Dropline.
+- `src/fork/meeting_seam.rs`: meeting segments that run across a hard cut (see the
+  `src/meeting/transcript.rs` `keep_across` row); its end-to-end test is in `src/meeting/fork_tests.rs`.
 - `fork/docs/`: the glossary (`GLOSSARY.md`) and the decisions (`adr/`) behind the fork's meeting, Annotate,
   and screen text features, in Traditional Chinese as Derek accepted them.
 
