@@ -281,10 +281,12 @@ fn near_punctuation(
 }
 
 /// A boundary at byte `cut` of `text` moved out of a word it falls inside,
-/// a run of characters of scripts written with spaces, marks included: to
-/// the word's end when that comes no later than `next`, else to its start.
+/// a run of letters and digits of a script written with spaces and marks
+/// that `joins`: to the word's end when that comes no later than `next`,
+/// else to its start.
 fn outside_word(text: &str, cut: usize, next: usize) -> usize {
-    let word = |character: char| !character.is_whitespace() && !unspaced(character);
+    let word =
+        |character: char| (character.is_alphanumeric() && !unspaced(character)) || joins(character);
     let (before, after) = text.split_at(cut);
     if !before.ends_with(word) || !after.starts_with(word) {
         return cut;
@@ -297,12 +299,22 @@ fn outside_word(text: &str, cut: usize, next: usize) -> usize {
     }
 }
 
-/// A character of a script written without spaces between words (Chinese,
-/// Japanese) or a full-width form, such as `，`.
+/// A mark that can sit inside a word or number, such as the `'` in `can't`
+/// or the `.` in `1.5`, unlike a dash or ellipsis.
+fn joins(character: char) -> bool {
+    character.is_ascii_punctuation() || character == '’'
+}
+
+/// A character of a script written without spaces between words (Thai,
+/// Lao, Tibetan, Burmese, Khmer, Chinese, Japanese) or a full-width form,
+/// such as `，`.
 fn unspaced(character: char) -> bool {
     matches!(
         character,
-        '\u{2E80}'..='\u{9FFF}'
+        '\u{0E00}'..='\u{0FFF}'
+            | '\u{1000}'..='\u{109F}'
+            | '\u{1780}'..='\u{17FF}'
+            | '\u{2E80}'..='\u{9FFF}'
             | '\u{F900}'..='\u{FAFF}'
             | '\u{FE30}'..='\u{FE4F}'
             | '\u{FF00}'..='\u{FFEF}'
@@ -310,13 +322,14 @@ fn unspaced(character: char) -> bool {
     )
 }
 
-/// Punctuation that ends a phrase, unlike a mark inside a word or number
-/// such as `1.5` or `can't`, which sits between two ASCII letters or digits.
+/// Punctuation that ends a phrase, unlike a mark that `joins` between two
+/// ASCII letters or digits, as in `1.5` or `can't`.
 fn separates(text: &str, index: usize, character: char) -> bool {
-    let inside_word = text[..index]
-        .chars()
-        .next_back()
-        .is_some_and(|before| before.is_ascii_alphanumeric())
+    let inside_word = joins(character)
+        && text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|before| before.is_ascii_alphanumeric())
         && text[index + character.len_utf8()..]
             .chars()
             .next()
@@ -484,6 +497,11 @@ mod tests {
                 ["QA see the", "preview"],
             ),
             (
+                ["qa say hello", "world now"],
+                "QA say hello—world now",
+                ["QA say hello—", "world now"],
+            ),
+            (
                 ["qa un cafe", "noir"],
                 "QA un café noir",
                 ["QA un café", "noir"],
@@ -638,6 +656,7 @@ mod tests {
             (["done", "."], "done."),
             (["我們下週", "一起上線。"], "我們下週一起上線。"),
             (["上線。", "OK"], "上線。OK"),
+            (["สวัสดี", "ครับ"], "สวัสดีครับ"),
             (["", "alone"], "alone"),
         ] {
             assert_eq!(joined(&shares.map(String::from)), expected);

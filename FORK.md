@@ -191,15 +191,15 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   Hex is quitting; segments still unanswered fail. The local transcript is merged and echo-suppressed as
   before. Then each local entry takes part in the alignment of every answered segment it overlaps and takes
   the part of Dropline's text aligned with it (characters compared in Simplified form, without spaces or
-  punctuation, lower case), its ends moved to nearby punctuation (not a mark between two ASCII letters or
-  digits, as in `1.5` or `can't`) and never inside a word of a script written with spaces (a run of
-  characters other than spaces, Chinese or Japanese characters, and full-width forms), so a word Dropline
-  corrected or joined stays whole. An entry spanning segments joins its parts in order, with a space
-  between two words of such a script. It keeps its local text when a stretch it overlaps has no answer
-  (failed, unsent, or in no segment, such as a tail under 500 ms or a gap) or aligned too weakly, or when
-  the segment holding its middle had no speech or Dropline heard none there; a segment without speech that
-  it only crosses into adds nothing. Its words still don't go to a neighbour. Dropline's words for entries
-  dropped as echo are dropped too.
+  punctuation, lower case), its ends moved to nearby punctuation (not an ASCII mark or `’` between two
+  ASCII letters or digits, as in `1.5` or `can't`) and never inside a word (letters and digits of a
+  script written with spaces, with ASCII marks and `’`), so a word Dropline corrected or joined stays
+  whole. An entry spanning segments joins its parts in order, with a space between two words of a script
+  written with spaces; Thai, Lao, Tibetan, Burmese, Khmer, Chinese, Japanese, and full-width forms get
+  none. It keeps its local text when a stretch it overlaps has no answer (failed, unsent, or in no segment,
+  such as a tail under 500 ms or a gap) or aligned too weakly, or when the segment holding its middle had
+  no speech or Dropline heard none there; a segment without speech that it only crosses into adds nothing.
+  Its words still don't go to a neighbour. Dropline's words for entries dropped as echo are dropped too.
   A segment whose alignment ratio is below 0.4 keeps local text (ADR-0008), as do failed, unsent, and
   uncovered stretches. The ratio is logged as a number; no text is logged.
 - `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,
