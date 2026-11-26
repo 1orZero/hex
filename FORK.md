@@ -189,13 +189,14 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   Dropline answering 403) stops the meeting's sends.
 - Final pass: Stop cuts each track's tail and waits up to 3 minutes for the queue, and gives up at once when
   Hex is quitting; segments still unanswered fail. The local transcript is merged and echo-suppressed as
-  before. Then each local entry whose middle falls in an answered segment takes the part of Dropline's text
-  aligned with it (characters compared in Simplified form, without spaces or punctuation, lower case), its
-  ends moved to nearby punctuation (not a mark between two ASCII letters or digits, as in `1.5` or
-  `can't`) and never inside a run of ASCII letters, digits, and marks, so a word Dropline corrected or
-  joined stays whole; Dropline's words for entries dropped as echo are dropped too. An entry that crosses
-  into a segment but gets no Dropline text of its own (echo, or its own segment failed or aligned too
-  weakly) is aligned there too, so its words there are dropped instead of joining a neighbour.
+  before. Then each local entry takes part in the alignment of every answered segment it overlaps and takes
+  the part of Dropline's text aligned with it (characters compared in Simplified form, without spaces or
+  punctuation, lower case), its ends moved to nearby punctuation (not a mark between two ASCII letters or
+  digits, as in `1.5` or `can't`) and never inside a run of ASCII letters, digits, and marks, so a word
+  Dropline corrected or joined stays whole. An entry spanning segments joins its parts in order. It keeps
+  its local text when a stretch it overlaps failed, wasn't sent, or aligned too weakly, or when Dropline
+  heard nothing in the segment holding its middle; its words there still don't go to a neighbour.
+  Dropline's words for entries dropped as echo are dropped too.
   A segment whose alignment ratio is below 0.4 keeps local text (ADR-0008), as do failed, unsent, and
   uncovered stretches. The ratio is logged as a number; no text is logged.
 - `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,

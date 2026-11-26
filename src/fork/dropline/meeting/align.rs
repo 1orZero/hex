@@ -4,8 +4,9 @@
 //! it, as both were before echo suppression. Each local entry's boundary
 //! maps into Dropline's text and moves to nearby punctuation; an entry
 //! suppression kept gets its share of Dropline's text, and the share of an
-//! entry it judged echo is dropped with it. A segment whose alignment is too
-//! weak keeps its local text.
+//! entry it judged echo is dropped with it. An entry spanning segments joins
+//! its shares, and keeps its local text when a stretch it overlaps gave it
+//! none. A segment whose alignment is too weak keeps its local text.
 
 use crate::meeting::{MeetingSource, TranscriptEntry};
 
@@ -56,18 +57,24 @@ pub(super) fn merge(
             }
         }
     }
-    // An entry that crosses into a segment but gets no Dropline text of its
-    // own (judged echo, or its segment failed or aligned too weakly) is
-    // aligned there too, so Dropline's words for it are dropped with it
-    // instead of going to a neighbour.
-    let mut texted = vec![false; before.len()];
-    for (index, _) in owned_shares(&before, answered, &|_| false, false) {
-        texted[index] = kept_at[index].is_some();
+    let mut parts = vec![Vec::new(); before.len()];
+    for (index, share) in segment_shares(&before, answered) {
+        parts[index].push(share);
     }
+    // A kept entry takes Dropline's text only when every stretch it overlaps
+    // gave it a share. Either way it took part in each segment's alignment,
+    // so Dropline's words for it never go to a neighbour.
     let mut texts: Vec<Option<String>> = vec![None; kept.len()];
-    for (index, share) in owned_shares(&before, answered, &|index| !texted[index], true) {
-        if let Some(kept) = kept_at[index] {
-            texts[kept] = Some(share);
+    for (index, entry) in before.iter().enumerate() {
+        if let Some(kept) = kept_at[index]
+            && !parts[index].is_empty()
+            && covered(entry, answered)
+        {
+            texts[kept] = parts[index]
+                .iter()
+                .cloned()
+                .collect::<Option<Vec<_>>>()
+                .map(|shares| joined(&shares));
         }
     }
     kept.into_iter()
@@ -83,18 +90,18 @@ pub(super) fn merge(
         .collect()
 }
 
-/// Each entry of `before`'s share of Dropline's text in the answered
-/// segment holding its middle, when that segment aligns well enough.
-/// Entries `crossing` accepts also take part in a segment they only cross
-/// into, and their share there is dropped.
-fn owned_shares(
+/// Each entry of `before`'s share of Dropline's text in every answered
+/// segment it overlaps, in time order: `None` where the segment aligns too
+/// weakly, or where Dropline heard nothing in the segment holding the
+/// entry's middle.
+fn segment_shares(
     before: &[TranscriptEntry],
     answered: &[Answered<'_>],
-    crossing: &dyn Fn(usize) -> bool,
-    log: bool,
-) -> Vec<(usize, String)> {
-    let mut owned = Vec::new();
-    for segment in answered {
+) -> Vec<(usize, Option<String>)> {
+    let mut segments = answered.iter().collect::<Vec<_>>();
+    segments.sort_by_key(|segment| segment.start_ms);
+    let mut found = Vec::new();
+    for segment in segments {
         let inside = before
             .iter()
             .enumerate()
@@ -103,12 +110,12 @@ fn owned_shares(
                 let middle = (entry.start_ms + entry.end_ms) / 2;
                 let owns = segment.start_ms <= middle && middle < segment.end_ms;
                 let crosses = entry.start_ms < segment.end_ms && segment.start_ms < entry.end_ms;
-                (owns || crosses && crossing(index)).then_some((index, entry.text.as_str(), owns))
+                (owns || crosses).then_some((index, entry.text.as_str(), owns))
             })
             .collect::<Vec<_>>();
         let local = inside.iter().map(|(_, text, _)| *text).collect::<Vec<_>>();
         if segment.text.trim().is_empty() {
-            if log && !local.is_empty() {
+            if !local.is_empty() {
                 tracing::info!(
                     track = ?segment.track,
                     seq = segment.seq,
@@ -116,39 +123,70 @@ fn owned_shares(
                     "Dropline heard no speech where the local model did; keeping local text"
                 );
             }
+            found.extend(
+                inside
+                    .iter()
+                    .map(|(index, _, owns)| (*index, (!owns).then(String::new))),
+            );
             continue;
         }
-        let Some((ratio, shares)) = shares(&local, segment.text) else {
-            if log {
-                tracing::info!(
-                    track = ?segment.track,
-                    seq = segment.seq,
-                    entries = local.len(),
-                    "could not align a Dropline meeting segment; keeping local text"
-                );
-            }
-            continue;
-        };
-        if log {
-            tracing::info!(
+        let aligned = shares(&local, segment.text);
+        match &aligned {
+            None => tracing::info!(
+                track = ?segment.track,
+                seq = segment.seq,
+                entries = local.len(),
+                "could not align a Dropline meeting segment; keeping local text"
+            ),
+            Some((ratio, _)) => tracing::info!(
                 track = ?segment.track,
                 seq = segment.seq,
                 ratio = (ratio * 1000.0).round() / 1000.0,
                 "aligned a Dropline meeting segment"
-            );
+            ),
         }
-        if ratio < THRESHOLD {
-            continue;
+        match aligned {
+            Some((ratio, shares)) if ratio >= THRESHOLD => found.extend(
+                inside
+                    .iter()
+                    .zip(shares)
+                    .map(|((index, _, _), share)| (*index, Some(share))),
+            ),
+            _ => found.extend(inside.iter().map(|(index, _, _)| (*index, None))),
         }
-        owned.extend(
-            inside
-                .iter()
-                .zip(shares)
-                .filter(|((_, _, owns), _)| *owns)
-                .map(|((index, _, _), share)| (*index, share)),
-        );
     }
-    owned
+    found
+}
+
+/// Whether answered segments of `entry`'s track cover all of it.
+fn covered(entry: &TranscriptEntry, answered: &[Answered<'_>]) -> bool {
+    let mut segments = answered
+        .iter()
+        .filter(|segment| segment.track == entry.source)
+        .map(|segment| (segment.start_ms, segment.end_ms))
+        .collect::<Vec<_>>();
+    segments.sort_unstable();
+    let mut reached = entry.start_ms;
+    for (start_ms, end_ms) in segments {
+        if start_ms <= reached && reached < end_ms {
+            reached = end_ms;
+        }
+    }
+    reached >= entry.end_ms
+}
+
+/// `shares` in order, with a space where two ASCII words would meet.
+fn joined(shares: &[String]) -> String {
+    let mut text = String::new();
+    for share in shares.iter().filter(|share| !share.is_empty()) {
+        if text.ends_with(|character: char| character.is_ascii_graphic())
+            && share.starts_with(|character: char| character.is_ascii_graphic())
+        {
+            text.push(' ');
+        }
+        text.push_str(share);
+    }
+    text
 }
 
 /// Each of `local`'s entries' share of `remote`, and the share of
@@ -514,6 +552,69 @@ mod tests {
                 (YOU, 0, "QA 好的我知道。"),
                 (YOU, 3_000, "我們 下週 一起 上線")
             ]
+        );
+    }
+
+    #[test]
+    fn an_entry_spanning_two_segments_joins_its_words_from_both() {
+        let before = [
+            entry(YOU, 0, 3_500, "qa Good morning everyone"),
+            entry(YOU, 4_000, 8_000, "we will deploy tomorrow morning"),
+        ];
+        let merged = merge(
+            &before,
+            shifted(&before, 0),
+            0,
+            &[
+                segment(1, 0, 5_000, "QA Good morning everyone, we will"),
+                segment(2, 5_000, 10_000, "deploy tomorrow morning."),
+            ],
+        );
+        assert_eq!(
+            texts(&merged),
+            [
+                (YOU, 0, "QA Good morning everyone,"),
+                (YOU, 4_000, "we will deploy tomorrow morning."),
+            ]
+        );
+        // Alone in a short segment, the entry aligns too weakly there and
+        // keeps all of its local text.
+        let before = [entry(
+            YOU,
+            4_000,
+            8_000,
+            "qa We will deploy tomorrow morning",
+        )];
+        let merged = merge(
+            &before,
+            shifted(&before, 0),
+            0,
+            &[
+                segment(1, 0, 5_000, "QA We will"),
+                segment(2, 5_000, 10_000, "deploy tomorrow morning."),
+            ],
+        );
+        assert_eq!(
+            texts(&merged),
+            [(YOU, 4_000, "qa We will deploy tomorrow morning")]
+        );
+    }
+
+    #[test]
+    fn an_entry_reaching_into_a_failed_segment_keeps_its_local_text() {
+        let before = [
+            entry(YOU, 0, 3_000, "qa 我們 下週"),
+            entry(YOU, 4_000, 7_000, "一起 上線 吧"),
+        ];
+        let merged = merge(
+            &before,
+            shifted(&before, 0),
+            0,
+            &[segment(1, 0, 6_000, "QA 我們下週。一起上線")],
+        );
+        assert_eq!(
+            texts(&merged),
+            [(YOU, 0, "QA 我們下週。"), (YOU, 4_000, "一起 上線 吧")]
         );
     }
 
