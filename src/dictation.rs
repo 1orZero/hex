@@ -688,6 +688,8 @@ struct Recording {
     /// dropping the recording clears it.
     live_text: Option<crate::dictation::live_text::Publisher>,
     #[cfg(target_os = "macos")]
+    drafts: Option<crate::fork::dropline::Drafts>,
+    #[cfg(target_os = "macos")]
     environment: RecordingEnvironmentState,
     #[cfg(target_os = "macos")]
     capture: Option<crate::audio::recording_environment::CaptureMarker>,
@@ -759,6 +761,8 @@ impl Recording {
             show_live_text: false,
             voice: VoiceTrack::default(),
             live_text: None,
+            #[cfg(target_os = "macos")]
+            drafts: None,
             #[cfg(target_os = "macos")]
             environment: RecordingEnvironmentState::Disabled,
             #[cfg(target_os = "macos")]
@@ -1182,6 +1186,13 @@ impl DictationCapture {
     /// change is also returned, so a host can send it to Live typing's input
     /// method or a `/dictations` client without showing the plate.
     pub fn report_live_text(&mut self) -> Option<Partial> {
+        #[cfg(target_os = "macos")]
+        if let Some(recording) = &mut self.recording
+            && let Some(drafts) = &mut recording.drafts
+        {
+            let delay = recording.resampler.as_ref().map_or(0, Fft::output_delay);
+            return drafts.report(&recording.samples[delay.min(recording.samples.len())..]);
+        }
         let partial = self.take_partial()?;
         let recording = self.recording.as_mut()?;
         tracing::debug!(
@@ -1211,6 +1222,10 @@ impl DictationCapture {
             return;
         };
         if recording.stream.is_none() {
+            #[cfg(target_os = "macos")]
+            if crate::fork::dropline::Drafts::begin(&mut recording.drafts) {
+                return;
+            }
             recording.stream = engine.begin();
             recording.show_live_text = recording.stream.is_some()
                 && (crate::labs::live_text() || crate::dictation::live_text::board_demanded());

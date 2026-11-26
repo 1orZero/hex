@@ -23,6 +23,8 @@ are upstream fixes carried before a release has them, not hooks.
 | --- | --- | --- |
 | `src/main.rs` | `mod fork;` (macOS) after `mod feedback;` | Compiles the fork module. |
 | `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples, submitted_at)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/parakeet.rs` | `InferenceJob.transcript: crate::fork::dropline::Local` in place of `PendingTranscript`; in `submit`, `crate::fork::dropline::local(&dropline, engine, stream, samples, offline)` in place of `engine.finish_with(stream, samples, offline)`; `PendingTranscript` dropped from the `transcription::engine` import (3 lines) | Without Dropline the local transcript starts as before; with it, the local model transcribes the clip only after Dropline fails. |
+| `src/dictation.rs` | `Recording.drafts` field and its `None` in `try_new`; in `begin_stream`, `if crate::fork::dropline::Drafts::begin(&mut recording.drafts) { return; }` before `engine.begin()`; in `report_live_text`, the drafts report the recording's 16 kHz audio first and return what they showed (all behind `#[cfg(target_os = "macos")]`, 15 lines) | While Dropline is selected, a recording opens no local live stream; its live text is Dropline's drafts. |
 | `src/parakeet.rs` | `record_history`: `model: crate::fork::dropline::history_model(completed.timings.total_started),` in place of `model: crate::history::dictation_model(),` (1 line) | History names what made the text: Dropline, or the local model marked as Dropline's fallback. `total_started` is the job's `submitted_at`, the same instant `job` received. Upstream `dev` moved `record_history` to `src/dictation/modes/output.rs`, which all three OSes build; there the hook becomes `model: crate::fork::dropline::history_model(input.total_started)` behind `#[cfg(target_os = "macos")]`, keeping upstream's line for the other OSes. |
 | `src/recognition.rs` | `fork::dropline::prepare()` after `worker.prepare_paste()` on capture start | Opens the Dropline session early (best effort). |
 | `src/macos_rune.rs` | `fork::dropline::deselect()` in `StatusItemAction::SelectModel` | Choosing a local model in the menu bar stops using Dropline. |
@@ -118,15 +120,28 @@ heard no speech, so the dictation inserts nothing and does not fall back.
   characters that were already distinctly traditional. This distinguishes `干擾` from `干燥` without
   treating either spelling as a rule for every name or phrase. Local and fallback transcripts bypass
   this parser.
-- The local model still transcribes every clip while Dropline runs, so a fallback needs no second
-  transcription. When Dropline answers, the local transcript still finishes in the background under its own
-  deadlines. General and the model picker show the last fallback.
+- No local model runs for a dictation while Dropline is selected: the recording opens no live stream, and
+  the finished clip goes to the local model only after Dropline fails, so a fallback waits for Dropline's
+  attempt and then a whole local transcription. The model stays loaded as before (Labs › Free memory when
+  idle still parks it). General and the model picker show the last fallback.
+- Live text while recording (`src/fork/dropline/drafts.rs`): while the live text plate wants text (Labs ›
+  Live text, or the first run's practice), every 4 s of audio the recording so far (16 kHz, shortened and
+  encoded as the final clip is) goes to `/client/dictate` in the session the final text uses, with the
+  vocabulary as context, and its text is what the plate shows. Until the first text the plate says
+  Listening…, and an empty answer leaves it. A round whose time comes while the previous request is still
+  out is skipped, so at most 15 go out a minute. Past 180 s of audio no request goes out and the last text
+  stays. A 429, a token or bearer failure, or audio Dropline would refuse ends the drafts for that
+  dictation; a timeout, a network error, or another HTTP error leaves the next round going. The plate
+  clears when the recording ends, and a draft still out then is never shown. Without the plate, no draft
+  goes out. Meetings keep their own path ("Meetings through Dropline").
+- Unknown: whether Dropline writes each draft into the account's memory, and whether it counts the
+  requests of one session as one dictation.
 - History's Speech model names what made each dictation's text: `Dropline 私人 API` when Dropline
   answered, the local model followed by `（Dropline 失敗後改用）` when it fell back (for example
   `Qwen3-ASR 1.7B（Dropline 失敗後改用）`), and the local model alone when Dropline wasn't selected.
   History's search matches the same text (`hex history` doesn't print the model). Inference is how long
-  the text took: Dropline's request when it answered (the local transcript isn't waited for), or
-  Dropline's attempt plus the rest of the local transcript when it fell back. The fallback's model is read
+  the text took: Dropline's request when it answered, or Dropline's attempt plus the local transcription
+  when it fell back. The fallback's model is read
   when the local transcript finishes, so a model chosen before History records the dictation doesn't
   rename it. Answers live in memory by submission instant until History records the dictation or 16
   newer answers push them out (a dictation History never records: cancelled, no speech, a failed paste,
