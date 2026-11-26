@@ -5,7 +5,7 @@
 //! the Trash with the folder. A line cut short by a crash is skipped.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -82,20 +82,25 @@ impl Writer {
     fn append(&mut self, line: &Line) -> std::io::Result<()> {
         if self.file.is_none() {
             let mut options = OpenOptions::new();
-            options.create(true).append(true);
+            options.create(true).read(true).append(true);
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
             self.file = Some(options.open(&self.path)?);
         }
         let file = self.file.as_mut().expect("opened above");
-        let mut bytes = serde_json::to_vec(line).map_err(std::io::Error::other)?;
-        bytes.push(b'\n');
-        let length = file.metadata()?.len();
-        if let Err(error) = file.write_all(&bytes) {
-            // A torn record would swallow the next one into its line.
-            let _ = file.set_len(length);
-            return Err(error);
+        let mut bytes = Vec::new();
+        // After a line a crash or a failed write cut short, the record
+        // starts a line of its own instead of joining it.
+        let mut last = [0];
+        if file.seek(SeekFrom::End(-1)).is_ok()
+            && file.read_exact(&mut last).is_ok()
+            && last != *b"\n"
+        {
+            bytes.push(b'\n');
         }
+        bytes.extend(serde_json::to_vec(line).map_err(std::io::Error::other)?);
+        bytes.push(b'\n');
+        file.write_all(&bytes)?;
         file.sync_data()
     }
 }
@@ -230,6 +235,23 @@ mod tests {
                 .segments
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_record_after_a_line_cut_short_starts_a_line_of_its_own() {
+        let directory = super::super::tests::scratch("sidecar-tail");
+        Writer::new(&directory).write(&segment(1, State::Done, true, Some("qa-完成")));
+        let path = directory.join(FILE);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(r#"{"event":"segment","track":"system","seq":2,"sta"#);
+        std::fs::write(&path, text).unwrap();
+        Writer::new(&directory).write(&Line::Clear {
+            result: "cleared".into(),
+            reason: None,
+        });
+        let summary = Summary::of(read(&directory));
+        assert_eq!(summary.segments.len(), 1);
+        assert!(summary.clear_recorded);
     }
 
     #[test]

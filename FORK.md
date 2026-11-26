@@ -200,8 +200,8 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
 - `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,
   `[start, end)` in samples of the track resampled to 16 kHz (not the WAV's own rate), whether it was sent,
   its state and text, and the memory clear's outcome. It holds no audio or credentials, skips a last line cut
-  short (even inside a character), removes a record a failed write left half-written, and goes to the Trash
-  with the meeting.
+  short (even inside a character), starts the next record on a line of its own after one, and goes to the
+  Trash with the meeting.
 - Memory clear (ADR-0004, ADR-0007): once per meeting, after its last possible send, when a segment was sent
   and no clear outcome is recorded, Hex posts to `…/dropline-private/memory/clear` beside the token
   endpoint with the saved bearer. A token endpoint that doesn't end in `/dropline-private/token` is skipped.
