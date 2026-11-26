@@ -226,7 +226,7 @@ fn near_punctuation(
         .min(next.max(at));
     text.char_indices()
         .filter(|(index, character)| {
-            *index >= lower && *index < upper && is_punctuation(*character)
+            *index >= lower && *index < upper && separates(text, *index, *character)
         })
         .map(|(index, character)| index + character.len_utf8())
         .filter(|end| *end <= next.max(at))
@@ -234,8 +234,18 @@ fn near_punctuation(
         .unwrap_or(at)
 }
 
-fn is_punctuation(character: char) -> bool {
-    !character.is_alphanumeric() && !character.is_whitespace()
+/// Punctuation that ends a phrase, unlike a mark inside a word or number
+/// such as `1.5` or `can't`, which sits between two ASCII letters or digits.
+fn separates(text: &str, index: usize, character: char) -> bool {
+    let inside_word = text[..index]
+        .chars()
+        .next_back()
+        .is_some_and(|before| before.is_ascii_alphanumeric())
+        && text[index + character.len_utf8()..]
+            .chars()
+            .next()
+            .is_some_and(|after| after.is_ascii_alphanumeric());
+    !character.is_alphanumeric() && !character.is_whitespace() && !inside_word
 }
 
 /// The characters alignment compares, each with its bytes in `text`:
@@ -358,6 +368,30 @@ mod tests {
                 (THEM, 2_500, "還有軟體發佈的時間。"),
             ]
         );
+    }
+
+    #[test]
+    fn marks_inside_words_and_numbers_do_not_end_a_phrase() {
+        for (local, remote, expected) in [
+            (
+                ["qa It costs 1.5", "million dollars"],
+                "QA It costs 1.5 million dollars.",
+                ["QA It costs 1.5", "million dollars."],
+            ),
+            (
+                ["qa I can't", "go"],
+                "QA I can't go.",
+                ["QA I can't", "go."],
+            ),
+            (
+                ["qa I can’t", "go"],
+                "QA I can’t go.",
+                ["QA I can’t", "go."],
+            ),
+        ] {
+            let (_, shared) = shares(&local, remote).unwrap();
+            assert_eq!(shared, expected);
+        }
     }
 
     #[test]
