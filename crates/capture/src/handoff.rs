@@ -119,10 +119,16 @@ pub fn reveal_path(target: &Path) -> Result<()> {
 }
 
 pub fn resolve_bundle_dir(path_or_id: &Path) -> Result<PathBuf> {
+    if path_or_id.is_absolute() {
+        return scrawl_router::bundle::resolve_bundle_dir_in(None, path_or_id);
+    }
     scrawl_router::bundle::resolve_bundle_dir_in(Some(&default_captures_dir()), path_or_id)
 }
 
 pub fn load_bundle(bundle_dir: &Path) -> Result<(PathBuf, ScrawlBundle)> {
+    if bundle_dir.is_absolute() {
+        return scrawl_router::bundle::load_bundle_in(None, bundle_dir);
+    }
     scrawl_router::bundle::load_bundle_in(Some(&default_captures_dir()), bundle_dir)
 }
 
@@ -201,6 +207,28 @@ pub fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `path` alone on the clipboard, as a file URL, so a paste into Finder, an
+/// agent, or a chat attaches the file.
+#[cfg(target_os = "macos")]
+pub fn copy_file_to_clipboard(path: &Path) -> Result<()> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSArray, NSURL};
+
+    objc2::rc::autoreleasepool(|_| {
+        let url = NSURL::from_file_path(path)
+            .ok_or_else(|| anyhow::anyhow!("not a file path: {}", path.display()))?;
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        let objects = NSArray::from_retained_slice(&[ProtocolObject::from_retained(url)]);
+        ensure!(
+            pasteboard.writeObjects(&objects),
+            "Could not put the file on the clipboard"
+        );
+        Ok(())
+    })
 }
 
 #[cfg(target_os = "windows")]

@@ -15,7 +15,7 @@ mod other {
         None
     }
 
-    pub(in crate::rune_ui) fn model_name(_ui: &Ui, name: &'static str) -> &'static str {
+    pub(in crate::rune_ui) fn model_name<'a>(_ui: &Ui, name: &'a str) -> &'a str {
         name
     }
 
@@ -83,8 +83,10 @@ mod macos {
     }
 
     /// The local model dictation falls back to.
-    fn local_name(ui: &Ui) -> &'static str {
-        transcription_models::definition(ui.settings.transcription.model).name
+    fn local_name(ui: &Ui) -> String {
+        transcription_models::definition(ui.settings.transcription.model)
+            .name
+            .to_string()
     }
 
     fn in_use(ui: &Ui) -> bool {
@@ -92,7 +94,7 @@ mod macos {
     }
 
     /// General names Dropline as the speech model while dictation uses it.
-    pub(in crate::rune_ui) fn model_name(ui: &Ui, name: &'static str) -> &'static str {
+    pub(in crate::rune_ui) fn model_name<'a>(ui: &Ui, name: &'a str) -> &'a str {
         if in_use(ui) { NAME } else { name }
     }
 

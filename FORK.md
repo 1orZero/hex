@@ -16,7 +16,7 @@ the Dropline private API provider (see "Dropline private API"), the iPhone vocab
 "Traditional Chinese in Annotate and meetings"), meetings through Dropline (see "Meetings through
 Dropline"), and the Output pane's switches (see "Output switches"). Every hook in a file all three OSes build runs only on macOS (behind
 `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build upstream's
-code unchanged. The `crates/capture/build.rs` row, the `clean_summary` cut in `src/meeting/notes.rs`, and the
+code unchanged. The `clean_summary` cut in `src/meeting/notes.rs` and the
 `keep_across` hook in `src/meeting/transcript.rs` are upstream fixes carried before a release has
 them, not features.
 
@@ -26,16 +26,16 @@ them, not features.
 | `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples, submitted_at)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
 | `src/parakeet.rs` | `InferenceJob.transcript: crate::fork::dropline::Local` in place of `PendingTranscript` (and `PendingTranscript` dropped from the `transcription::engine` import); `crate::fork::dropline::local(&dropline, engine, stream, samples, offline)` in place of `engine.finish_with(stream, samples, offline)` in the submit path | While Dropline takes the clip, the local model transcribes it only after Dropline fails. Without Dropline, or with a live stream, the engine starts it at once as upstream does. |
 | `src/dictation.rs` | `begin_stream`: `#[cfg(target_os = "macos")] if self.fork_dropline_live() { return; }` at the top (4 lines); `#[cfg(target_os = "macos")] #[path = "fork/dropline/live.rs"] mod fork_dropline_live;` at the end of the file (4 lines) | While Dropline is selected a hotkey capture opens no local stream, and Dropline gives its live text. The module sits in `src/fork/dropline/` but is `dictation`'s child, so it reads the private recording. |
-| `src/parakeet.rs` | `record_history`: `model: crate::fork::dropline::history_model(completed.timings.total_started),` in place of `model: crate::history::dictation_model(),` (1 line) | History names what made the text: Dropline, or the local model marked as Dropline's fallback. `total_started` is the job's `submitted_at`, the same instant `job` received. Upstream `dev` moved `record_history` to `src/dictation/modes/output.rs`, which all three OSes build; there the hook becomes `model: crate::fork::dropline::history_model(input.total_started)` behind `#[cfg(target_os = "macos")]`, keeping upstream's line for the other OSes. |
-| `src/recognition.rs` | `fork::dropline::prepare()` after `worker.prepare_paste()` on capture start | Opens the Dropline session early (best effort). |
+| `src/dictation/modes/output.rs` | `record_history`: `#[cfg(target_os = "macos")] model: crate::fork::dropline::history_model(input.total_started),` before upstream's `model: crate::history::dictation_model(),`, which gets `#[cfg(not(target_os = "macos"))]` (3 lines) | History names what made the text: Dropline, or the local model marked as Dropline's fallback. On macOS `input.total_started` is the job's `submitted_at` (`run_inference_worker` in `src/parakeet.rs`), the same instant `job` received. All three OSes build this file, so the other OSes keep upstream's line. |
+| `src/recognition/capture_actions.rs` | `handle_hotkey_action`, `HotkeyAction::Start`: `crate::fork::dropline::prepare();` after `worker.prepare_paste();` (1 line) | Opens the Dropline session early (best effort). |
 | `src/macos_rune.rs` | `fork::dropline::deselect()` in `StatusItemAction::SelectModel` | Choosing a local model in the menu bar stops using Dropline. |
 | `src/rune_ui.rs` | `mod fork_dropline;`, `Ui.fork_dropline` field and its default, both behind `#[cfg(target_os = "macos")]` | The picker section's form state, which only macOS reads. |
 | `src/rune_ui/picker.rs` | `fork_dropline::model_chosen()` at the top of `choose`; `content.children(fork_dropline::section(ui, p))` after the body in `modal` | Choosing a local model in the picker stops using Dropline; the picker's last section adds, uses, and deletes the provider. |
 | `src/rune_ui/picker/compare.rs`, `src/rune_ui/picker/list.rs` | `#[cfg(target_os = "macos")] State::InUse if crate::rune_ui::fork_dropline::local_is_fallback(ui) => { … fallback_badge(p) }` before `State::InUse => facts::in_use(p),` (4 lines each) | While Dropline is in use, the local model's card and row read 失敗時改用 instead of In use. |
-| `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name)` in the Speech model button; `description.or_else(\|\| fork_dropline::status(ui, p))` after the description match | General names Dropline while it is in use and shows the last fallback. |
+| `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name.as_ref())` in the Speech model button; `let description = description.or_else(\|\| super::fork_dropline::status(ui, p));` right before the `rows.push(icon_described_row(… "transcription" …))` that shows the row | General names Dropline while it is in use and shows the last fallback. |
 | `src/capture_host.rs` | `scrawl_engine`: `let transcriber = crate::fork::annotate::traditional(transcriber);` first (macOS, 2 lines) | Annotate's capture engine transcribes through the conversion, whichever of Hex's model or Apple Speech `ChosenTranscriber` picks. |
 | `src/capture_host/replay.rs` | after `let transcriber = ChosenTranscriber;` in the replay's finish: `let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));` (macOS, 2 lines) | The 15 s replay transcribes with its own `ChosenTranscriber`, outside the engine. |
-| `src/meeting/transcript.rs` | `TrackTranscript::accept`: `let transcript = crate::fork::traditional::transcript(transcript);` first (macOS, 2 lines) | Every meeting chunk before its words are joined with spaces: the in-call draft, Copy new and ⌥⌃V, the final pass, a track rebuilt from its WAV, and imports. |
+| `src/meeting/transcript.rs` | `TrackTranscript::accept`: `let transcript = crate::fork::traditional::transcript(transcript);` first (macOS, 2 lines) | Every meeting chunk before its words are joined with spaces: the in-call draft, the final pass, a track rebuilt from its WAV, and imports. |
 | `src/meeting/transcript.rs` | `TrackTranscript::accept`, a segmented chunk after a hard cut: `crate::fork::meeting_seam::keep_across(&mut incoming, &self.entries, seam);` between `self.entries.retain(…)` and `incoming.retain(…)` (macOS, 2 lines) | Upstream fix: the join keeps an incoming segment only if it starts after the middle of the 2 s overlap, so a segment that starts inside the overlap and runs past it was dropped with all of its new speech. A model that answers a chunk as one segment (Qwen3-ASR, also Whisper's longer segments) lost every chunk after a hard cut, which speech with no pause between 6 s and 10 s into a chunk causes. The hook moves that segment to the seam without the speech the kept entries end with; when the two chunks hear the overlap too differently to find that repeat, the segment is kept whole and up to 2 s can show twice (`fork::meeting_seam`, `meeting::fork_tests::a_hard_cut_keeps_the_new_speech_of_a_chunk_answered_as_one_segment`). v3.4.0 and upstream `dev` at df3f3e41b (2026-11-26) have the bug, with the same two `retain` lines; drop the row once a release keeps such segments. |
 | `src/meeting/notes.rs` | `clean_title` and `clean_summary`: `let title = &crate::fork::traditional::text(title);` (and `summary`) first (macOS, 2 lines each) | Generated text from either notes writer (Apple Intelligence or OpenCode): the final title and summary, the provisional title, and chapter titles (`chapters::clean_topic` calls `clean_title`). |
 | `src/meeting/notes.rs` | `clean_summary`: `.unwrap_or_else(\|\| text.floor_char_boundary(MAX_SUMMARY_CHARS))` in place of `.unwrap_or(MAX_SUMMARY_CHARS)` (1 line) | Upstream fix: a summary over 400 bytes without a space (Chinese) was cut inside a character and panicked (`meeting::fork_tests::a_long_chinese_summary_without_spaces_is_cut_at_a_character`). Upstream `dev` still has the bug; take upstream's line once a release fixes it. |
@@ -46,36 +46,29 @@ them, not features.
 | `src/meeting/sweep.rs` | `remove_orphaned_imports`: `crate::fork::dropline::meeting::clear_owed();` first (macOS, 2 lines); the sweep runs once per launch, and upstream `dev` calls it from `src/meeting/recovery.rs` | Once per launch: finds each meeting that sent audio and has no clear outcome, before retention expiry runs, and clears for it on its own thread, including meetings waiting for a final pass that may not run. |
 | `src/meeting/transcript.rs` | `transcribe`: `let join_entries = \|entries, origin_ms, envelope\| { crate::fork::dropline::meeting::join(directory, manifest, entries, origin_ms, envelope, join_entries) };` before `Ok(join_entries(…))` (macOS, 11 lines) | The final pass, also when the next launch finishes a meeting: the local merge and echo suppression run as before, then answered segments put Dropline's words in the entries they cover. |
 | `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The iPhone dictation-finish point: Dropline first, the local engine on failure. |
-| `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: vocabularyTerms)` after `let vocabularyTerms = …` | Opens the Dropline session early (best effort). |
-| `ios/HEXMobile/ContentView.swift` | `standaloneView`: `ForkDroplineSettingsCard()` between `settingsCard` and `ExperimentsCard()` | Adds, selects, and deletes the provider. |
+| `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkDroplineRecognition.prepare(hints: preferences.recognitionHints)` after `let sharesHeard = …` | Opens the Dropline session early (best effort). |
+| `ios/HEXMobile/ContentView.swift` | `homeView`: `ForkDroplineSettingsCard()` and a blank line after the Settings pages card (`.padding(.top, 8)`) | Adds, selects, and deletes the provider. |
 | `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links; upstream's handler ignores hosts other than `keyboard`. |
-| `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyLinkAdded)` after the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link adds a term; otherwise the editor's next add or remove writes its stale list back and drops the linked term. |
+| `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyLinkAdded)` after upstream's `.onReceive(… .hexWordsListsDidChange)`, which follows the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link adds a term; otherwise the editor's next add or remove writes its stale list back and drops the linked term. |
 | `build.rs` | `compile_swift_bridge("fork/screen_text", …)` and the Vision link, after the calendar bridge (2 lines) | Builds screen text's Swift bridge, `src/fork/screen_text.swift`. |
-| `src/recognition/context_watch.rs` | `ContextWatch.screen_text` (the last field) and `ScreenTextRead::start()` in `start`; `self.screen_text.begin()`, `.intend()`, `.cancel()` at the end of `begin`, `intend`, and `cancel`; `finish` takes `self.screen_text.finish()`, calls `finish_snapshot` (the old body of `finish`), and sets `snapshot.fork_screen_text` (16 lines) | One read per capture, started when the capture becomes real or when a short tap finishes, dropped by a cancel, and handed to the snapshot `finish` returns. |
-| `src/recognition.rs` | `handle_hotkey_action`, `HotkeyAction::Start`: `context.screen_text.raw(raw)` after `context.begin()` (1 line) | A raw dictation (the raw shortcut, `hex dictation start --raw`) runs no transformation, so it reads nothing. |
-| `src/dictation/context.rs` | `ContextSnapshot.fork_screen_text` (macOS), the last field; `fork_screen_text: Default::default()` in `snapshot_of` and in `capture_for_meeting`'s two `Self { … }` (6 lines) | The snapshot a capture finishes with carries its read. |
+| `src/recognition/context_watch.rs` | `ContextWatch.screen_text` (the last field, after upstream's `screen` and `caret`) and `ScreenTextRead::start()` in `start`; `self.screen_text.begin()`, `.intend()`, `.cancel()` at the end of `begin`, `intend`, and `cancel`; in `finish`, `let screen_text = self.screen_text.finish();` before `finish_snapshot` and `snapshot.fork_screen_text = screen_text;` before `Ok(snapshot)` (8 lines) | One read per capture, started when the capture becomes real or when a short tap finishes, dropped by a cancel, and handed to the snapshot `finish` returns. |
+| `src/recognition/capture_actions.rs` | `handle_hotkey_action`, `HotkeyAction::Start`: `context.screen_text.raw(raw);` after `context.begin();` (1 line) | A raw dictation (the raw shortcut, `hex dictation start --raw`) runs no transformation, so it reads nothing. |
+| `src/dictation/context.rs` | `ContextSnapshot.fork_screen_text` (macOS), the last field, after upstream's `bundle_name`; `fork_screen_text: Default::default()` after `bundle_name` in `snapshot_of` and in `capture_for_meeting`'s two `Self { … }` (6 lines) | The snapshot a capture finishes with carries its read. |
 | `src/dictation/processor.rs`, `src/meeting/detection.rs` | `fork_screen_text: Default::default()` (macOS) in the tests' `context` helpers (2 lines each) | Struct literals that name every field need the new one. |
 | `src/personal_commands.rs` | `InvocationContext.screen_lines` (macOS) after `window_title`; `screen_lines: context.fork_screen_text.lines()` in `invocation_context`; `mod fork_screen_text_tests` (`#[path]` to `src/fork/screen_text/transformation_tests.rs`) at the end of the file (9 lines) | Each transformation chain waits for its dictation's read and passes it as `screenLines`; the test module runs a real config against the worker. |
 | `src/personal_commands/hex.d.ts` | `screenLines?: readonly string[]` at the end of `HandlerContext` (2 lines) | Types the field for configs. |
 | `src/rune_ui.rs` | `#[cfg(target_os = "macos")] mod fork_output;` after `mod fork_dropline;` (2 lines) | Compiles the Output switches' section. |
-| `src/rune_ui/output.rs` | `pane`: a `#[cfg(target_os = "macos")]` block with `content = content.child(super::fork_output::section(ui, p));` right after the statement that adds the Try card (4 lines) | Output's 轉換選項 section, below Try, with 讀取螢幕文字 and 使用 Jev. |
-| `crates/capture/build.rs` | `compile_helper`: `profile_dir` is the parent of the `build` directory in `OUT_DIR`, not `out_dir.ancestors().nth(3)` | Upstream backport: anomalyco/hex#1734 (`db338045`), cherry-picked unchanged with `-x`, which also touches `.github/workflows/build-desktop.yml` and `docs/plans/capture-in-hex.md`. Under cargo 1.100's build-dir layout, v3.4.0 puts `scrawl-helper` in `target/release/build/`, so `scripts/build-app.sh` can't copy it from `target/release/`. The row goes away once a release that includes #1734 is merged; until then, take upstream's version on a conflict. |
+| `src/rune_ui/output.rs` | `pane`: a `#[cfg(target_os = "macos")]` block with `content = content.child(super::fork_output::section(ui, p));` right after `content = content.child(every_dictation(…));` (4 lines) | Output's 轉換選項 section, below Every dictation, with 讀取螢幕文字 and 使用 Jev. |
+| `scripts/file-size-exceptions.txt`, `scripts/folder-shape-exceptions.txt` | `src/dictation.rs 1503` and `src/meeting.rs 1501` added, `src/meeting/transcript.rs` raised from upstream's ceiling to 1943; `src/rune_ui 62` added (4 lines) | Upstream's code-shape check (`scripts/code-shape.py`, and the `code_shape_tests::repo_satisfies_code_shape` test) fails files over 1,500 non-test lines and folders over 60 files. The hooks above push these three files past their limits, and `src/rune_ui/fork_dropline.rs` and `src/rune_ui/fork_output.rs` push `src/rune_ui` past 60. On a conflict, take upstream's files and set these entries to the counts `python3 scripts/code-shape.py --check` reports. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
 
-Apart from screen text's hooks (see "Screen text"), a trial merge of upstream `dev` at a394af280
-(2026-11-25, not pushed) conflicts only at earlier hooks:
-`src/parakeet.rs`, `src/recognition.rs`, `src/rune_ui.rs`, `src/rune_ui/general.rs`, and
-`src/rune_ui/picker.rs` (Dropline dictation), and three files under `ios/`, which this branch no longer
-builds. The meeting Dropline hooks merge cleanly: `dev` still has `write_tracks` in `src/meeting.rs` and an
-unchanged `src/meeting/sweep.rs`, and
-it adds a quit check and a `Recording` guard right after `ActiveMeeting::acquire` in `record`, so the
-`start` hook sits after `let given_title = …;` to stay clear of them. The Traditional Chinese hooks merge cleanly: `dev` moved `ChosenTranscriber` to
-`src/capture_host/words.rs`, but `scrawl_engine` and the replay's `let transcriber = ChosenTranscriber;`
-are still where the hooks expect them. For History's speech source and the picker's 失敗時改用, a trial merge of
-`dev` at 2548a1b87 (2026-11-26, not pushed) merges `src/rune_ui/picker/compare.rs` and
-`src/rune_ui/picker/list.rs` cleanly; `src/parakeet.rs` already conflicted, and `dev` no longer has
-`record_history` there (its row says where the hook goes).
+Merging v3.5.0 moved these hooks: `handle_hotkey_action` went from `src/recognition.rs` to
+`src/recognition/capture_actions.rs`, `record_history` from `src/parakeet.rs` to
+`src/dictation/modes/output.rs`, and the Output pane lost its Try card, so 轉換選項 now follows Every
+dictation. Words on screen and Rewrite reads nearby text added `screen_terms`, `caret_text`, and
+`bundle_name` where the fork adds `fork_screen_text`; the fork's field stays after them. v3.5.0 includes
+anomalyco/hex#1734, so the fork no longer carries it in `crates/capture/build.rs`.
 
 ## Fork-only files
 
@@ -185,7 +178,7 @@ so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same
   (`crates/capture/src/speech_model.rs`) and Apple's live-transcription experiment
   (`crates/capture/src/live_transcribe.rs`), which run outside these transcribers; neither runs with
   `capture.transcriber = parakeet`.
-- Meetings: every chunk converts as the track accepts it, so the in-call draft, Copy new and ⌥⌃V, the final
+- Meetings: every chunk converts as the track accepts it, so the in-call draft, the final
   transcript, its Markdown, and `hex meetings` read converted text. Generated titles, summaries, and chapters
   convert in the shared cleaners, whichever writer produced them. A title the user typed, calendar names,
   hand-edited notes, links, and exported files are left alone.
@@ -195,7 +188,7 @@ so identifiers, the Cantonese particle `吓`, and Taiwan forms come out the same
 
 Mac only. A meeting that starts while Dropline is selected sends its audio to Dropline in segments while it
 records, and the final transcript takes Dropline's words where they line up with the local transcript. The
-in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/meeting.rs` runs it;
+in-call draft stays local (ADR-0003; upstream removed Copy new and ⌥⌃V in v3.5.0). `src/fork/dropline/meeting.rs` runs it;
 `fork/docs/adr/` has the decisions.
 
 - Start: the selection, the token endpoint, the bearer, and the vocabulary are read once, when the meeting
@@ -380,25 +373,14 @@ does what Derek's `hex-screen-ocr` LaunchAgent did from another process through
   on a background thread; the helper once saw 43 s for a first read after a restart. The model then stays
   in Hex's memory.
 - Screen text never reaches speech recognition or Dropline. Dropline's prompt is Hex's vocabulary
-  (`vocabulary::terms()`), which the read never touches. When upstream's Words on screen (Labs,
-  `screen-vocabulary`, on `dev`) reaches a release, check that its terms stay out of `vocabulary::terms()`
-  too, or Dropline's prompt would carry them.
-
-A trial merge of upstream `dev` (`a394af280`) conflicts in five of the hook files. In
-`src/recognition/context_watch.rs`, Words on screen and Rewrite reads nearby text add `screen` and `caret`
-fields and split `finish` into `finish` and `finish_snapshot` the same way: keep both sides' fields, and
-in `finish` take `self.screen_text.finish()` before `finish_snapshot` and set `fork_screen_text` beside
-`screen_terms`. In `src/dictation/context.rs`, `src/dictation/processor.rs`, and `src/meeting/detection.rs`,
-`dev` adds `screen_terms`, `caret_text`, and `bundle_name` where the fork adds `fork_screen_text`: keep
-both. `dev` moves `handle_hotkey_action` from `src/recognition.rs` to `src/recognition/capture_actions.rs`:
-take `dev`'s `recognition.rs` and put `context.screen_text.raw(raw)` back after `context.begin()` there
-(the Dropline `prepare()` hook moves with it). `build.rs`, `src/personal_commands.rs`, and `hex.d.ts`
-merge cleanly.
+  (`vocabulary::terms()`), which the read never touches. Upstream's Words on screen (Labs, from v3.5.0)
+  keeps its terms in a per-capture slot that `vocabulary::for_capture` sets around the local model's run,
+  so they stay out of `vocabulary::terms()` and out of Dropline's prompt too.
 
 ## Output switches
 
 The Mac app's Output pane ends its Global steps with a 轉換選項 section (`src/rune_ui/fork_output.rs`), below
-Try, holding two switches:
+Every dictation, holding two switches:
 
 - 讀取螢幕文字 turns screen text off and on. It is saved as `{"enabled": false}` in `fork/screen-text.json`
   in the data folder's owner-only `fork` folder (`HEX_APPLICATION_SUPPORT_DIR` moves it with the data

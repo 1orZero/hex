@@ -2,12 +2,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
+mod detector;
+pub use detector::{MeetingDetector, OfferId};
+
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::app_settings::{
     KNOWN_MEETING_PROVIDERS, MORE_MEETING_PROVIDERS, MeetingPolicy, MeetingProviderChoice,
 };
+use crate::dictation::browser_page::BrowserPages;
 use crate::dictation::context::ContextSnapshot;
 use crate::microphone_activity::ActiveMicrophoneApplication;
 
@@ -33,25 +37,29 @@ const DROPOUT_GRACE: Duration = Duration::from_secs(2);
 const BROWSER_PAGE_MEMORY: Duration = Duration::from_secs(60);
 
 /// Websites whose pages are calls whenever a browser holds the microphone on
-/// them. Google Meet is separate: only its meeting paths are calls.
-const CALL_SITES: [(&str, MeetingSource); 4] = [
+/// them. Google Meet is separate: only its meeting paths are calls. Teams
+/// pages are the Microsoft Teams app's service, so they carry its provider
+/// key rather than one of their own (see [`provider_key_for_site`]).
+const CALL_SITES: [(&str, MeetingSource); 7] = [
     ("banshee.app", MeetingSource::Banshee),
     ("web.whatsapp.com", MeetingSource::WhatsApp),
     ("app.v2.gather.town", MeetingSource::Gather),
     ("app.gather.town", MeetingSource::Gather),
+    ("teams.microsoft.com", MeetingSource::Teams),
+    ("teams.cloud.microsoft", MeetingSource::Teams),
+    ("teams.live.com", MeetingSource::Teams),
 ];
 
-/// The websites Labs › More call apps names, with the label an offer's "…"
-/// saves as that site's provider. Teams and FaceTime pages have their own
-/// choice, shown apart from the apps' names.
-const MORE_CALL_SITES: [(&str, MeetingSource, &str); 5] = [
+/// The other call websites Hex names, with the label an offer's "…"
+/// saves as that site's provider. FaceTime pages have their own choice,
+/// shown apart from the app's name.
+const MORE_CALL_SITES: [(&str, MeetingSource, &str); 4] = [
     (
         "voice.google.com",
         MeetingSource::GoogleVoice,
         "Google Voice",
     ),
     ("messenger.com", MeetingSource::Messenger, "Messenger"),
-    ("teams.live.com", MeetingSource::Teams, "Teams (web)"),
     (
         "facetime.apple.com",
         MeetingSource::FaceTime,
@@ -109,7 +117,7 @@ pub struct MeetingCandidate {
     pub call: Option<String>,
 }
 
-fn known_provider_label(key: &str, more_call_apps: bool) -> Option<&'static str> {
+fn known_provider_label(key: &str) -> Option<&'static str> {
     KNOWN_MEETING_PROVIDERS
         .iter()
         .find(|(known, _)| *known == key)
@@ -121,27 +129,36 @@ fn known_provider_label(key: &str, more_call_apps: bool) -> Option<&'static str>
                 .map(|(_, source)| source.label())
         })
         .or_else(|| {
-            // Labs › More call apps' app and page names, off, leave their keys
-            // labelled by the raw bundle id or host, exactly as before.
-            if !more_call_apps {
-                return None;
-            }
             MORE_MEETING_PROVIDERS
                 .iter()
                 .find(|(known, _)| *known == key)
                 .map(|(_, label)| *label)
-                .or_else(|| {
-                    MORE_CALL_SITES
-                        .iter()
-                        .find(|(host, _, _)| *host == key)
-                        .map(|(_, _, label)| *label)
-                })
-                .or_else(|| is_webex_host(key).then_some(MeetingSource::Webex.label()))
         })
+        .or_else(|| {
+            MORE_CALL_SITES
+                .iter()
+                .find(|(host, _, _)| *host == key)
+                .map(|(_, _, label)| *label)
+        })
+        .or_else(|| is_webex_host(key).then_some(MeetingSource::Webex.label()))
 }
 
-/// A website or app whose calls share one Ask / Always record / Never offer
-/// choice.
+/// The provider key a website's calls use. Teams pages are the Microsoft
+/// Teams app's own service, so the app's choice covers them instead of a
+/// separate row per website host.
+pub(crate) fn provider_key_for_site(host: &str) -> &str {
+    if matches!(
+        host,
+        "teams.microsoft.com" | "teams.cloud.microsoft" | "teams.live.com"
+    ) {
+        "com.microsoft.teams2"
+    } else {
+        host
+    }
+}
+
+/// A website or app whose calls share one answer (Ask each time, Record
+/// automatically, or Don't offer).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeetingProvider {
     pub key: String,
@@ -224,8 +241,8 @@ impl MeetingCandidate {
         }
         match self.source {
             MeetingSource::BrowserCall => match (&self.site, &self.application_name) {
-                (Some(site), _) => format!("Call on {site}"),
-                (None, Some(application)) => format!("Call in {application}"),
+                (Some(site), _) => format!("{site} call detected"),
+                (None, Some(application)) => format!("{application} call detected"),
                 (None, None) => "Call detected".into(),
             },
             MeetingSource::SlackHuddle => "Slack huddle detected".into(),
@@ -233,13 +250,14 @@ impl MeetingCandidate {
         }
     }
 
-    /// Whose call this is, for the user's Ask / Always record / Never offer
-    /// choice: the website when known, else the app. Known services use the
-    /// name Settings lists them under; `more_call_apps` is Labs › More call
-    /// apps, whose names are unknown while it is off.
-    pub fn provider(&self, more_call_apps: bool) -> Option<MeetingProvider> {
-        let key = self.site.clone().or_else(|| self.application.clone())?;
-        let label = known_provider_label(&key, more_call_apps)
+    /// Whose call this is, for the user's answer: the website when known,
+    /// else the app. Known services use the
+    /// name Settings lists them under; a Teams page is the Teams app's
+    /// service, so it carries the app's key.
+    pub fn provider(&self) -> Option<MeetingProvider> {
+        let site = self.site.as_deref().map(provider_key_for_site);
+        let key = site.or(self.application.as_deref())?.to_string();
+        let label = known_provider_label(&key)
             .map(str::to_string)
             .or_else(|| self.site.clone())
             .or_else(|| self.application_name.clone())
@@ -247,16 +265,37 @@ impl MeetingCandidate {
         Some(MeetingProvider { key, label })
     }
 
-    /// Whether one click may set this provider to Always record: not for a
-    /// browser whose page is unknown, which would record every page.
-    pub fn can_always_record(&self, more_call_apps: bool) -> bool {
-        self.provider(more_call_apps).is_some()
+    /// Whether this call may record automatically: not for a browser whose
+    /// page is unknown, which would record every page.
+    pub fn can_always_record(&self) -> bool {
+        self.provider().is_some()
             && !(self.source == MeetingSource::BrowserCall && self.site.is_none())
     }
 
-    /// The user's choice for this call: the website's when it has one, else
-    /// the app's (a browser's choice covers its other sites), else Ask.
-    pub fn policy(&self, choices: &[MeetingProviderChoice]) -> MeetingPolicy {
+    /// Whether the call is on a website rather than in an app of its own.
+    pub fn on_web(&self) -> bool {
+        self.site.is_some()
+            || crate::microphone_activity::is_browser_id(self.application.as_deref())
+            || matches!(
+                self.source,
+                MeetingSource::BrowserCall | MeetingSource::GoogleMeet | MeetingSource::Banshee
+            )
+    }
+
+    /// The user's answer for this call, or `default` when it has none.
+    pub fn policy(
+        &self,
+        choices: &[MeetingProviderChoice],
+        default: MeetingPolicy,
+    ) -> MeetingPolicy {
+        self.own_policy(choices).unwrap_or(default)
+    }
+
+    /// The answer saved for this call: the website's when it has one, else
+    /// the app's (a browser's answer covers its other sites). A Teams page
+    /// keeps an answer other than Ask saved for its own earlier host key; an
+    /// Ask there no longer shadows the Teams app's answer.
+    fn own_policy(&self, choices: &[MeetingProviderChoice]) -> Option<MeetingPolicy> {
         let chosen = |key: Option<&str>| {
             let key = key?;
             choices
@@ -264,16 +303,25 @@ impl MeetingCandidate {
                 .find(|choice| choice.key == key)
                 .map(|choice| choice.policy)
         };
-        chosen(self.site.as_deref())
+        let raw = self.site.as_deref();
+        let site = raw.map(provider_key_for_site);
+        let legacy = if site == raw {
+            chosen(raw)
+        } else {
+            // Ask is stored as a real entry, so an older host row left on Ask
+            // must not shadow a newer choice under the mapped key.
+            chosen(raw).filter(|policy| *policy != MeetingPolicy::Ask)
+        };
+        legacy
+            .or_else(|| chosen(site))
             .or_else(|| chosen(self.application.as_deref()))
-            .unwrap_or_default()
     }
 
     fn required_stability(&self) -> Duration {
         match self.source {
             // WhatsApp also takes the microphone for voice notes (#835), and
             // Gather can hold it while you sit in a space (#855). So can the
-            // messaging apps Labs › More call apps adds, and Messenger and
+            // other messaging apps, and Messenger and
             // GroupMe send voice clips too.
             MeetingSource::BrowserCall
             | MeetingSource::WhatsApp
@@ -294,7 +342,11 @@ impl MeetingCandidate {
 /// microphone, so the user can choose to stop. It never stops anything.
 #[derive(Default)]
 pub struct CallPresence {
-    absent: Option<Run>,
+    /// When the current absence was first seen. Unlike a [`Run`], a gap
+    /// between observations never starts it over: a sleeping Mac can stall
+    /// the loop past [`MAX_OBSERVATION_GAP`], and the call is gone either way
+    /// (#2685).
+    absent_since: Option<Instant>,
     prompted: bool,
 }
 
@@ -306,12 +358,12 @@ impl CallPresence {
 
     fn observe_at(&mut self, present: bool, now: Instant) -> bool {
         if present {
-            self.absent = None;
+            self.absent_since = None;
             self.prompted = false;
             return false;
         }
-        let absent = self.absent.get_or_insert_with(|| Run::start(now));
-        if absent.extend(now) >= CALL_ENDED_AFTER && !self.prompted {
+        let since = *self.absent_since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= CALL_ENDED_AFTER && !self.prompted {
             self.prompted = true;
             return true;
         }
@@ -320,26 +372,43 @@ impl CallPresence {
 }
 
 /// How long an automatic recording keeps going after its call ended, under
-/// Labs › Stop when the call ends (#835).
+/// Stop when the call ends (#835).
 pub const AUTO_STOP_GRACE: Duration = Duration::from_secs(30);
 
-/// Labs › Stop when the call ends: the deadline at which a recording Hex
+/// How long a browser's page must name a different call before an automatic
+/// recording treats its own call as over: long enough that a tab previewed
+/// on the way to another one never stops anything.
+pub const CALL_CHANGED_AFTER: Duration = Duration::from_secs(4);
+
+/// How long detection keeps the call a page named just before a call-switch
+/// stop: the browser stays on the microphone, so a recording has to start
+/// that call well within this even though its reads still name the ended one.
+const SWITCHED_CALL_MEMORY: Duration = Duration::from_secs(120);
+
+/// Stop when the call ends: the deadline at which a recording Hex
 /// started on its own stops, armed when [`CallPresence`] reports the call
-/// ended and dropped when the call app comes back or the user keeps
-/// recording.
+/// ended (or [`CallSwitch`] reports another call's page) and dropped when the
+/// call app comes back or the user keeps recording.
 #[derive(Default)]
 pub struct AutoStop {
     deadline: Option<Instant>,
 }
 
 impl AutoStop {
-    /// The call ended: stop after the grace.
-    pub fn arm(&mut self) {
-        self.arm_at(Instant::now());
+    /// The call ended: stop after the grace. Returns when.
+    pub fn arm(&mut self) -> Instant {
+        self.arm_at(Instant::now())
     }
 
-    fn arm_at(&mut self, now: Instant) {
-        self.deadline = Some(now + AUTO_STOP_GRACE);
+    fn arm_at(&mut self, now: Instant) -> Instant {
+        let deadline = now + AUTO_STOP_GRACE;
+        self.deadline = Some(deadline);
+        deadline
+    }
+
+    /// Whether a stop is counting: armed, and its grace has not run out.
+    pub fn armed(&self) -> bool {
+        self.deadline.is_some()
     }
 
     /// The call app came back, the user kept recording, or the toggle is
@@ -362,6 +431,123 @@ impl AutoStop {
     }
 }
 
+/// A different call's code showing on a recording's browser page, and how
+/// long it has shown.
+struct ChangedCall {
+    code: String,
+    run: Run,
+    /// It already asked the controller to stop this recording; the same code
+    /// never asks twice.
+    reported: bool,
+}
+
+/// Stop when the call ends in a browser that never releases the
+/// microphone between calls (Arc, #1775): the call code the recording started
+/// with, and another code showing on the same browser's page for
+/// [`CALL_CHANGED_AFTER`], so one recording does not span two calls. It never
+/// stops anything; the watcher owns the grace.
+///
+/// The page read is the browser's active tab (with Automation), else the
+/// first call page found in any of its windows, so a tab that names no call
+/// (`None`) never ends a recording: only a page that positively names a
+/// different call does. `None` neither starts nor clears a run; the recorded
+/// code showing again does.
+#[derive(Default)]
+pub struct CallSwitch {
+    /// The call's code when its recording started; without one nothing is
+    /// watched.
+    recorded: Option<String>,
+    /// A different code showing since.
+    changed: Option<ChangedCall>,
+    /// A different code the user kept recording through: it never ends this
+    /// recording.
+    kept: Option<String>,
+}
+
+impl CallSwitch {
+    pub fn new(recorded: Option<String>) -> Self {
+        Self {
+            recorded,
+            ..Self::default()
+        }
+    }
+
+    /// A recording detected in place of another call's stopped one: the code
+    /// the page kept naming is already kept, so it never ends this recording.
+    pub fn with_kept(recorded: Option<String>, kept: Option<String>) -> Self {
+        Self {
+            kept,
+            ..Self::new(recorded)
+        }
+    }
+
+    /// The code the recording started with, when its page named one.
+    pub fn recorded(&self) -> Option<&str> {
+        self.recorded.as_deref()
+    }
+
+    /// Whether a different call's code is showing: its count is under way, or
+    /// it already asked to stop.
+    pub fn changed(&self) -> bool {
+        self.changed.is_some()
+    }
+
+    /// The page names `current` (the browser's call code: its active tab with
+    /// Automation, else the first call page found in any of its windows;
+    /// `None` when none names one): true once, when another code has shown for
+    /// [`CALL_CHANGED_AFTER`].
+    pub fn observe(&mut self, current: Option<&str>) -> bool {
+        self.observe_at(current, Instant::now())
+    }
+
+    /// [`Self::observe`] at `now`; the watcher's tests drive it on their own
+    /// clock.
+    pub(crate) fn observe_at(&mut self, current: Option<&str>, now: Instant) -> bool {
+        let Some(current) = current else {
+            return false;
+        };
+        let Some(recorded) = self.recorded.as_deref() else {
+            return false;
+        };
+        if current == recorded || self.kept.as_deref() == Some(current) {
+            self.changed = None;
+            return false;
+        }
+        if self
+            .changed
+            .as_ref()
+            .is_none_or(|changed| changed.code != current)
+        {
+            self.changed = Some(ChangedCall {
+                code: current.to_string(),
+                run: Run::start(now),
+                reported: false,
+            });
+        }
+        let Some(changed) = self.changed.as_mut() else {
+            return false;
+        };
+        if changed.reported {
+            return false;
+        }
+        if changed.run.extend(now) >= CALL_CHANGED_AFTER {
+            changed.reported = true;
+            return true;
+        }
+        false
+    }
+
+    /// Keep recording: the different code showing now never ends this
+    /// recording, however long it stays. Called with nothing counting (the
+    /// capsule's Keep recording after a microphone release), it forgets
+    /// nothing: an earlier kept code still never ends this recording.
+    pub fn keep(&mut self) {
+        if let Some(changed) = self.changed.take() {
+            self.kept = Some(changed.code);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingSource {
@@ -376,8 +562,8 @@ pub enum MeetingSource {
     Gather,
     Discord,
     BrowserCall,
-    // Labs › More call apps; after `BrowserCall` so its generated key stays
-    // the same as before the lab existed.
+    // After `BrowserCall` so its generated key stays the same as before
+    // these were added.
     Signal,
     Telegram,
     WeChat,
@@ -398,7 +584,7 @@ impl MeetingSource {
             Self::Banshee => "Banshee",
             Self::Zoom => "Zoom",
             Self::Teams => "Microsoft Teams",
-            Self::SlackHuddle => "Slack Huddle",
+            Self::SlackHuddle => "Slack huddle",
             Self::FaceTime => "FaceTime",
             Self::WhatsApp => "WhatsApp",
             Self::Gather => "Gather",
@@ -418,282 +604,8 @@ impl MeetingSource {
     }
 }
 
-#[derive(Default)]
-pub struct MeetingDetector {
-    pending: Option<Pending>,
-    offered: Option<String>,
-    offered_application: Option<String>,
-    /// The offered call's meeting code, when its page named one: another
-    /// code in the same app is a different call, not this one returning.
-    offered_call: Option<String>,
-    /// The offered call's recording was stopped by hand: the snooze ends
-    /// once its app has been off the microphone for [`CALL_ENDED_AFTER`],
-    /// not a minute, so the next call is offered (#1113).
-    stopped: bool,
-    /// The offer's capsule closed on its timeout without an answer: the
-    /// snooze ends as soon as the call app leaves the microphone, so a call
-    /// joined after its pre-join screen is offered again (#1267).
-    timed_out: bool,
-    /// When a candidate was last on the microphone (or known to be, while
-    /// recording); absence is counted from here, gaps included.
-    last_present: Option<Instant>,
-    calendar: Option<CalendarSnooze>,
-}
-
-/// A candidate that has been on the microphone but is not yet stable.
-struct Pending {
-    key: String,
-    application: Option<String>,
-    /// A browser call whose page is not known (yet).
-    unresolved: bool,
-    run: Run,
-}
-
-/// A call the user already answered a calendar reminder for: recorded it,
-/// or dismissed it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CalendarSnooze {
-    /// App bundle IDs and website hosts of the meeting's call service;
-    /// empty when the invitation had no call link, which covers the next
-    /// call alone.
-    keys: Vec<String>,
-    /// When the snooze lapses, in wall-clock milliseconds: the meeting's
-    /// end, or shortly after its start when it has no call link.
-    until_ms: i64,
-}
-
-impl CalendarSnooze {
-    fn covers(&self, candidate: &MeetingCandidate) -> bool {
-        self.keys.is_empty()
-            || [candidate.site.as_deref(), candidate.application.as_deref()]
-                .into_iter()
-                .flatten()
-                .any(|key| {
-                    self.keys
-                        .iter()
-                        .any(|known| crate::calendar::key_matches(key, known))
-                })
-    }
-}
-
-impl MeetingDetector {
-    /// A calendar reminder was answered: its call, when detected before
-    /// `until_ms`, is treated as already offered. `keys` names the call
-    /// service; empty covers the next call detected.
-    pub fn snooze_calendar_call(&mut self, keys: Vec<String>, until_ms: i64) {
-        self.calendar = Some(CalendarSnooze { keys, until_ms });
-    }
-
-    /// The call that was offered is still on the microphone, as a running
-    /// recording's call app is: its snooze must last from now, not from the
-    /// last detection pass.
-    pub fn keep_snooze_alive(&mut self) {
-        self.keep_snooze_alive_at(Instant::now());
-    }
-
-    fn keep_snooze_alive_at(&mut self, now: Instant) {
-        self.last_present = Some(now);
-    }
-
-    /// The snoozed call's recording was stopped by hand.
-    pub fn recording_stopped(&mut self) {
-        if self.offered.is_some() {
-            self.stopped = true;
-        }
-    }
-
-    /// The offer's capsule closed on its timeout, unanswered.
-    pub fn offer_timed_out(&mut self) {
-        if self.offered.is_some() {
-            self.timed_out = true;
-        }
-    }
-
-    /// Whether the call app is on the microphone, seen while a recording is
-    /// transcribing and detection doesn't run: an absence then still ends
-    /// the snooze.
-    pub fn observe_call_app(&mut self, present: bool) {
-        self.observe_call_app_at(present, Instant::now());
-    }
-
-    fn observe_call_app_at(&mut self, present: bool, now: Instant) {
-        if present {
-            self.last_present = Some(now);
-        } else {
-            self.absent_at(now);
-        }
-    }
-
-    /// Whether the app is snoozed whatever page it shows, so its tabs need
-    /// not be read. A snoozed call with a meeting code isn't: the page can
-    /// show a different call.
-    pub fn is_application_snoozed(&self, canonical_bundle_id: &str) -> bool {
-        self.offered_application.as_deref() == Some(canonical_bundle_id)
-            && self.offered_call.is_none()
-    }
-
-    /// Whether `candidate` is the offered call: the same key, or the same
-    /// app unless both name different meeting codes.
-    fn snoozes(&self, candidate: &MeetingCandidate) -> bool {
-        if self.offered.as_deref() == Some(&candidate.key) {
-            return true;
-        }
-        candidate.application.is_some()
-            && self.offered_application == candidate.application
-            && !(self.offered_call.is_some()
-                && candidate.call.is_some()
-                && self.offered_call != candidate.call)
-    }
-
-    /// No candidate is on the microphone: the snooze ends once that has
-    /// lasted long enough.
-    fn absent_at(&mut self, now: Instant) {
-        let since = *self.last_present.get_or_insert(now);
-        if self.timed_out {
-            self.offered = None;
-            self.offered_application = None;
-            self.offered_call = None;
-            self.stopped = false;
-            self.timed_out = false;
-            return;
-        }
-        let reset_after = if self.stopped {
-            CALL_ENDED_AFTER
-        } else {
-            ABSENT_FOR_RESET
-        };
-        if now.saturating_duration_since(since) >= reset_after {
-            self.offered = None;
-            self.offered_application = None;
-            self.offered_call = None;
-            self.stopped = false;
-            self.timed_out = false;
-        }
-    }
-
-    /// One observation under the user's choices. A Never offer call shows
-    /// nothing but still counts as present; Always record ones pass the same
-    /// stability time and snooze as an offer, so a stopped or dismissed call
-    /// never starts again until its app leaves the microphone.
-    pub fn detect(
-        &mut self,
-        candidate: Option<MeetingCandidate>,
-        choices: &[MeetingProviderChoice],
-    ) -> Option<Detection> {
-        self.detect_at(
-            candidate,
-            choices,
-            Instant::now(),
-            crate::calendar::wall_clock_ms(),
-        )
-    }
-
-    fn detect_at(
-        &mut self,
-        candidate: Option<MeetingCandidate>,
-        choices: &[MeetingProviderChoice],
-        now: Instant,
-        now_ms: i64,
-    ) -> Option<Detection> {
-        if candidate
-            .as_ref()
-            .is_some_and(|candidate| candidate.policy(choices) == MeetingPolicy::NeverOffer)
-        {
-            // Still on the microphone: an earlier offer stays snoozed.
-            self.pending = None;
-            self.last_present = Some(now);
-            return None;
-        }
-        let candidate = self.observe_at(candidate, now, now_ms)?;
-        Some(match candidate.policy(choices) {
-            MeetingPolicy::AlwaysRecord => Detection::Record(candidate),
-            _ => Detection::Offer(candidate),
-        })
-    }
-
-    fn observe_at(
-        &mut self,
-        candidate: Option<MeetingCandidate>,
-        now: Instant,
-        now_ms: i64,
-    ) -> Option<MeetingCandidate> {
-        let Some(candidate) = candidate else {
-            if self.pending.as_ref().is_some_and(|pending| {
-                now.saturating_duration_since(pending.run.last) > DROPOUT_GRACE
-            }) {
-                self.pending = None;
-            }
-            self.absent_at(now);
-            return None;
-        };
-        self.last_present = Some(now);
-        if self.snoozes(&candidate) {
-            self.pending = None;
-            return None;
-        }
-        let unresolved = candidate.source == MeetingSource::BrowserCall && candidate.site.is_none();
-        let held = match &mut self.pending {
-            Some(pending) if pending.key == candidate.key => pending.run.extend(now),
-            // The browser's page was found: the same browser has been on the
-            // microphone all along, so the run carries over.
-            Some(pending)
-                if pending.unresolved
-                    && candidate.site.is_some()
-                    && pending.application.is_some()
-                    && pending.application == candidate.application =>
-            {
-                pending.key = candidate.key.clone();
-                pending.unresolved = unresolved;
-                pending.run.extend(now)
-            }
-            _ => {
-                self.pending = Some(Pending {
-                    key: candidate.key.clone(),
-                    application: candidate.application.clone(),
-                    unresolved,
-                    run: Run::start(now),
-                });
-                Duration::ZERO
-            }
-        };
-        if held < candidate.required_stability() {
-            return None;
-        }
-        self.pending = None;
-        self.offered = Some(candidate.key.clone());
-        self.offered_application = candidate.application.clone();
-        self.offered_call = candidate.call.clone();
-        self.stopped = false;
-        self.timed_out = false;
-        if self
-            .calendar
-            .as_ref()
-            .is_some_and(|snooze| now_ms >= snooze.until_ms)
-        {
-            self.calendar = None;
-        }
-        if let Some(snooze) = &self.calendar
-            && snooze.covers(&candidate)
-        {
-            tracing::info!(
-                source = candidate.source.label(),
-                "detected call already answered from its calendar reminder"
-            );
-            if snooze.keys.is_empty() {
-                self.calendar = None;
-            }
-            return None;
-        }
-        Some(candidate)
-    }
-}
-
-/// The call `context` describes. `more_call_apps` is Labs › More call apps:
-/// off, the extra websites are unknown pages.
-pub fn candidate_from_context(
-    context: &ContextSnapshot,
-    more_call_apps: bool,
-) -> Option<MeetingCandidate> {
+/// The call `context` describes.
+pub fn candidate_from_context(context: &ContextSnapshot) -> Option<MeetingCandidate> {
     let application = context.application.as_deref()?;
     let application_lower = application.to_ascii_lowercase();
     let title = context.window_title.as_deref().unwrap_or("").trim();
@@ -728,9 +640,9 @@ pub fn candidate_from_context(
     }
     if is_browser_application(&application_lower)
         && let Some(host) = context.browser_host()
-        && let Some(source) = call_site_source(host, more_call_apps)
+        && let Some(source) = call_site_source(host)
     {
-        return Some(candidate(source, &call_site_host(host, more_call_apps), ""));
+        return Some(candidate(source, &call_site_host(host), ""));
     }
     if application_lower.contains("zoom")
         && (title_lower.contains("meeting") || title_lower.contains("webinar"))
@@ -759,7 +671,6 @@ fn named(mut candidate: MeetingCandidate) -> MeetingCandidate {
 pub fn candidate_from_microphone(
     application: &ActiveMicrophoneApplication,
     context: &ContextSnapshot,
-    more_call_apps: bool,
 ) -> Option<MeetingCandidate> {
     let canonical_bundle = application.canonical_bundle_id()?;
     let application_name = crate::microphone_activity::canonical_application_name(canonical_bundle)
@@ -770,8 +681,8 @@ pub fn candidate_from_microphone(
         let site = matches
             .then(|| context.browser_host())
             .flatten()
-            .map(|host| call_site_host(host, more_call_apps));
-        if matches && let Some(mut candidate) = candidate_from_context(context, more_call_apps) {
+            .map(call_site_host);
+        if matches && let Some(mut candidate) = candidate_from_context(context) {
             candidate.application = Some(canonical_bundle.into());
             candidate.application_name = Some(application_name);
             candidate.site = site.or(candidate.site.take());
@@ -791,8 +702,7 @@ pub fn candidate_from_microphone(
         "net.whatsapp.WhatsApp" => (MeetingSource::WhatsApp, "WhatsApp call"),
         "com.gather.GatherV2" => (MeetingSource::Gather, "Gather call"),
         "com.hnc.Discord" => (MeetingSource::Discord, "Discord call"),
-        _ if more_call_apps => more_call_app(canonical_bundle)?,
-        _ => return None,
+        _ => more_call_app(canonical_bundle)?,
     };
     let mut candidate = candidate(source, canonical_bundle, title);
     candidate.application = Some(canonical_bundle.into());
@@ -800,7 +710,7 @@ pub fn candidate_from_microphone(
     Some(candidate)
 }
 
-/// The apps Labs › More call apps adds, and the title each call gets.
+/// The other call apps Hex knows, and the title each call gets.
 fn more_call_app(canonical_bundle: &str) -> Option<(MeetingSource, &'static str)> {
     Some(match canonical_bundle {
         "org.whispersystems.signal-desktop" => (MeetingSource::Signal, "Signal call"),
@@ -815,11 +725,10 @@ fn more_call_app(canonical_bundle: &str) -> Option<(MeetingSource, &'static str)
 }
 
 /// A website host as a site key: lowercase, without `www.`, and a Webex
-/// subdomain as `webex.com` while Labs › More call apps is on, so one choice
-/// covers every Webex page.
-fn call_site_host(host: &str, more_call_apps: bool) -> String {
+/// subdomain as `webex.com`, so one choice covers every Webex page.
+fn call_site_host(host: &str) -> String {
     let host = site_host(host);
-    if more_call_apps && is_webex_host(&host) {
+    if is_webex_host(&host) {
         "webex.com".into()
     } else {
         host
@@ -839,14 +748,11 @@ fn site_host(host: &str) -> String {
 }
 
 /// The call service a browser page on `host` belongs to, if it is a known
-/// call site and, for the extra sites, Labs › More call apps is on.
-fn call_site_source(host: &str, more_call_apps: bool) -> Option<MeetingSource> {
+/// call site.
+fn call_site_source(host: &str) -> Option<MeetingSource> {
     let host = site_host(host);
     if let Some((_, source)) = CALL_SITES.iter().find(|(known, _)| *known == host) {
         return Some(*source);
-    }
-    if !more_call_apps {
-        return None;
     }
     if is_webex_host(&host) {
         return Some(MeetingSource::Webex);
@@ -906,11 +812,17 @@ impl BrowserPageMemory {
 }
 
 fn is_browser_application(application_lower: &str) -> bool {
-    // Arc's name is too short to match as a substring.
+    // Arc's, Aside's, and Zen's names are too short or too common to match as
+    // a substring: `Citizen`, `Seaside`, and `Zendesk` are not browsers.
     application_lower == "arc"
-        || ["brave", "chrome", "safari", "firefox", "edge", "vivaldi"]
-            .iter()
-            .any(|browser| application_lower.contains(browser))
+        || application_lower == "aside"
+        || application_lower == "zen"
+        || application_lower.starts_with("zen ")
+        || [
+            "brave", "chrome", "safari", "firefox", "edge", "vivaldi", "helium", "ardia",
+        ]
+        .iter()
+        .any(|browser| application_lower.contains(browser))
 }
 
 fn context_matches_browser(
@@ -932,7 +844,11 @@ fn context_matches_browser(
         "org.mozilla.firefox" => lower.contains("firefox"),
         "com.microsoft.edgemac" => lower.contains("edge"),
         "company.thebrowser.Browser" => lower == "arc",
+        "at.studio.AsideBrowser" => lower == "aside",
         "com.vivaldi.Vivaldi" => lower.contains("vivaldi"),
+        "net.imput.helium" => lower.contains("helium"),
+        "com.ardia.browser" => lower.contains("ardia"),
+        "app.zen-browser.zen" => lower == "zen" || lower.starts_with("zen "),
         _ => false,
     }
 }
@@ -961,19 +877,43 @@ fn opaque_key(source: MeetingSource, identity: &str) -> String {
     format!("meeting-{:016x}", hasher.finish())
 }
 
+/// The page that names the call a browser shows, from every page its windows
+/// expose: the first address that names a call, else the first address, and a
+/// title that names a call outranks another window's address. Windows makes
+/// this choice over its browsers' UI Automation pages; macOS makes the same
+/// one over its Accessibility pages.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub fn call_page(pages: &BrowserPages) -> (Option<Url>, Option<String>) {
+    let (url, title) = crate::dictation::browser_page::choose(
+        pages,
+        |url| web_url(url).is_some_and(|url| names_call(&url)),
+        title_names_call,
+    );
+    let title_names_call = title.as_deref().is_some_and(title_names_call);
+    let url = url
+        .as_deref()
+        .and_then(web_url)
+        .filter(|url| names_call(url) || !title_names_call);
+    (url, title)
+}
+
+/// An http(s) page address.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn web_url(url: &str) -> Option<Url> {
+    Url::parse(url)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 /// Whether a page address is a call this detection knows: a Google Meet
-/// call, a known call site, or with `more_call_apps`, one of the extra sites.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn names_call(url: &Url, more_call_apps: bool) -> bool {
-    is_google_meet_call(url)
-        || url
-            .host_str()
-            .and_then(|host| call_site_source(host, more_call_apps))
-            .is_some()
+/// call or another known call site.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub fn names_call(url: &Url) -> bool {
+    is_google_meet_call(url) || url.host_str().and_then(call_site_source).is_some()
 }
 
 /// Whether a browser tab's title names a call (a Google Meet call's).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub fn title_names_call(title: &str) -> bool {
     is_google_meet_call_title(title)
 }
@@ -988,7 +928,7 @@ fn is_google_meet_call(url: &Url) -> bool {
 
 const GOOGLE_MEET_SITE: &str = "meet.google.com";
 
-const BROWSER_TITLE_SUFFIXES: &[&str] = &[
+pub(crate) const BROWSER_TITLE_SUFFIXES: &[&str] = &[
     " - Audio playing - Brave",
     " - Brave",
     " - Brave Browser",
@@ -997,7 +937,14 @@ const BROWSER_TITLE_SUFFIXES: &[&str] = &[
     " - Microsoft Edge",
     " - Safari",
     " - Arc",
+    " - Aside",
     " - Vivaldi",
+    " - Helium",
+    " - Ardia",
+    // Zen is Firefox-based: titles are `<page> — <brandFullName>` on Windows
+    // and Linux, with no brand suffix on macOS.
+    " — Zen Browser",
+    " — Zen Twilight",
 ];
 
 const GOOGLE_MEET_TITLE_PREFIXES: [&str; 3] = ["Meet - ", "Meet – ", "Meet — "];
@@ -1074,7 +1021,7 @@ fn is_google_meet_code(value: &str) -> bool {
             .all(|part| part.bytes().all(|byte| byte.is_ascii_lowercase()))
 }
 
-fn clean_title<'a>(title: &'a str, suffixes: &[&str]) -> &'a str {
+pub(crate) fn clean_title<'a>(title: &'a str, suffixes: &[&str]) -> &'a str {
     suffixes
         .iter()
         .find_map(|suffix| title.strip_suffix(suffix))
@@ -1085,19 +1032,7 @@ fn clean_title<'a>(title: &'a str, suffixes: &[&str]) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// These tests judge calls with Labs › More call apps off; the lab's own
-    /// tests call `super::candidate_from_*` with the switch on.
-    fn candidate_from_context(context: &ContextSnapshot) -> Option<MeetingCandidate> {
-        super::candidate_from_context(context, false)
-    }
-
-    fn candidate_from_microphone(
-        application: &ActiveMicrophoneApplication,
-        context: &ContextSnapshot,
-    ) -> Option<MeetingCandidate> {
-        super::candidate_from_microphone(application, context, false)
-    }
+    use crate::meeting::window_title::normalize_window_title;
 
     fn context(application: &str, url: Option<&str>, title: &str) -> ContextSnapshot {
         ContextSnapshot {
@@ -1105,6 +1040,9 @@ mod tests {
             browser_url: url.map(|url| Url::parse(url).unwrap()),
             window_title: Some(title.into()),
             input_revision: None,
+            screen_terms: Vec::new(),
+            caret_text: None,
+            bundle_name: None,
             #[cfg(target_os = "macos")]
             fork_screen_text: Default::default(),
         }
@@ -1118,6 +1056,8 @@ mod tests {
         base: Instant,
         elapsed_ms: u64,
         wall_ms: i64,
+        /// The answer for calls without their own.
+        default: MeetingPolicy,
     }
 
     impl Watch {
@@ -1127,6 +1067,7 @@ mod tests {
                 base: Instant::now(),
                 elapsed_ms: 0,
                 wall_ms: 0,
+                default: MeetingPolicy::Ask,
             }
         }
 
@@ -1143,10 +1084,13 @@ mod tests {
             let end = self.elapsed_ms + ms;
             while self.elapsed_ms < end {
                 let now = self.base + Duration::from_millis(self.elapsed_ms);
-                if let Some(detection) =
-                    self.detector
-                        .detect_at(candidate.cloned(), choices, now, self.wall_ms)
-                {
+                if let Some(detection) = self.detector.detect_at(
+                    candidate.cloned(),
+                    choices,
+                    self.default,
+                    now,
+                    self.wall_ms,
+                ) {
                     found.push((self.elapsed_ms, detection));
                 }
                 self.elapsed_ms += step_ms;
@@ -1166,6 +1110,17 @@ mod tests {
         /// Time passes with no observation, as when the Mac sleeps.
         fn skip(&mut self, ms: u64) {
             self.elapsed_ms += ms;
+        }
+
+        /// The detector's clock, as `detect_at` sees it.
+        fn now(&self) -> Instant {
+            self.base + Duration::from_millis(self.elapsed_ms)
+        }
+
+        /// The page named `candidate` just before a call-switch stop.
+        fn switch_to(&mut self, ended: Option<String>, candidate: MeetingCandidate) {
+            let now = self.now();
+            self.detector.call_switched_at(ended, candidate, now);
         }
 
         /// Observes until the candidate has been stable for just under its
@@ -1267,10 +1222,7 @@ mod tests {
                     .unwrap();
             assert_eq!(web.source, MeetingSource::Gather, "{url}");
         }
-        assert_eq!(
-            known_provider_label("com.gather.GatherV2", false),
-            Some("Gather")
-        );
+        assert_eq!(known_provider_label("com.gather.GatherV2"), Some("Gather"));
     }
 
     #[test]
@@ -1300,10 +1252,7 @@ mod tests {
             assert_eq!(call.application.as_deref(), Some("com.hnc.Discord"));
             assert_eq!(call.required_stability(), STABLE_FOR);
         }
-        assert_eq!(
-            known_provider_label("com.hnc.Discord", false),
-            Some("Discord")
-        );
+        assert_eq!(known_provider_label("com.hnc.Discord"), Some("Discord"));
     }
 
     #[test]
@@ -1343,84 +1292,13 @@ mod tests {
         assert_eq!(web.source, MeetingSource::WhatsApp);
         assert_eq!(web.required_stability(), BROWSER_STABLE_FOR);
         assert_eq!(
-            known_provider_label("net.whatsapp.WhatsApp", false),
+            known_provider_label("net.whatsapp.WhatsApp"),
             Some("WhatsApp")
         );
     }
 
     #[test]
-    fn more_call_apps_are_unknown_until_their_lab_is_on() {
-        for bundle_id in [
-            "org.whispersystems.signal-desktop",
-            "org.whispersystems.signal-desktop.helper",
-            "ru.keepcoder.Telegram",
-            "com.tdesktop.Telegram",
-            "org.telegram.desktop",
-            "com.tencent.xinWeChat",
-            "jp.naver.line.mac",
-            "im.riot.app",
-            "com.webex.meetingmanager",
-            "com.apple.mobilephone",
-        ] {
-            let app = ActiveMicrophoneApplication {
-                pid: 7,
-                bundle_id: bundle_id.into(),
-                name: "Signal".into(),
-            };
-            assert_eq!(
-                candidate_from_microphone(&app, &ContextSnapshot::default()),
-                None,
-                "{bundle_id} is only a call app with its lab on"
-            );
-        }
-        // Off, the page is an unknown browser page: a plain "Browser call".
-        let page = context(
-            "Brave Browser",
-            Some("https://voice.google.com/u/0/calls"),
-            "Google Voice",
-        );
-        let call = candidate_from_microphone(&brave(), &page).unwrap();
-        assert_eq!(call.source, MeetingSource::BrowserCall);
-        assert_eq!(call.site.as_deref(), Some("voice.google.com"));
-        assert_eq!(call.offer_title(), "Call on voice.google.com");
-        assert_eq!(
-            call.provider(false).unwrap().label,
-            "voice.google.com",
-            "off, the provider is still the host"
-        );
-
-        // A Webex page's provider is its own host too.
-        let webex_page = context(
-            "Brave Browser",
-            Some("https://meetings.webex.com/mw"),
-            "Webex",
-        );
-        let webex = candidate_from_microphone(&brave(), &webex_page).unwrap();
-        assert_eq!(webex.source, MeetingSource::BrowserCall);
-        assert_eq!(webex.site.as_deref(), Some("meetings.webex.com"));
-        assert_eq!(
-            webex.provider(false).unwrap().label,
-            "meetings.webex.com",
-            "off, a Webex page is not named"
-        );
-
-        // On, the lab names them.
-        assert_eq!(
-            super::candidate_from_microphone(&brave(), &page, true)
-                .unwrap()
-                .provider(true)
-                .unwrap()
-                .label,
-            "Google Voice"
-        );
-        let webex = super::candidate_from_microphone(&brave(), &webex_page, true).unwrap();
-        let provider = webex.provider(true).unwrap();
-        assert_eq!(provider.key, "webex.com");
-        assert_eq!(provider.label, "Webex");
-    }
-
-    #[test]
-    fn more_call_apps_names_its_apps_and_websites_with_their_lab_on() {
+    fn more_call_apps_are_named_with_their_websites() {
         for (bundle_id, source, canonical, title, stability) in [
             (
                 "org.whispersystems.signal-desktop",
@@ -1505,8 +1383,8 @@ mod tests {
                 bundle_id: bundle_id.into(),
                 name: "Call".into(),
             };
-            let call = super::candidate_from_microphone(&app, &ContextSnapshot::default(), true)
-                .unwrap_or_else(|| panic!("{bundle_id} is a call app with the lab on"));
+            let call = candidate_from_microphone(&app, &ContextSnapshot::default())
+                .unwrap_or_else(|| panic!("{bundle_id} is a call app"));
             assert_eq!(call.source, source, "{bundle_id}");
             assert_eq!(call.application.as_deref(), Some(canonical), "{bundle_id}");
             assert_eq!(call.title, title, "{bundle_id}");
@@ -1522,11 +1400,6 @@ mod tests {
                 "https://www.messenger.com/t/ana",
                 MeetingSource::Messenger,
                 "messenger.com",
-            ),
-            (
-                "https://teams.live.com/meet/123",
-                MeetingSource::Teams,
-                "teams.live.com",
             ),
             (
                 "https://facetime.apple.com/join/abc",
@@ -1550,7 +1423,7 @@ mod tests {
             ),
         ] {
             let page = context("Brave Browser", Some(url), "A call");
-            let call = super::candidate_from_microphone(&brave(), &page, true).unwrap();
+            let call = candidate_from_microphone(&brave(), &page).unwrap();
             assert_eq!(call.source, source, "{url}");
             assert_eq!(call.site.as_deref(), Some(site), "{url}");
         }
@@ -1563,8 +1436,8 @@ mod tests {
             bundle_id: "ru.keepcoder.Telegram".into(),
             name: "Telegram".into(),
         };
-        let call = super::candidate_from_microphone(&app, &ContextSnapshot::default(), true)
-            .expect("Telegram is a call app with the lab on");
+        let call = candidate_from_microphone(&app, &ContextSnapshot::default())
+            .expect("Telegram is a call app");
         let mut watch = Watch::new();
         assert!(watch.run(Some(&call), &[], 19_500).is_empty());
         assert_eq!(watch.run(Some(&call), &[], 1_000).len(), 1);
@@ -1577,7 +1450,7 @@ mod tests {
             Some("https://www.messenger.com/t/ana"),
             "Messenger",
         );
-        let call = super::candidate_from_microphone(&brave(), &page, true).unwrap();
+        let call = candidate_from_microphone(&brave(), &page).unwrap();
         assert_eq!(call.source, MeetingSource::Messenger);
         // A voice clip holds the microphone too, so it takes about 20 s.
         let mut watch = Watch::new();
@@ -1585,14 +1458,13 @@ mod tests {
         assert_eq!(watch.run(Some(&call), &[], 1_000).len(), 1);
 
         // GroupMe sends voice clips as well.
-        let groupme = super::candidate_from_microphone(
+        let groupme = candidate_from_microphone(
             &brave(),
             &context(
                 "Brave Browser",
                 Some("https://web.groupme.com/chats/1"),
                 "GroupMe",
             ),
-            true,
         )
         .unwrap();
         assert_eq!(groupme.source, MeetingSource::GroupMe);
@@ -1601,74 +1473,122 @@ mod tests {
     }
 
     #[test]
-    fn teams_and_facetime_pages_have_their_own_provider_and_choice() {
-        let teams = super::candidate_from_microphone(
+    fn teams_pages_use_the_teams_apps_provider_and_facetime_its_own() {
+        let teams = candidate_from_microphone(
             &brave(),
             &context(
                 "Brave Browser",
                 Some("https://teams.live.com/meet/123"),
                 "A call",
             ),
-            true,
         )
         .unwrap();
         assert_eq!(teams.source, MeetingSource::Teams);
-        // The page is named after the service; its provider is its own.
+        // The page is named after the service and shares the app's provider.
         assert_eq!(teams.offer_title(), "Microsoft Teams call detected");
-        let provider = teams.provider(true).unwrap();
-        assert_eq!(provider.key, "teams.live.com");
-        assert_eq!(provider.label, "Teams (web)");
+        assert_eq!(teams.site.as_deref(), Some("teams.live.com"));
+        let provider = teams.provider().unwrap();
+        assert_eq!(provider.key, "com.microsoft.teams2");
+        assert_eq!(provider.label, "Microsoft Teams");
 
-        let web = MeetingProviderChoice {
-            key: "teams.live.com".into(),
-            label: "Teams (web)".into(),
-            policy: MeetingPolicy::AlwaysRecord,
-        };
-        assert_eq!(
-            teams.policy(std::slice::from_ref(&web)),
-            MeetingPolicy::AlwaysRecord
-        );
-        // The Teams app's choice does not cover its website.
+        // The Teams app's choice covers its pages.
         let app = MeetingProviderChoice {
             key: "com.microsoft.teams2".into(),
             label: "Microsoft Teams".into(),
+            policy: MeetingPolicy::AlwaysRecord,
+        };
+        assert_eq!(
+            teams.policy(std::slice::from_ref(&app), MeetingPolicy::Ask),
+            MeetingPolicy::AlwaysRecord
+        );
+        // A choice other than Ask saved for the page's own host before pages
+        // shared the app's key still applies, and wins over the app's.
+        let web = MeetingProviderChoice {
+            key: "teams.live.com".into(),
+            label: "Teams (web)".into(),
             policy: MeetingPolicy::NeverOffer,
         };
         assert_eq!(
-            teams.policy(std::slice::from_ref(&app)),
-            MeetingPolicy::Ask,
-            "the app's choice is not the page's"
+            teams.policy(std::slice::from_ref(&web), MeetingPolicy::Ask),
+            MeetingPolicy::NeverOffer
         );
         assert_eq!(
-            teams.policy(&[app, web]),
-            MeetingPolicy::AlwaysRecord,
-            "the page's own choice wins"
+            teams.policy(&[app.clone(), web], MeetingPolicy::Ask),
+            MeetingPolicy::NeverOffer,
+            "the page's own saved choice wins"
+        );
+        // Ask is stored as a real entry; an older host row left on Ask does
+        // not shadow the app's choice.
+        let asked_web = MeetingProviderChoice {
+            key: "teams.live.com".into(),
+            label: "Teams (web)".into(),
+            policy: MeetingPolicy::Ask,
+        };
+        assert_eq!(
+            teams.policy(&[app, asked_web], MeetingPolicy::Ask),
+            MeetingPolicy::AlwaysRecord
         );
 
-        let facetime = super::candidate_from_microphone(
+        let facetime = candidate_from_microphone(
             &brave(),
             &context(
                 "Brave Browser",
                 Some("https://facetime.apple.com/join/abc"),
                 "A call",
             ),
-            true,
         )
         .unwrap();
         assert_eq!(facetime.source, MeetingSource::FaceTime);
         assert_eq!(facetime.offer_title(), "FaceTime call detected");
-        let provider = facetime.provider(true).unwrap();
+        let provider = facetime.provider().unwrap();
         assert_eq!(provider.key, "facetime.apple.com");
         assert_eq!(provider.label, "FaceTime (web)");
 
-        assert_ne!(
-            known_provider_label("teams.live.com", true),
-            known_provider_label("com.microsoft.teams2", false)
+        assert_eq!(
+            known_provider_label("teams.live.com"),
+            known_provider_label("com.microsoft.teams2"),
+            "Teams pages and the app share one name"
         );
         assert_ne!(
-            known_provider_label("facetime.apple.com", true),
-            known_provider_label("com.apple.FaceTime", false)
+            known_provider_label("facetime.apple.com"),
+            known_provider_label("com.apple.FaceTime")
         );
+    }
+
+    #[test]
+    fn teams_web_calls_are_the_teams_service() {
+        let always = MeetingProviderChoice {
+            key: "com.microsoft.teams2".into(),
+            label: "Microsoft Teams".into(),
+            policy: MeetingPolicy::AlwaysRecord,
+        };
+        for (url, host) in [
+            (
+                "https://teams.microsoft.com/meet/123?p=abc",
+                "teams.microsoft.com",
+            ),
+            (
+                "https://teams.microsoft.com/v2/?meetingjoin=true#/meet/123?anon=true",
+                "teams.microsoft.com",
+            ),
+            ("https://teams.microsoft.com/v2/", "teams.microsoft.com"),
+            ("https://teams.cloud.microsoft/v2/", "teams.cloud.microsoft"),
+        ] {
+            let call = candidate_from_microphone(&arc(), &context("Arc", Some(url), "Weekly sync"))
+                .unwrap_or_else(|| panic!("{url} is a Teams call"));
+            assert_eq!(call.source, MeetingSource::Teams, "{url}");
+            assert_eq!(call.site.as_deref(), Some(host), "{url}");
+            assert_eq!(call.required_stability(), STABLE_FOR, "{url}");
+            let provider = call.provider().unwrap();
+            assert_eq!(provider.key, "com.microsoft.teams2", "{url}");
+            assert_eq!(provider.label, "Microsoft Teams", "{url}");
+            assert_eq!(
+                call.policy(std::slice::from_ref(&always), MeetingPolicy::Ask),
+                MeetingPolicy::AlwaysRecord,
+                "{url} follows the Teams app's choice"
+            );
+            assert!(names_call(&Url::parse(url).unwrap()), "{url} names a call");
+        }
     }
 
     #[test]
@@ -1703,6 +1623,22 @@ mod tests {
     }
 
     #[test]
+    fn an_open_offer_ends_with_its_call_or_a_replacement_detection() {
+        let slack = slack_huddle();
+        let zoom = zoom();
+        let mut watch = Watch::new();
+        assert!(watch.stable(&slack, &[]).is_some());
+        let first = watch.detector.open_offer().unwrap();
+        assert!(watch.run(Some(&slack), &[], 30_000).is_empty());
+        assert_eq!(watch.detector.open_offer(), Some(first));
+        assert!(watch.stable(&zoom, &[]).is_some());
+        let next = watch.detector.open_offer().unwrap();
+        assert_ne!(next, first);
+        watch.run(None, &[], 61_000);
+        assert_eq!(watch.detector.open_offer(), None);
+    }
+
+    #[test]
     fn a_timed_out_offer_is_offered_again_when_the_call_retakes_the_microphone() {
         // Google Meet's pre-join screen holds the microphone; nobody answers
         // the offer before it times out (#1267).
@@ -1715,7 +1651,8 @@ mod tests {
         let mut watch = Watch::new();
         assert!(watch.stable(&meet, &[]).is_some());
         assert!(watch.run(Some(&meet), &[], 30_000).is_empty());
-        watch.detector.offer_timed_out();
+        let first = watch.detector.open_offer().unwrap();
+        watch.detector.offer_timed_out(first);
         assert!(watch.run(Some(&meet), &[], 10_000).is_empty());
         // Joining releases and retakes the microphone: offered again.
         assert!(watch.run(None, &[], 500).is_empty());
@@ -1724,7 +1661,10 @@ mod tests {
             Some(Detection::Offer(meet.clone()))
         );
 
-        // An offer that hasn't timed out stays snoozed through the same release.
+        // Even a late timeout for the first offer (identical call key)
+        // cannot shorten this offer's snooze.
+        assert_ne!(watch.detector.open_offer(), Some(first));
+        watch.detector.offer_timed_out(first);
         assert!(watch.run(None, &[], 500).is_empty());
         assert!(watch.run(Some(&meet), &[], 10_000).is_empty());
     }
@@ -1766,6 +1706,26 @@ mod tests {
         assert!(!presence.observe_at(false, at(5_500)));
         assert!(!presence.observe_at(false, at(8_000)));
         assert!(presence.observe_at(false, at(8_500)));
+    }
+
+    #[test]
+    fn a_gap_between_observations_never_restarts_a_call_ended_absence() {
+        let base = Instant::now();
+        let at = |s: u64| base + Duration::from_secs(s);
+        let mut presence = CallPresence::default();
+        // The call leaves and the Mac locks a moment later, and the
+        // controller's next pass comes 20 s on: the call still ended.
+        assert!(!presence.observe_at(false, at(0)));
+        assert!(presence.observe_at(false, at(20)));
+        // Once per absence, however long it runs.
+        assert!(!presence.observe_at(false, at(21)));
+        assert!(!presence.observe_at(false, at(60)));
+        // Back on the microphone: the next absence asks again on its own
+        // clock.
+        assert!(!presence.observe_at(true, at(61)));
+        assert!(!presence.observe_at(false, at(62)));
+        assert!(!presence.observe_at(false, at(64)));
+        assert!(presence.observe_at(false, at(65)));
     }
 
     #[test]
@@ -1872,6 +1832,24 @@ mod tests {
         .unwrap();
         assert_eq!(named_prefix.title, "Weekly Architecture");
         assert!(named_prefix.named);
+
+        let helium = candidate_from_context(&context(
+            "Helium",
+            Some("https://meet.google.com/abc-defg-hij"),
+            "Meet – Weekly Architecture - Helium",
+        ))
+        .unwrap();
+        assert_eq!(helium.title, "Weekly Architecture");
+        assert!(helium.named);
+
+        let aside = candidate_from_context(&context(
+            "Aside",
+            Some("https://meet.google.com/abc-defg-hij"),
+            "Meet – Weekly Architecture - Aside",
+        ))
+        .unwrap();
+        assert_eq!(aside.title, "Weekly Architecture");
+        assert!(aside.named);
     }
 
     #[test]
@@ -1938,6 +1916,125 @@ mod tests {
         )
         .unwrap();
         assert!(watch.run(Some(&other), &[], 25_000).is_empty());
+    }
+
+    #[test]
+    fn a_windows_chrome_on_a_meet_page_is_a_meet_call() {
+        let chrome = ActiveMicrophoneApplication {
+            pid: 1234,
+            bundle_id: "chrome.exe".into(),
+            name: "chrome".into(),
+        };
+        let call = candidate_from_microphone(
+            &chrome,
+            &context(
+                "Google Chrome",
+                Some("https://meet.google.com/abc-defg-hij"),
+                "Meet - Design sync - Google Chrome",
+            ),
+        )
+        .unwrap();
+        assert_eq!(call.source, MeetingSource::GoogleMeet);
+        assert_eq!(call.site.as_deref(), Some("meet.google.com"));
+        assert_eq!(call.recording_start().app.as_deref(), Some("Google Meet"));
+    }
+
+    #[test]
+    fn a_windows_edge_on_a_meet_title_without_its_address_is_a_meet_call() {
+        let edge = ActiveMicrophoneApplication {
+            pid: 1234,
+            bundle_id: "msedge.exe".into(),
+            name: "msedge".into(),
+        };
+        let title = normalize_window_title(
+            "Meet - abc-defg-hij and 2 more pages - Personal - Microsoft\u{200b} Edge",
+        );
+        let call =
+            candidate_from_microphone(&edge, &context("Microsoft Edge", None, &title)).unwrap();
+        assert_eq!(call.source, MeetingSource::GoogleMeet);
+        assert_eq!(call.site.as_deref(), Some("meet.google.com"));
+        assert_eq!(call.call.as_deref(), Some("abc-defg-hij"));
+    }
+
+    #[test]
+    fn windows_window_titles_lose_the_browser_profile_and_other_tabs() {
+        let edge = normalize_window_title(
+            "Meet - abc-defg-hij and 2 more pages - Personal - Microsoft\u{200b} Edge",
+        );
+        assert_eq!(edge, "Meet - abc-defg-hij");
+        assert_eq!(
+            google_meet_title_code(&edge).as_deref(),
+            Some("abc-defg-hij")
+        );
+        assert!(is_google_meet_call_title(&edge));
+
+        let chrome = normalize_window_title("Meet - abc-defg-hij - Google Chrome");
+        assert_eq!(chrome, "Meet - abc-defg-hij");
+        assert_eq!(
+            google_meet_title_code(&chrome).as_deref(),
+            Some("abc-defg-hij")
+        );
+        let chrome_profile =
+            normalize_window_title("Meet - abc-defg-hij - Google Chrome - Personal");
+        assert_eq!(chrome_profile, "Meet - abc-defg-hij");
+        assert_eq!(
+            google_meet_title_code(&chrome_profile).as_deref(),
+            Some("abc-defg-hij")
+        );
+
+        // A named meeting keeps its name, with or without a profile segment,
+        // and without the count of the window's other tabs.
+        let named = normalize_window_title(
+            "Meet - Design sync and 2 more pages - Personal - Microsoft\u{200b} Edge",
+        );
+        assert_eq!(named, "Meet - Design sync");
+        assert_eq!(clean_google_meet_title(&named), "Design sync");
+        assert_eq!(google_meet_title_code(&named), None);
+        let single_profile = normalize_window_title("Meet - Design sync - Microsoft Edge");
+        assert_eq!(single_profile, "Meet - Design sync");
+        assert_eq!(clean_google_meet_title(&single_profile), "Design sync");
+    }
+
+    #[test]
+    fn a_call_s_address_is_chosen_before_another_window_s_page() {
+        let mut pages = BrowserPages::default();
+        pages.push_title(Some("Inbox - Google Chrome".into()));
+        pages.push_title(Some("Meet - abc-defg-hij - Google Chrome".into()));
+        pages.push_url(Some("https://mail.google.com/mail/u/0/".into()));
+        pages.push_url(Some("https://meet.google.com/abc-defg-hij".into()));
+        let (url, title) = call_page(&pages);
+        assert_eq!(
+            url.as_ref().map(Url::as_str),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+        assert_eq!(
+            title.as_deref(),
+            Some("Meet - abc-defg-hij - Google Chrome")
+        );
+    }
+
+    #[test]
+    fn a_call_s_title_drops_another_window_s_address() {
+        let mut pages = BrowserPages::default();
+        pages.push_title(Some("Meet - Design sync - Google Chrome".into()));
+        pages.push_url(Some("https://mail.google.com/".into()));
+        let (url, title) = call_page(&pages);
+        assert_eq!(url, None);
+        assert_eq!(title.as_deref(), Some("Meet - Design sync - Google Chrome"));
+    }
+
+    #[test]
+    fn a_browser_with_no_call_page_keeps_its_first_page() {
+        let mut pages = BrowserPages::default();
+        pages.push_title(Some("Docs".into()));
+        pages.push_url(Some("https://docs.example.com/".into()));
+        let (url, title) = call_page(&pages);
+        assert_eq!(
+            url.as_ref().map(Url::as_str),
+            Some("https://docs.example.com/")
+        );
+        assert_eq!(title.as_deref(), Some("Docs"));
+        assert_eq!(call_page(&BrowserPages::default()), (None, None));
     }
 
     fn meet_in_brave(url: &str, title: &str) -> MeetingCandidate {
@@ -2009,11 +2106,328 @@ mod tests {
     }
 
     #[test]
+    fn a_call_switched_to_while_the_browser_stays_on_the_microphone_is_not_snoozed() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        // The recording of the first call ends after its page named the
+        // second while the browser kept the microphone the whole time: no
+        // absence at all, and the second call is still offered as a new one
+        // two seconds after the first's offer.
+        assert_eq!(
+            offered(&watch.run(Some(&second), &[], 2_500)),
+            vec![4_500],
+            "the browser's new call was snoozed by the old one"
+        );
+    }
+
+    #[test]
+    fn a_call_switched_to_before_the_stop_is_detected_while_the_page_still_names_the_ended_one() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        // The first call's recording stopped after its page named the second
+        // while the browser never left the microphone; every read since still
+        // names the ended call, and the call the page named before the stop is
+        // the one Hex starts.
+        watch.switch_to(first.call.clone(), second.clone());
+        let detected = watch
+            .stable(&first, &[])
+            .unwrap_or_else(|| panic!("the switched call was snoozed as the ended one"));
+        let Detection::Offer(candidate) = detected else {
+            panic!("expected an offer, got {detected:?}");
+        };
+        assert_eq!(candidate.call.as_deref(), second.call.as_deref());
+        assert_eq!(candidate.call.as_deref(), Some("xyz-wxyz-xyz"));
+    }
+
+    #[test]
+    fn a_call_switched_to_before_the_stop_is_detected_from_a_page_that_names_no_call() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let fallback = candidate_from_microphone(&brave(), &ContextSnapshot::default()).unwrap();
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        watch.switch_to(first.call.clone(), second.clone());
+        // The browser's next reads name no call at all (its active tab is no
+        // call's page), and the call it named before the stop still starts.
+        let found = watch.run(Some(&fallback), &[], 2_500);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let Detection::Offer(candidate) = &found[0].1 else {
+            panic!("expected an offer, got {:?}", found[0].1);
+        };
+        assert_eq!(candidate.call.as_deref(), second.call.as_deref());
+        assert_eq!(candidate.call.as_deref(), Some("xyz-wxyz-xyz"));
+    }
+
+    #[test]
+    fn forgetting_a_switched_call_snoozes_the_ended_calls_page_again() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        watch.switch_to(first.call.clone(), second.clone());
+        watch.detector.forget_switched_call();
+        // Kept recording, or the page came back to the recorded call: the
+        // ended call's page is snoozed again, even though the browser never
+        // left the microphone.
+        assert!(watch.run(Some(&first), &[], 25_000).is_empty());
+    }
+
+    #[test]
+    fn a_read_naming_a_third_call_clears_the_switched_call_and_offers_it() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let third = meet_in_brave("https://meet.google.com/qqq-qqqq-qqq", "Meet - Retro");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        watch.switch_to(first.call.clone(), second.clone());
+        // The page moves on from the ended call to a third one: the live read
+        // wins, the remembered call goes, and the third is offered.
+        let detected = watch
+            .stable(&third, &[])
+            .unwrap_or_else(|| panic!("the third call was not offered"));
+        let Detection::Offer(candidate) = detected else {
+            panic!("expected an offer, got {detected:?}");
+        };
+        assert_eq!(candidate.call.as_deref(), third.call.as_deref());
+        assert!(watch.detector.switched_call().is_none());
+    }
+
+    #[test]
+    fn the_snooze_ending_clears_the_switched_call() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        watch.switch_to(first.call.clone(), second.clone());
+        // The page names nothing and the browser leaves the microphone: the
+        // snooze ends, and the remembered call goes with it.
+        watch.leave();
+        assert!(watch.detector.switched_call().is_none());
+    }
+
+    #[test]
+    fn a_switched_call_is_forgotten_after_two_minutes_without_a_detection() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        watch.switch_to(first.call.clone(), second.clone());
+        watch.skip(SWITCHED_CALL_MEMORY.as_millis() as u64 + STEP_MS);
+        // The page still names the ended call, but the call it named before
+        // the stop is not started two minutes later.
+        assert!(watch.run(Some(&first), &[], 25_000).is_empty());
+        assert!(watch.detector.switched_call().is_none());
+    }
+
+    #[test]
+    fn a_recording_started_for_a_switched_call_keeps_the_ended_code() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&first, &[]),
+            Some(Detection::Offer(first.clone()))
+        );
+        watch.switch_to(first.call.clone(), second.clone());
+        // The page keeps naming the ended call: detection starts the call it
+        // named and hands the ended code to the recording.
+        let detected = watch
+            .stable(&first, &[])
+            .unwrap_or_else(|| panic!("the switched call was snoozed as the ended one"));
+        let Detection::Offer(candidate) = detected else {
+            panic!("expected an offer, got {detected:?}");
+        };
+        assert_eq!(candidate.call.as_deref(), second.call.as_deref());
+        let ended = watch.detector.take_switched_from();
+        assert_eq!(ended.as_deref(), first.call.as_deref());
+
+        // The recording starts for the second call with the ended code kept:
+        // 40 s of reads naming it never end the recording, and a third call
+        // still does.
+        let mut switching = Switching::with_kept(second.call.clone(), ended);
+        assert!(
+            switching.run(Some("abc-defg-hij"), 40_000).is_empty(),
+            "the ended call's page ended the new recording"
+        );
+        assert_eq!(switching.run(Some("qqq-qqqq-qqq"), 4_500), vec![44_000]);
+        assert!(switching.switch.changed());
+    }
+
+    /// A `CallSwitch` fed on a fake monotonic clock, like the watcher feeds
+    /// it from its page reads.
+    struct Switching {
+        switch: CallSwitch,
+        base: Instant,
+        elapsed_ms: u64,
+    }
+
+    impl Switching {
+        fn new(recorded: Option<&str>) -> Self {
+            Self {
+                switch: CallSwitch::new(recorded.map(str::to_string)),
+                base: Instant::now(),
+                elapsed_ms: 0,
+            }
+        }
+
+        /// A recording of `recorded` that treats `kept` as already kept, as
+        /// one detected in place of that call's stopped one does.
+        fn with_kept(recorded: Option<String>, kept: Option<String>) -> Self {
+            Self {
+                switch: CallSwitch::with_kept(recorded, kept),
+                base: Instant::now(),
+                elapsed_ms: 0,
+            }
+        }
+
+        /// Observes `current` every `STEP_MS` for `ms`; the times it fired.
+        fn run(&mut self, current: Option<&str>, ms: u64) -> Vec<u64> {
+            let mut fired = Vec::new();
+            let end = self.elapsed_ms + ms;
+            while self.elapsed_ms < end {
+                let now = self.base + Duration::from_millis(self.elapsed_ms);
+                if self.switch.observe_at(current, now) {
+                    fired.push(self.elapsed_ms);
+                }
+                self.elapsed_ms += STEP_MS;
+            }
+            fired
+        }
+    }
+
+    #[test]
+    fn a_call_switch_fires_once_after_another_code_holds_for_a_few_seconds() {
+        let mut switching = Switching::new(Some("abc-defg-hij"));
+        // The recorded call's own page, and a tab that names no call (or no
+        // page at all), never end a recording.
+        assert!(switching.run(Some("abc-defg-hij"), 6_000).is_empty());
+        assert!(switching.run(None, 6_000).is_empty());
+        // A different call's page, long enough: one ending.
+        assert_eq!(switching.run(Some("xyz-wxyz-xyz"), 4_500), vec![16_000]);
+        // Asked once: the same page keeps showing and asks nothing again.
+        assert!(switching.run(Some("xyz-wxyz-xyz"), 10_000).is_empty());
+        // Back on the recorded call, the count starts over: a later switch to
+        // that page ends once more, and once only.
+        assert!(switching.run(Some("abc-defg-hij"), 1_000).is_empty());
+        assert_eq!(switching.run(Some("xyz-wxyz-xyz"), 9_000), vec![31_500]);
+    }
+
+    #[test]
+    fn a_brief_glance_at_another_call_does_not_end_a_recording() {
+        let mut switching = Switching::new(Some("abc-defg-hij"));
+        assert!(switching.run(Some("xyz-wxyz-xyz"), 3_500).is_empty());
+        // The recorded call's page returns before the four seconds are up.
+        assert!(switching.run(Some("abc-defg-hij"), 1_000).is_empty());
+        assert!(switching.run(Some("xyz-wxyz-xyz"), 3_500).is_empty());
+        // Another call, but never four seconds of one.
+        assert!(switching.run(Some("qqq-qqqq-qqq"), 3_500).is_empty());
+        // Back on the recorded call nothing is counting any more.
+        assert!(switching.run(Some("abc-defg-hij"), 500).is_empty());
+        assert!(!switching.switch.changed());
+    }
+
+    #[test]
+    fn keeping_a_different_call_never_ends_the_recording_for_that_code() {
+        let mut switching = Switching::new(Some("abc-defg-hij"));
+        assert_eq!(switching.run(Some("xyz-wxyz-xyz"), 4_500), vec![4_000]);
+        assert!(switching.switch.changed());
+        switching.switch.keep();
+        assert!(!switching.switch.changed());
+        // Keeping again with nothing counting never forgets the code.
+        switching.switch.keep();
+        // The kept page stays for twenty seconds and never asks again.
+        assert!(switching.run(Some("xyz-wxyz-xyz"), 20_000).is_empty());
+        // A third call is still a switch.
+        assert_eq!(switching.run(Some("qqq-qqqq-qqq"), 4_500), vec![28_500]);
+    }
+
+    #[test]
+    fn a_call_switch_without_a_recorded_code_never_fires() {
+        let mut switching = Switching::new(None);
+        assert!(switching.run(Some("xyz-wxyz-xyz"), 20_000).is_empty());
+        assert!(switching.run(None, 5_000).is_empty());
+        assert!(!switching.switch.changed());
+        assert_eq!(switching.switch.recorded(), None);
+    }
+
+    #[test]
+    fn an_automatic_call_ended_stop_offers_the_call_again_when_it_returns() {
+        let zoom = zoom();
+        let always = [choice("us.zoom.xos", MeetingPolicy::AlwaysRecord)];
+        let mut watch = Watch::new();
+        // Always record starts the recording on its own.
+        assert_eq!(
+            watch.stable(&zoom, &always),
+            Some(Detection::Record(zoom.clone()))
+        );
+        // The call app drops off the microphone, long enough to be a call
+        // ended (a mute or an audio restart that outlasts it). The watcher
+        // stops the recording after its grace and tells the detector the
+        // recording ended.
+        let away = (CALL_ENDED_AFTER + AUTO_STOP_GRACE).as_millis() as u64;
+        assert!(watch.run(None, &always, away).is_empty());
+        let stopped_at = watch.base + Duration::from_millis(watch.elapsed_ms);
+        watch.detector.recording_stopped_at(stopped_at);
+        // Back on the microphone: a new call, recorded again, rather than the
+        // snoozed one returning for the rest of the call.
+        assert_eq!(
+            watch.stable(&zoom, &always),
+            Some(Detection::Record(zoom.clone()))
+        );
+    }
+
+    #[test]
+    fn a_hand_stopped_call_still_on_the_microphone_stays_snoozed() {
+        let zoom = zoom();
+        let always = [choice("us.zoom.xos", MeetingPolicy::AlwaysRecord)];
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&zoom, &always),
+            Some(Detection::Record(zoom.clone()))
+        );
+        // As a running recording's present poll does, then the hand stop: the
+        // app is still on the microphone.
+        let now = watch.base + Duration::from_millis(watch.elapsed_ms);
+        watch.detector.keep_snooze_alive_at(now);
+        watch.detector.recording_stopped_at(now);
+        // The app never leaves, so this is not a new call: no second
+        // recording while it holds the microphone.
+        assert!(watch.run(Some(&zoom), &always, 120_000).is_empty());
+    }
+
+    #[test]
     fn a_stopped_call_s_app_is_snoozed_only_until_it_leaves_for_a_few_seconds() {
         let slack = slack_huddle();
         let mut watch = Watch::new();
         assert!(watch.stable(&slack, &[]).is_some());
-        watch.detector.recording_stopped();
+        watch
+            .detector
+            .recording_stopped_at(watch.base + Duration::from_millis(watch.elapsed_ms));
         // A moment off the microphone: still the same call.
         assert!(watch.run(None, &[], 2_000).is_empty());
         assert!(watch.run(Some(&slack), &[], 5_000).is_empty());
@@ -2031,7 +2445,9 @@ mod tests {
         // The absence is seen while the stopped recording transcribes.
         let mut watch = Watch::new();
         assert!(watch.stable(&slack, &[]).is_some());
-        watch.detector.recording_stopped();
+        watch
+            .detector
+            .recording_stopped_at(watch.base + Duration::from_millis(watch.elapsed_ms));
         for _ in 0..8 {
             let now = watch.base + Duration::from_millis(watch.elapsed_ms);
             watch.detector.observe_call_app_at(false, now);
@@ -2052,8 +2468,136 @@ mod tests {
         assert_eq!(call.source, MeetingSource::BrowserCall);
         assert_eq!(call.application.as_deref(), Some("com.vivaldi.Vivaldi"));
         assert_eq!(call.application_name.as_deref(), Some("Vivaldi"));
-        assert_eq!(call.offer_title(), "Call in Vivaldi");
+        assert_eq!(call.offer_title(), "Vivaldi call detected");
         assert_eq!(call.required_stability(), BROWSER_STABLE_FOR);
+    }
+
+    #[test]
+    fn helium_on_the_microphone_is_a_named_browser_call() {
+        // Helium's sandboxed audio service holds the microphone and reports
+        // its helper bundle; the main app is `net.imput.helium`.
+        let helium_helper = ActiveMicrophoneApplication {
+            pid: 6120,
+            bundle_id: "net.imput.helium.helper".into(),
+            name: "Helium Helper".into(),
+        };
+        assert!(helium_helper.is_browser());
+        let meet = candidate_from_microphone(
+            &helium_helper,
+            &context(
+                "Helium",
+                Some("https://meet.google.com/abc-defg-hij"),
+                "Meet - Design sync",
+            ),
+        )
+        .unwrap();
+        assert_eq!(meet.source, MeetingSource::GoogleMeet);
+        assert_eq!(meet.application.as_deref(), Some("net.imput.helium"));
+        assert_eq!(meet.application_name.as_deref(), Some("Helium"));
+        assert_eq!(meet.site.as_deref(), Some("meet.google.com"));
+
+        // A page on no known call site is still a browser call, named by the
+        // browser.
+        let other = candidate_from_microphone(&helium_helper, &ContextSnapshot::default()).unwrap();
+        assert_eq!(other.source, MeetingSource::BrowserCall);
+        assert_eq!(other.offer_title(), "Helium call detected");
+    }
+
+    #[test]
+    fn ardia_on_the_microphone_is_a_named_browser_call() {
+        // Ardia's Chromium audio service holds the microphone and reports
+        // `com.ardia.browser.helper`; the main app is `com.ardia.browser`.
+        let ardia_helper = ActiveMicrophoneApplication {
+            pid: 6130,
+            bundle_id: "com.ardia.browser.helper".into(),
+            name: "Ardia Helper".into(),
+        };
+        assert!(ardia_helper.is_browser());
+        let meet = candidate_from_microphone(
+            &ardia_helper,
+            &context(
+                "Ardia",
+                Some("https://meet.google.com/abc-defg-hij"),
+                "Meet – Design sync - Ardia",
+            ),
+        )
+        .unwrap();
+        assert_eq!(meet.source, MeetingSource::GoogleMeet);
+        assert_eq!(meet.application.as_deref(), Some("com.ardia.browser"));
+        assert_eq!(meet.application_name.as_deref(), Some("Ardia"));
+        assert_eq!(meet.site.as_deref(), Some("meet.google.com"));
+        assert_eq!(meet.title, "Design sync");
+
+        // A page on no known call site is still a browser call, named by the
+        // browser.
+        let other = candidate_from_microphone(&ardia_helper, &ContextSnapshot::default()).unwrap();
+        assert_eq!(other.source, MeetingSource::BrowserCall);
+        assert_eq!(other.offer_title(), "Ardia call detected");
+    }
+
+    #[test]
+    fn zen_on_the_microphone_is_a_named_browser_call() {
+        // Zen is Firefox-based, and its media process is its own
+        // `app.zen-browser.plugincontainer`, never `org.mozilla.*`.
+        let zen_helper = ActiveMicrophoneApplication {
+            pid: 6140,
+            bundle_id: "app.zen-browser.plugincontainer".into(),
+            name: "plugin-container".into(),
+        };
+        assert!(zen_helper.is_browser());
+        let meet = candidate_from_microphone(
+            &zen_helper,
+            &context(
+                "Zen",
+                Some("https://meet.google.com/abc-defg-hij"),
+                "Meet – Design sync — Zen Browser",
+            ),
+        )
+        .unwrap();
+        assert_eq!(meet.source, MeetingSource::GoogleMeet);
+        assert_eq!(meet.application.as_deref(), Some("app.zen-browser.zen"));
+        assert_eq!(meet.application_name.as_deref(), Some("Zen"));
+        assert_eq!(meet.site.as_deref(), Some("meet.google.com"));
+        assert_eq!(meet.title, "Design sync");
+
+        // A page on no known call site is still a browser call, named by the
+        // browser.
+        let other = candidate_from_microphone(&zen_helper, &ContextSnapshot::default()).unwrap();
+        assert_eq!(other.source, MeetingSource::BrowserCall);
+        assert_eq!(other.offer_title(), "Zen call detected");
+
+        // On Linux the microphone's process names Zen by its binary: `zen` for
+        // the Flatpak and the tarball launcher, `zen-bin` for the tarball's own
+        // executable, content processes included. No site is read there.
+        for binary in ["zen", "zen-bin"] {
+            let zen = ActiveMicrophoneApplication {
+                pid: 6150,
+                bundle_id: binary.into(),
+                name: "Zen".into(),
+            };
+            assert!(zen.is_browser(), "{binary}");
+            let call = candidate_from_microphone(&zen, &ContextSnapshot::default()).unwrap();
+            assert_eq!(call.source, MeetingSource::BrowserCall, "{binary}");
+            assert_eq!(call.application.as_deref(), Some("app.zen-browser.zen"));
+            assert_eq!(call.application_name.as_deref(), Some("Zen"));
+            assert_eq!(call.offer_title(), "Zen call detected");
+        }
+    }
+
+    #[test]
+    fn zen_matches_its_own_name_not_a_name_that_contains_it() {
+        // `zen` as a substring would also match `Citizen`, so Zen matches its
+        // whole name like Arc. The shared case-sensitive name check above
+        // still accepts `Zendesk` for `Zen`; it runs for every browser and is
+        // unchanged here.
+        let citizen = context("Citizen", None, "");
+        assert!(!context_matches_browser(
+            "app.zen-browser.zen",
+            "Zen",
+            &citizen
+        ));
+        assert!(!is_browser_application("citizen"));
+        assert!(!is_browser_application("zendesk"));
     }
 
     fn brave() -> ActiveMicrophoneApplication {
@@ -2064,23 +2608,28 @@ mod tests {
         }
     }
 
+    fn arc() -> ActiveMicrophoneApplication {
+        ActiveMicrophoneApplication {
+            pid: 1592,
+            bundle_id: "company.thebrowser.Browser".into(),
+            name: "Arc".into(),
+        }
+    }
+
     #[test]
     fn offer_titles_name_the_service_site_or_browser_without_repeating_call() {
         let problems = context(
             "Brave Browser",
-            Some("https://www.problems.kitlangton.com/board"),
+            Some("https://www.example.com/board"),
             "Problems",
         );
         let site = candidate_from_microphone(&brave(), &problems).unwrap();
         assert_eq!(site.source, MeetingSource::BrowserCall);
-        assert_eq!(site.offer_title(), "Call on problems.kitlangton.com");
-        assert_eq!(
-            site.recording_start().app.as_deref(),
-            Some("problems.kitlangton.com")
-        );
+        assert_eq!(site.offer_title(), "example.com call detected");
+        assert_eq!(site.recording_start().app.as_deref(), Some("example.com"));
 
         let unknown = candidate_from_microphone(&brave(), &ContextSnapshot::default()).unwrap();
-        assert_eq!(unknown.offer_title(), "Call in Brave Browser");
+        assert_eq!(unknown.offer_title(), "Brave Browser call detected");
 
         let meet = candidate_from_microphone(
             &brave(),
@@ -2115,48 +2664,53 @@ mod tests {
 
     #[test]
     fn choices_apply_to_the_site_when_known_and_the_app_otherwise() {
-        let problems = context(
-            "Brave Browser",
-            Some("https://problems.kitlangton.com/"),
-            "Problems",
-        );
+        let problems = context("Brave Browser", Some("https://example.com/"), "Problems");
         let site = candidate_from_microphone(&brave(), &problems).unwrap();
-        let provider = site.provider(false).unwrap();
-        assert_eq!(provider.key, "problems.kitlangton.com");
+        let provider = site.provider().unwrap();
+        assert_eq!(provider.key, "example.com");
         assert_eq!(
-            site.policy(&[provider.choose(MeetingPolicy::NeverOffer)]),
+            site.policy(
+                &[provider.choose(MeetingPolicy::NeverOffer)],
+                MeetingPolicy::Ask
+            ),
             MeetingPolicy::NeverOffer
         );
-        assert!(site.can_always_record(false));
+        assert!(site.can_always_record());
 
         let unknown = candidate_from_microphone(&brave(), &ContextSnapshot::default()).unwrap();
-        let app = unknown.provider(false).unwrap();
+        let app = unknown.provider().unwrap();
         assert_eq!(
             (app.key.as_str(), app.label.as_str()),
             ("com.brave.Browser", "Brave Browser")
         );
-        assert!(!unknown.can_always_record(false));
-        let never_site = [choice("problems.kitlangton.com", MeetingPolicy::NeverOffer)];
-        assert_eq!(unknown.policy(&never_site), MeetingPolicy::Ask);
+        assert!(!unknown.can_always_record());
+        let never_site = [choice("example.com", MeetingPolicy::NeverOffer)];
+        assert_eq!(
+            unknown.policy(&never_site, MeetingPolicy::Ask),
+            MeetingPolicy::Ask
+        );
         // A browser's choice covers its sites unless the site has its own.
         let never_brave = choice("com.brave.Browser", MeetingPolicy::NeverOffer);
         assert_eq!(
-            site.policy(std::slice::from_ref(&never_brave)),
+            site.policy(std::slice::from_ref(&never_brave), MeetingPolicy::Ask),
             MeetingPolicy::NeverOffer
         );
         assert_eq!(
-            site.policy(&[
-                never_brave.clone(),
-                choice("problems.kitlangton.com", MeetingPolicy::AlwaysRecord)
-            ]),
+            site.policy(
+                &[
+                    never_brave.clone(),
+                    choice("example.com", MeetingPolicy::AlwaysRecord)
+                ],
+                MeetingPolicy::Ask
+            ),
             MeetingPolicy::AlwaysRecord
         );
         // A site set back to Ask asks, whatever its browser's choice.
         assert_eq!(
-            site.policy(&[
-                never_brave,
-                choice("problems.kitlangton.com", MeetingPolicy::Ask)
-            ]),
+            site.policy(
+                &[never_brave, choice("example.com", MeetingPolicy::Ask)],
+                MeetingPolicy::Ask
+            ),
             MeetingPolicy::Ask
         );
 
@@ -2170,25 +2724,35 @@ mod tests {
             ),
         )
         .unwrap();
-        let provider = meet.provider(false).unwrap();
+        let provider = meet.provider().unwrap();
         assert_eq!(
             (provider.key.as_str(), provider.label.as_str()),
             ("meet.google.com", "Google Meet")
         );
         let slack = slack_huddle();
-        assert_eq!(slack.provider(false).unwrap().label, "Slack huddles");
+        assert_eq!(slack.provider().unwrap().label, "Slack huddles");
         let banshee = candidate_from_microphone(
             &brave(),
             &context("Brave Browser", Some("https://banshee.app/room-1"), "Room"),
         )
         .unwrap();
-        let provider = banshee.provider(false).unwrap();
+        let provider = banshee.provider().unwrap();
         assert_eq!(
             (provider.key.as_str(), provider.label.as_str()),
             ("banshee.app", "Banshee")
         );
-        assert!(banshee.can_always_record(false));
-        assert!(slack.can_always_record(false));
+        assert!(banshee.can_always_record());
+        assert!(slack.can_always_record());
+    }
+
+    fn zoom() -> MeetingCandidate {
+        // Zoom's audio host process holds the microphone; the call is Zoom.
+        let helper = ActiveMicrophoneApplication {
+            pid: 9010,
+            bundle_id: "us.zoom.CptHost".into(),
+            name: "CptHost".into(),
+        };
+        candidate_from_microphone(&helper, &ContextSnapshot::default()).unwrap()
     }
 
     fn slack_huddle() -> MeetingCandidate {
@@ -2219,17 +2783,10 @@ mod tests {
         // Browser pages still need about 20 s on the microphone.
         let problems = candidate_from_microphone(
             &brave(),
-            &context(
-                "Brave Browser",
-                Some("https://problems.kitlangton.com/"),
-                "Problems",
-            ),
+            &context("Brave Browser", Some("https://example.com/"), "Problems"),
         )
         .unwrap();
-        let always = [choice(
-            "problems.kitlangton.com",
-            MeetingPolicy::AlwaysRecord,
-        )];
+        let always = [choice("example.com", MeetingPolicy::AlwaysRecord)];
         let mut watch = Watch::new();
         assert!(watch.run(Some(&problems), &always, 6_000).is_empty());
         assert!(watch.run(None, &always, 5_000).is_empty());
@@ -2237,6 +2794,50 @@ mod tests {
         assert_eq!(
             watch.run(Some(&problems), &always, 500),
             [(31_000, Detection::Record(problems))]
+        );
+    }
+
+    /// The default answers calls with none of their own; a call's own answer
+    /// still wins, and a browser page Hex can't name is offered rather than
+    /// recorded, which would record every page.
+    #[test]
+    fn the_default_answers_calls_without_their_own() {
+        let slack = slack_huddle();
+        let mut watch = Watch::new();
+        watch.default = MeetingPolicy::AlwaysRecord;
+        assert_eq!(
+            watch.run(Some(&slack), &[], 2_500).pop().unwrap().1,
+            Detection::Record(slack.clone())
+        );
+
+        let mut watch = Watch::new();
+        watch.default = MeetingPolicy::AlwaysRecord;
+        let ask = [choice("com.tinyspeck.slackmacgap", MeetingPolicy::Ask)];
+        assert_eq!(
+            watch.run(Some(&slack), &ask, 2_500).pop().unwrap().1,
+            Detection::Offer(slack.clone())
+        );
+
+        let unknown = candidate_from_microphone(&brave(), &ContextSnapshot::default()).unwrap();
+        let mut watch = Watch::new();
+        watch.default = MeetingPolicy::AlwaysRecord;
+        assert_eq!(
+            watch.run(Some(&unknown), &[], 31_000).pop().unwrap().1,
+            Detection::Offer(unknown)
+        );
+
+        let mut watch = Watch::new();
+        watch.default = MeetingPolicy::NeverOffer;
+        assert!(watch.run(Some(&slack), &[], 8_000).is_empty());
+        let always = [choice(
+            "com.tinyspeck.slackmacgap",
+            MeetingPolicy::AlwaysRecord,
+        )];
+        let mut watch = Watch::new();
+        watch.default = MeetingPolicy::NeverOffer;
+        assert_eq!(
+            watch.run(Some(&slack), &always, 2_500).pop().unwrap().1,
+            Detection::Record(slack)
         );
     }
 
@@ -2263,7 +2864,7 @@ mod tests {
         )];
         assert!(watch.run(None, &always, 20_000).is_empty());
         assert!(watch.run(Some(&slack), &always, 8_000).is_empty());
-        // Never offer, then Always record, while the call stays on the
+        // Don't offer, then Always record, while the call stays on the
         // microphone well past the snooze reset: still nothing.
         let never = [choice(
             "com.tinyspeck.slackmacgap",
@@ -2282,11 +2883,7 @@ mod tests {
 
     #[test]
     fn a_browser_voice_note_is_not_offered_but_a_sustained_browser_call_is() {
-        let problems = context(
-            "Brave Browser",
-            Some("https://problems.kitlangton.com/"),
-            "Problems",
-        );
+        let problems = context("Brave Browser", Some("https://example.com/"), "Problems");
         let candidate = candidate_from_microphone(&brave(), &problems).unwrap();
         let mut watch = Watch::new();
         // A six-second voice note, then the mic closes for a few seconds.
@@ -2431,16 +3028,12 @@ mod tests {
         // shorten the threshold nor trigger Always record.
         let problems = candidate_from_microphone(
             &brave(),
-            &context(
-                "Brave Browser",
-                Some("https://problems.kitlangton.com/"),
-                "Problems",
-            ),
+            &context("Brave Browser", Some("https://example.com/"), "Problems"),
         )
         .unwrap();
         let choices = [
             choice("banshee.app", MeetingPolicy::AlwaysRecord),
-            choice("problems.kitlangton.com", MeetingPolicy::NeverOffer),
+            choice("example.com", MeetingPolicy::NeverOffer),
         ];
         let mut watch = Watch::new();
         assert!(watch.run(Some(&problems), &choices, 25_000).is_empty());
@@ -2666,6 +3259,39 @@ mod tests {
     }
 
     #[test]
+    fn a_google_meet_call_in_aside_records_after_about_two_seconds() {
+        // Aside's Chromium audio service holds the microphone and reports
+        // `at.studio.AsideBrowser.helper`; the main app is
+        // `at.studio.AsideBrowser`.
+        let aside_helper = ActiveMicrophoneApplication {
+            pid: 5320,
+            bundle_id: "at.studio.AsideBrowser.helper".into(),
+            name: "Aside Helper".into(),
+        };
+        assert!(aside_helper.is_browser());
+        let meet = candidate_from_microphone(
+            &aside_helper,
+            &context(
+                "Aside",
+                Some("https://meet.google.com/abc-defg-hij"),
+                "Meet - Design sync - Aside",
+            ),
+        )
+        .unwrap();
+        assert_eq!(meet.source, MeetingSource::GoogleMeet);
+        assert_eq!(meet.application.as_deref(), Some("at.studio.AsideBrowser"));
+        assert_eq!(meet.application_name.as_deref(), Some("Aside"));
+        assert_eq!(meet.site.as_deref(), Some("meet.google.com"));
+        let always = [choice("meet.google.com", MeetingPolicy::AlwaysRecord)];
+        let mut watch = Watch::new();
+        assert!(watch.run(Some(&meet), &always, 2_000).is_empty());
+        assert_eq!(
+            watch.run(Some(&meet), &always, 500),
+            [(2_000, Detection::Record(meet))]
+        );
+    }
+
+    #[test]
     fn a_google_meet_call_in_arc_without_its_address_is_known_by_its_title() {
         let arc_helper = ActiveMicrophoneApplication {
             pid: 5120,
@@ -2712,5 +3338,89 @@ mod tests {
         watch.leave();
         watch.wall_ms = 30;
         assert_eq!(watch.stable(&slack, &[]), Some(Detection::Offer(slack)));
+    }
+
+    #[test]
+    fn late_offer_timeout_cannot_overwrite_a_stopped_call_snooze() {
+        let slack = slack_huddle();
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&slack, &[]),
+            Some(Detection::Offer(slack.clone()))
+        );
+        let offer_id = watch.detector.open_offer().unwrap();
+        let now = watch.now();
+        watch.detector.recording_stopped_at(now);
+        assert_eq!(watch.detector.open_offer(), None);
+        assert_eq!(watch.detector.take_withdrawn_offers(), vec![offer_id]);
+
+        // A stale timeout for that offer must not replace Stopped's 3 s grace
+        // with TimedOut's immediate reset on absence.
+        watch.detector.offer_timed_out(offer_id);
+        assert!(watch.detector.take_withdrawn_offers().is_empty());
+        assert!(watch.run(None, &[], 2_000).is_empty());
+        assert!(watch.run(Some(&slack), &[], 5_000).is_empty());
+        // Still ends after CALL_ENDED_AFTER (3 s).
+        assert!(watch.run(None, &[], 3_500).is_empty());
+        assert_eq!(watch.stable(&slack, &[]), Some(Detection::Offer(slack)));
+    }
+
+    #[test]
+    fn replacing_an_open_offer_records_withdrawal_even_at_the_same_instant() {
+        let slack = slack_huddle();
+        let zoom = zoom();
+        let mut watch = Watch::new();
+        assert_eq!(watch.stable(&slack, &[]), Some(Detection::Offer(slack)));
+        let first = watch.detector.open_offer().unwrap();
+        assert!(watch.detector.take_withdrawn_offers().is_empty());
+
+        // Consecutive OfferIds are distinct.
+        assert_ne!(OfferId::next(), OfferId::next());
+
+        assert_eq!(watch.stable(&zoom, &[]), Some(Detection::Offer(zoom)));
+        let second = watch.detector.open_offer().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(watch.detector.take_withdrawn_offers(), vec![first]);
+    }
+
+    #[test]
+    fn switched_from_cannot_be_orphaned_across_new_switches_or_detections() {
+        let first = meet_in_brave("https://meet.google.com/abc-defg-hij", "Meet - Design sync");
+        let second = meet_in_brave("https://meet.google.com/xyz-wxyz-xyz", "Meet - Standup");
+        let zoom = zoom();
+        let mut watch = Watch::new();
+        assert!(watch.stable(&first, &[]).is_some());
+        watch.switch_to(first.call.clone(), second.clone());
+        assert!(watch.stable(&first, &[]).is_some());
+
+        // Starting another call switch replaces the unclaimed HandedOff code.
+        watch.switch_to(second.call.clone(), first.clone());
+        assert_eq!(watch.detector.take_switched_from(), None);
+
+        // Reaching stability without taking switched_from, then detecting an
+        // unrelated call, drops the stale HandedOff code rather than leaking it.
+        assert!(watch.stable(&second, &[]).is_some());
+        assert!(watch.stable(&zoom, &[]).is_some());
+        assert_eq!(watch.detector.take_switched_from(), None);
+    }
+
+    #[test]
+    fn withdraw_offer_retires_only_the_panel_while_keeping_the_snooze() {
+        let slack = slack_huddle();
+        let mut watch = Watch::new();
+        assert_eq!(
+            watch.stable(&slack, &[]),
+            Some(Detection::Offer(slack.clone()))
+        );
+        let id = watch.detector.open_offer().unwrap();
+
+        assert_eq!(watch.detector.withdraw_offer(), Some(id));
+        assert_eq!(watch.detector.open_offer(), None);
+        assert_eq!(watch.detector.take_withdrawn_offers(), vec![id]);
+        assert_eq!(watch.detector.withdraw_offer(), None);
+
+        // Call stays snoozed for the full minute after its panel closes.
+        assert!(watch.run(None, &[], 30_000).is_empty());
+        assert!(watch.run(Some(&slack), &[], 5_000).is_empty());
     }
 }

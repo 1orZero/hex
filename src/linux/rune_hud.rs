@@ -107,6 +107,23 @@ impl LinuxIndicator {
         }
     }
 
+    /// Shows `message` as the HUD's failure notice (Labs › Failure
+    /// notices) for something that failed outside a dictation job, such as a
+    /// model switch with no installed model. No sound plays.
+    pub(crate) fn failed(&mut self, message: String) {
+        self.send(HudEvent::Failed {
+            message: Some(message),
+        });
+    }
+
+    /// The oldest submitted dictation was deliberately discarded: close it
+    /// as cancelled, as [`Self::finished`] closes a completed one.
+    pub(crate) fn discarded(&mut self) {
+        if let Some(job_id) = self.jobs.pop_front() {
+            self.send(HudEvent::JobCancelled { job_id });
+        }
+    }
+
     /// Captured audio while recording, for the level the HUD shows.
     pub(crate) fn meter(&self, samples: &[f32]) {
         if let Some(sender) = self.sender() {

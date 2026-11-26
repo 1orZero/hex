@@ -3,9 +3,9 @@
 use super::short;
 use crate::desktop::i18n::{tr, tr_fill};
 
-/// A written capture, on the clipboard and sent nowhere yet.
-pub(crate) fn copied() -> &'static str {
-    tr("Copied")
+/// Name the finished item and what happened to it (it can also be a ZIP).
+pub(crate) fn annotation() -> &'static str {
+    tr("Annotation copied")
 }
 pub(super) fn not_running() -> &'static str {
     tr("OpenCode isn't running")

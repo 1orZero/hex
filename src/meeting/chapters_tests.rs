@@ -202,6 +202,19 @@ fn the_prompt_names_the_current_chapter_terms_and_only_new_lines() {
 }
 
 #[test]
+fn chapter_prompts_keep_the_transcripts_language() {
+    assert!(INSTRUCTIONS.contains(
+        "You MUST name chapters and write their summaries in the language spoken in the transcript"
+    ));
+    assert!(INSTRUCTIONS.contains("even though these instructions are in English"));
+    assert!(INSTRUCTIONS.contains("never translate them"));
+    assert!(
+        REFINE_INSTRUCTIONS
+            .contains("The transcript may be in a language other than English; that never changes")
+    );
+}
+
+#[test]
 fn a_confirming_pass_on_yet_another_topic_waits_for_its_own_confirmation() {
     let mut state = Chaptering::default();
     state.merge(said("Image storage", false), &window(0, 180_000));
@@ -562,12 +575,24 @@ fn a_section_holds_its_chapters_turns_as_markdown() {
     assert_eq!(chapter_entries(&entries, &chapters, 1).len(), 2);
     assert!(chapter_entries(&entries, &chapters, 2).is_empty());
     assert_eq!(
-        section_markdown(&chapters[0], &chapter_entries(&entries, &chapters, 0)),
+        section_markdown(
+            &chapters[0],
+            &chapter_entries(&entries, &chapters, 0),
+            false
+        ),
         "## Image storage\n\nWhere images live.\n\n**Them** · 00:00\nWhere do images live?\n\n**You** · 01:00\nIn the bucket."
     );
     assert_eq!(
-        section_markdown(&chapters[1], &chapter_entries(&entries, &chapters, 1)),
+        section_markdown(
+            &chapters[1],
+            &chapter_entries(&entries, &chapters, 1),
+            false
+        ),
         "## Motion lint\n\n**Them** · 03:20\nNow the lint rules.\n\n**You** · 03:50\nThey flag snaps."
+    );
+    assert_eq!(
+        section_markdown(&chapters[1], &chapter_entries(&entries, &chapters, 1), true),
+        "## Motion lint\n\n**Speaker** · 03:20\nNow the lint rules.\n\n**Speaker** · 03:50\nThey flag snaps."
     );
 }
 

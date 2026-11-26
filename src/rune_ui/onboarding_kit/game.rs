@@ -36,7 +36,7 @@ use super::fixture::Take;
 use super::flight::{Flight, ember_tone, flicker, flying, typeset};
 use super::high_score;
 use super::hud_stage::{LiveHud, frame_slot};
-use super::landing::{LEAD, keys, title_font};
+use super::landing::{LEAD, around_keys, keys, title_font};
 use super::live;
 use super::sfx::{SfxTrack, WordHits};
 use super::sparks::impacts;
@@ -109,7 +109,7 @@ const SAID_GAP: f32 = 10.0;
 const BIG_SIZE: f32 = 76.0;
 const BIG_LINE: f32 = 78.0;
 
-const NAME: &str = "Kit Langton";
+const NAME: &str = "Alex Morgan";
 const CERT_H: f32 = 150.0;
 const CERT_PAD: f32 = 16.0;
 const SIGN: Field = Field {
@@ -120,7 +120,7 @@ const SIGN: Field = Field {
 const SIGN_Y: f32 = CERT_H - CERT_PAD - 8.0 - 30.0;
 
 const SAY_NAME: Take = Take {
-    updates: &[(0.35, "Kit"), (0.7, NAME)],
+    updates: &[(0.35, "Alex"), (0.7, NAME)],
     release: 0.95,
 };
 
@@ -607,6 +607,9 @@ struct Look<'a, S> {
     /// The listener runs but hasn't started listening: the game says so
     /// instead of inviting a hold that does nothing.
     warming: bool,
+    /// The listener failed to start: the game offers Reopen Hex instead of
+    /// the shortcut until it is ready.
+    reopen: bool,
     /// What the last try needs said.
     hint: Option<&'static str>,
     /// Switches the shortcut to tap to start, for a player who keeps
@@ -787,10 +790,10 @@ fn plays(s: &Onboard) -> bool {
 /// field instead.
 pub(super) fn step(s: &mut Onboard, now: f64) -> bool {
     if !plays(s) {
-        s.game = None;
+        s.set_game(None);
         return false;
     }
-    let mut session = s.game.take().unwrap_or_else(|| Session::new(s, now));
+    let mut session = s.take_game().unwrap_or_else(|| Session::new(s, now));
     let reduced = s.reduced.get();
     if let Some(script) = session.script.as_mut() {
         if let Some(take) = script.run(&mut session.play, now) {
@@ -806,7 +809,7 @@ pub(super) fn step(s: &mut Onboard, now: f64) -> bool {
                 .play
                 .share
                 .is_some_and(|at| now >= at + SHARE_HOLD + 1.2);
-        s.game = Some(session);
+        s.set_game(Some(session));
         if leave {
             s.leave_game_keeping_sound(now);
         }
@@ -816,9 +819,9 @@ pub(super) fn step(s: &mut Onboard, now: f64) -> bool {
     // follows the physical shortcut and sounds them itself.
     let real = s.live.as_ref().map(|live| live.listening);
     let held = real.unwrap_or_else(|| physical_shortcut_held(&s.caps));
-    match (s.live_hold_from, held) {
+    match (s.live_hold_from(), held) {
         (None, true) => {
-            s.live_hold_from = Some(now);
+            s.set_live_hold_from(Some(now));
             // Hex pastes where the focus is when the dictation ends.
             s.practice.focused = true;
             if real.is_none() {
@@ -826,7 +829,7 @@ pub(super) fn step(s: &mut Onboard, now: f64) -> bool {
             }
         }
         (Some(_), false) => {
-            s.live_hold_from = None;
+            s.set_live_hold_from(None);
             if real.is_none() {
                 s.sfx.on_live_shortcut_up(now);
             }
@@ -854,28 +857,28 @@ pub(super) fn step(s: &mut Onboard, now: f64) -> bool {
     session.hud.step(&session.play, now, held, peak, reduced);
     session.keep_best();
     session.sound(&mut s.sfx);
-    s.game = Some(session);
+    s.set_game(Some(session));
     true
 }
 
 /// The answer field changed: a paste answers the lit card, typing shows
 /// as live words until Return. False without the game.
 pub(super) fn changed(s: &mut Onboard) -> bool {
-    let Some(session) = s.game.as_mut() else {
+    let Some(scripted) = s.game().map(|session| session.script.is_some()) else {
         return false;
     };
     // A story's script is the player; keys meant for the story don't count.
-    if session.script.is_some() {
+    if scripted {
         s.practice = TextEdit::default();
         s.practice.focused = true;
         return true;
     }
     let count = s.practice.text.chars().count();
-    let before = session.typed.chars().count();
+    let before = s.game().map_or(0, |session| session.typed.chars().count());
     // A paste lands all at once; typing one key at a time.
     if count > before + 1 {
         answer(s);
-    } else {
+    } else if let Some(session) = s.beat.practice_mut().and_then(|p| p.game.as_mut()) {
         session.play.keys += count.saturating_sub(before);
         session.typed.clone_from(&s.practice.text);
     }
@@ -885,24 +888,28 @@ pub(super) fn changed(s: &mut Onboard) -> bool {
 /// Return in the answer field sends what's typed.
 pub(super) fn answer(s: &mut Onboard) {
     let now = s.now;
-    let Some(session) = s.game.as_mut() else {
+    if s.game().is_none() {
         return;
-    };
+    }
     let text = std::mem::take(&mut s.practice.text);
-    session.typed.clear();
+    if let Some(session) = s.game_mut() {
+        session.typed.clear();
+    }
     s.practice = TextEdit::default();
     s.practice.focused = true;
     if text.trim().is_empty() {
         return;
     }
-    session.play.paste(&text, now);
+    if let Some(session) = s.game_mut() {
+        session.play.paste(&text, now);
+    }
     s.sfx.on_live_dictation_landed(now);
 }
 
 /// Done: the score card first, if anything was destroyed.
 fn finish(s: &mut Onboard) {
     let now = s.now;
-    let scored = s.game.as_mut().is_some_and(|session| {
+    let scored = s.game_mut().is_some_and(|session| {
         let scored = session.play.finish(now);
         session.keep_best();
         scored
@@ -920,7 +927,7 @@ fn offers_toggle(s: &Onboard) -> bool {
 
 fn keep(s: &mut Onboard) {
     let now = s.now;
-    if let Some(session) = s.game.as_mut() {
+    if let Some(session) = s.game_mut() {
         session.play.keep(now);
     }
     s.practice.focused = true;
@@ -934,7 +941,7 @@ pub(super) fn page(p: Paint, s: &Onboard) -> Option<El> {
     }
     // The game starts on the step's first poll; until then, as it will.
     let fresh;
-    let session = match &s.game {
+    let session = match s.game() {
         Some(session) => session,
         None => {
             fresh = Session::preview(s, s.now);
@@ -944,7 +951,7 @@ pub(super) fn page(p: Paint, s: &Onboard) -> Option<El> {
     let hud = session.hud.frame();
     let offers = offers_toggle(s);
     let hint = if offers {
-        Some("Rather not hold it? Tap to start, tap again to stop.")
+        Some(tr("Rather not hold it? Tap to start, tap again to stop."))
     } else {
         s.live.as_ref().and_then(live::hint_copy)
     };
@@ -954,6 +961,7 @@ pub(super) fn page(p: Paint, s: &Onboard) -> Option<El> {
         tr("Clear your messages")
     };
     let warming = s.live.as_ref().is_some_and(|live| live.warming);
+    let reopen = s.live.as_ref().is_some_and(|live| live.reopen);
     let (stage, field) = if s.live.is_some() {
         let look = Look::<Ui> {
             caps: &s.caps,
@@ -962,7 +970,8 @@ pub(super) fn page(p: Paint, s: &Onboard) -> Option<El> {
             title,
             toggle: s.toggle,
             warming,
-            hint,
+            reopen,
+            hint: hint.filter(|_| !reopen),
             offer: offers.then(|| Rc::new(live::use_toggle) as Action<Ui>),
             finish: Rc::new(live::on_ui(finish)),
             done: Rc::new(live::on_ui(Onboard::after_game)),
@@ -985,6 +994,7 @@ pub(super) fn page(p: Paint, s: &Onboard) -> Option<El> {
             title,
             toggle: s.toggle,
             warming: false,
+            reopen: false,
             hint,
             offer: offers.then(|| {
                 Rc::new(|s: &mut Onboard| {
@@ -1121,6 +1131,7 @@ fn view(g: &Game, cx: &mut Cx<Game>) -> El {
             title: "Clear your messages",
             toggle: false,
             warming: false,
+            reopen: false,
             hint: None,
             offer: None,
             finish: Rc::new(|g: &mut Game| {
@@ -1320,7 +1331,9 @@ fn header<S: 'static>(
                 .font(title_font(p))
                 .color(p.text()),
         )
-        .child(if look.warming {
+        .child(if look.reopen {
+            row().key("lead").center_y().child(live::recovery(p))
+        } else if look.warming {
             row().key("lead").center_y().child(
                 text(live::warming_copy())
                     .key("warming")
@@ -1328,23 +1341,16 @@ fn header<S: 'static>(
                     .color(p.muted()),
             )
         } else {
-            row()
-                .key("lead")
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(if look.toggle { "Tap" } else { "Hold" })
-                        .key("hold")
-                        .font(LEAD)
-                        .color(p.muted()),
-                )
-                .child(keys(p, "keys", look.caps, g.holding))
-                .child(
-                    text(tr("and answer the one that's lit."))
-                        .key("rest")
-                        .font(LEAD)
-                        .color(p.muted()),
-                )
+            let sentence = if look.toggle {
+                tr("Tap {keys} and answer the one that's lit.")
+            } else {
+                tr("Hold {keys} and answer the one that's lit.")
+            };
+            row().key("lead").gap(8.0).center_y().children(around_keys(
+                sentence,
+                keys(p, "keys", look.caps, g.holding),
+                |words| text(words).font(LEAD).color(p.muted()),
+            ))
         });
     // The share card's Continue stands in for Done while it shows.
     let done = (chrome > 0.005).then(|| {
@@ -1405,7 +1411,9 @@ fn hud<S>(p: Paint, g: &Play, t: f64, reduced: bool, look: &Look<S>) -> Vec<El> 
                 1.0 - settled(since, 0.3)
             }
     };
-    if shown * chrome <= 0.002 {
+    // A shortcut that didn't start can't answer: the header offers
+    // Reopen Hex instead.
+    if shown * chrome <= 0.002 || look.reopen {
         return scope.into_iter().collect();
     }
     let pill = idle_pill(p, look.caps, look.toggle, t, reduced)
@@ -1457,7 +1465,7 @@ fn idle_pill(p: Paint, caps: &[String], toggle: bool, t: f64, reduced: bool) -> 
         .border(p.hair, p.faint().alpha(0.25 + 0.35 * glow))
         .child(dot)
         .child(
-            text("Not recording")
+            text(tr("Not recording"))
                 .key("idle-state")
                 .font(k.ty.small)
                 .color(p.faint()),
@@ -1467,19 +1475,15 @@ fn idle_pill(p: Paint, caps: &[String], toggle: bool, t: f64, reduced: bool) -> 
                 .size(p.hair, 14.0)
                 .fill(k.c.border_weak),
         )
-        .child(
-            text(if toggle { "Tap" } else { "Hold" })
-                .key("idle-hold")
-                .font(LEAD)
-                .color(p.text()),
-        )
-        .child(keys(p, "idle-keys", caps, dip))
-        .child(
-            text(if toggle { "to start" } else { "to answer" })
-                .key("idle-rest")
-                .font(LEAD)
-                .color(p.text()),
-        );
+        .children(around_keys(
+            if toggle {
+                tr("Tap {keys} to start")
+            } else {
+                tr("Hold {keys} to answer")
+            },
+            keys(p, "idle-keys", caps, dip),
+            |words| text(words).font(LEAD).color(p.text()),
+        ));
     row()
         .key("idle-at")
         .absolute(0.0, HUD_AT[1] - H * 0.5)
@@ -1542,7 +1546,7 @@ fn hint<S: 'static>(p: Paint, copy: &'static str, offer: Option<&Action<S>>) -> 
                 .transition(Transition::opacity()),
         )
         .children(offer.map(|offer| {
-            Button::new("Use tap to start")
+            Button::new(tr("Use tap to start"))
                 .variant(ButtonVariant::Ghost)
                 .on_press(act(offer))
                 .build_push(p.k)
@@ -2176,7 +2180,7 @@ fn ease_in_out(x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::stories::{Flow, Rehearsal, Step};
+    use super::super::stories::{Flow, Rehearsal};
     use super::*;
 
     /// The script plays the game to `until`.
@@ -2272,23 +2276,23 @@ mod tests {
     fn typing_shows_live_and_a_paste_or_return_sends_it() {
         let mut s = Onboard::new(Flow::FirstRun);
         s.rehearsal = Some(Rehearsal::new(true));
-        s.step = Step::Try;
+        s.enter_try(0.0);
         s.now = 1.5;
         assert!(step(&mut s, 1.5));
-        s.game.as_mut().unwrap().script = None;
+        s.game_mut().unwrap().script = None;
         for typed in ["o", "ok"] {
             s.practice.text = typed.into();
             assert!(changed(&mut s));
         }
-        let session = s.game.as_ref().unwrap();
+        let session = s.game().unwrap();
         assert_eq!((session.typed.as_str(), session.play.keys), ("ok", 2));
         answer(&mut s);
-        let session = s.game.as_ref().unwrap();
+        let session = s.game().unwrap();
         assert!(session.play.rounds[0].answered && s.practice.text.is_empty());
         s.now = 4.0;
         s.practice.text = "Not today.".into();
         assert!(changed(&mut s), "a paste lands all at once");
-        let session = s.game.as_ref().unwrap();
+        let session = s.game().unwrap();
         assert_eq!(session.play.rounds[1].text, "Not today.");
         assert!(session.play.rounds[1].answered);
     }
@@ -2297,11 +2301,11 @@ mod tests {
     fn a_scripted_game_ignores_the_storys_keys() {
         let mut s = Onboard::new(Flow::FirstRun);
         s.rehearsal = Some(Rehearsal::new(true));
-        s.step = Step::Try;
+        s.enter_try(0.0);
         assert!(step(&mut s, 1.0));
         s.practice.text = "t".into();
         assert!(changed(&mut s) && s.practice.text.is_empty());
-        assert_eq!(s.game.as_ref().unwrap().play.keys, 0);
+        assert_eq!(s.game().unwrap().play.keys, 0);
     }
 
     #[test]
@@ -2309,8 +2313,8 @@ mod tests {
         let mut s = Onboard::new(Flow::FirstRun);
         s.rehearsal = Some(Rehearsal::new(true));
         s.practice_field = true;
-        s.step = Step::Try;
-        assert!(!step(&mut s, 1.0) && s.game.is_none());
+        s.enter_try(0.0);
+        assert!(!step(&mut s, 1.0) && s.game().is_none());
         assert!(page(paint(), &s).is_none());
     }
 

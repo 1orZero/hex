@@ -117,6 +117,7 @@ fn history_stats_parse_sum_retained_entries_and_need_the_labs_toggle() {
     ));
     const DAY: u64 = 86_400_000;
     let entry = |id: u64, age_days: u64, raw: &str, final_text: &str| HistoryEntry {
+        cancelled: false,
         id,
         timestamp_ms: NOW - age_days * DAY,
         kind: HistoryKind::Dictation,
@@ -139,28 +140,87 @@ fn history_stats_parse_sum_retained_entries_and_need_the_labs_toggle() {
         entry(3, 0, "ten words", "ten words"),
     ];
     let utc = |ms: u64| (ms / DAY) as i64;
-    let output = stats_output(&entries, None, None, HistoryRetention::Week, NOW, utc).unwrap();
+    let hour = |ms: u64| ((ms / 3_600_000) % 24) as usize;
+    let output = stats_output(
+        &entries,
+        None,
+        None,
+        (
+            HistoryRetention::Week,
+            crate::app_settings::DEFAULT_TYPING_WPM,
+        ),
+        NOW,
+        utc,
+        hour,
+    )
+    .unwrap();
     assert_eq!(output.stats.dictations, 2);
     assert_eq!(output.stats.words, 3);
     assert_eq!(output.stats.words_per_minute, Some(15));
     assert_eq!(output.stats.changed_by_output, 1);
     assert_eq!(output.stats.streak_days, 2);
     assert_eq!(output.stats.top_apps[0].dictations, 2);
+    // Three words at 40 wpm take 4.5 s; 12 s of audio was recorded, so
+    // nothing was saved.
+    assert_eq!(output.stats.time_saved_ms, 0);
     let json = serde_json::to_value(&output).unwrap();
     assert_eq!(json["version"], 1);
     assert_eq!(json["words"], 3);
+    assert_eq!(json["typing_wpm"], crate::app_settings::DEFAULT_TYPING_WPM);
+    assert_eq!(json["time_saved_ms"], 0);
+    assert_eq!(json["hours"].as_array().map(Vec::len), Some(24));
+    assert!(
+        json.get("yearly").is_none(),
+        "the rollup is filled in later"
+    );
     let today = stats_output(
         &entries,
         Some("today"),
         None,
-        HistoryRetention::Week,
+        (HistoryRetention::Week, 65),
         NOW,
         utc,
+        hour,
     );
     assert!(today.unwrap().stats.dictations <= 1);
     assert!(stats_text(&HistoryStats::default()).starts_with("No retained"));
     assert!(require_history_stats(false).is_err());
     assert!(require_history_stats(true).is_ok());
+}
+
+/// The rollup follows Dictation stats now: `hex history stats` refuses before
+/// reading anything while the lab is off, so the JSON always includes it.
+#[test]
+fn history_stats_json_includes_the_yearly_rollup_with_dictation_stats() {
+    let root = temp();
+    let history = root.join("history.json");
+    let path = crate::history::usage::path(&history);
+    let timestamp = NOW - 86_400_000;
+    crate::history::usage::count(&path, timestamp, 9, 3_000).unwrap();
+
+    let mut output = stats_output(
+        &entries(),
+        None,
+        None,
+        (
+            HistoryRetention::Week,
+            crate::app_settings::DEFAULT_TYPING_WPM,
+        ),
+        NOW,
+        |ms| (ms / 86_400_000) as i64,
+        |ms| ((ms / 3_600_000) % 24) as usize,
+    )
+    .unwrap();
+    output.yearly = Some(yearly_output(&history, NOW));
+    let json = serde_json::to_value(&output).unwrap();
+    let yearly = &json["yearly"];
+    assert_eq!(yearly["dictations"], 1);
+    assert_eq!(yearly["words"], 9);
+    assert_eq!(
+        yearly["days"][0]["day"],
+        crate::history::stats::local_day(timestamp)
+    );
+    fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -360,15 +420,37 @@ fn history_json_names_a_recording_only_where_one_is_kept() {
 #[test]
 fn retention_defaults_fails_closed_and_off_preserves_existing_entries() {
     let root = temp();
-    assert_eq!(retention(&root).unwrap(), HistoryRetention::Week);
+    assert_eq!(retention(&root).unwrap().0, HistoryRetention::Week);
     fs::write(root.join("settings.json"), "{}").unwrap();
-    assert_eq!(retention(&root).unwrap(), HistoryRetention::Week);
+    assert_eq!(retention(&root).unwrap().0, HistoryRetention::Week);
     fs::write(root.join("settings.json"), r#"{"history_retention":"day"}"#).unwrap();
+    assert_eq!(retention(&root).unwrap(), (HistoryRetention::Day, 40));
+    fs::write(
+        root.join("settings.json"),
+        r#"{"history_retention":"day","typing_wpm":900}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        retention(&root).unwrap(),
+        (HistoryRetention::Day, crate::app_settings::MAX_TYPING_WPM)
+    );
+    for bad in [r#""fast""#, "null", "-5", "1.5", "{}"] {
+        fs::write(
+            root.join("settings.json"),
+            format!(r#"{{"history_retention":"day","typing_wpm":{bad}}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            retention(&root).unwrap(),
+            (HistoryRetention::Day, 40),
+            "{bad}"
+        );
+    }
     let entries = entries();
     let output = history_output(
         &entries,
         &args(&[]),
-        retention(&root).unwrap(),
+        retention(&root).unwrap().0,
         NOW,
         &[],
         None,
@@ -676,13 +758,6 @@ fn subtitles_follow_the_range_and_need_the_labs_toggle() {
     assert!(srt.contains("Them: Agreed."), "{srt}");
     assert!(!srt.contains("\n3\n"), "{srt}");
 
-    assert!(require_subtitle_export(true).is_ok());
-    assert!(
-        require_subtitle_export(false)
-            .unwrap_err()
-            .to_string()
-            .contains("hex labs on subtitle-export")
-    );
     assert_eq!(SubtitleFormat::from_flags(false, false), None);
     assert_eq!(
         SubtitleFormat::from_flags(false, true),
@@ -716,6 +791,14 @@ fn parses_release_commands_and_rejects_invalid_limits_and_times() {
         vec!["hex", "meetings", "list", "--json"],
         vec!["hex", "meetings", "show", "latest", "--md"],
         vec!["hex", "meetings", "search", "problems"],
+        vec![
+            "hex",
+            "meetings",
+            "search",
+            "--meeting",
+            "latest",
+            "problems",
+        ],
         vec!["hex", "meetings", "chapters", "latest", "--json"],
         vec![
             "hex",
@@ -770,4 +853,98 @@ fn parses_release_commands_and_rejects_invalid_limits_and_times() {
         crate::meeting::query::parse_time("2026-10-20T12:00:00.123456Z", NOW, false).unwrap(),
         second + 123
     );
+}
+
+#[test]
+fn meetings_search_with_meeting_flag_scopes_to_that_meeting() {
+    let meetings_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/meetings");
+    let root = temp();
+    let dest = root.join("meetings");
+    copy_dir_all(&meetings_dir, &dest);
+
+    let mut all = Vec::new();
+    meetings_to(
+        &root,
+        &MeetingsCommand::Search {
+            query: "cron".into(),
+            meeting: None,
+            since: None,
+            until: None,
+            limit: 10,
+        },
+        NOW,
+        &mut all,
+    )
+    .unwrap();
+    let all = String::from_utf8(all).unwrap();
+    assert!(all.contains("1790000000000-1001"), "{all}");
+    assert!(all.contains("1790001000000-1003"), "{all}");
+
+    let mut scoped = Vec::new();
+    meetings_to(
+        &root,
+        &MeetingsCommand::Search {
+            query: "cron".into(),
+            meeting: Some("1790000000000-1001".into()),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+        NOW,
+        &mut scoped,
+    )
+    .unwrap();
+    let scoped = String::from_utf8(scoped).unwrap();
+    assert!(scoped.contains("1790000000000-1001"), "{scoped}");
+    assert!(!scoped.contains("1790001000000-1003"), "{scoped}");
+
+    // Unknown meeting id fails clearly instead of searching everything.
+    let mut missing = Vec::new();
+    assert!(
+        meetings_to(
+            &root,
+            &MeetingsCommand::Search {
+                query: "cron".into(),
+                meeting: Some("does-not-exist".into()),
+                since: None,
+                until: None,
+                limit: 10,
+            },
+            NOW,
+            &mut missing,
+        )
+        .is_err()
+    );
+
+    // `latest` resolves like `meetings show latest`.
+    let mut latest = Vec::new();
+    meetings_to(
+        &root,
+        &MeetingsCommand::Search {
+            query: "cron".into(),
+            meeting: Some("latest".into()),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+        NOW,
+        &mut latest,
+    )
+    .unwrap();
+    let latest = String::from_utf8(latest).unwrap();
+    assert!(!latest.contains("1790000000000-1001"), "{latest}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
 }

@@ -1,9 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,10 +12,9 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 
 use crate::desktop::events::now_ms;
-use crate::durable::{sync_directory, sync_file};
+use crate::durable::{lock_contended, sync_directory, sync_file};
 
 const SAMPLE_RATE: u32 = 16_000;
-const TRANSCRIPT_TURN_GAP_MS: u64 = 3_000;
 /// Beside the manifest of a meeting Hex quit while recording or during its
 /// final transcription: its audio is
 /// saved and its final transcript runs at the next launch.
@@ -24,8 +23,10 @@ const FINAL_PENDING_FILE: &str = "final.pending";
 /// as an import the launch sweep may remove once its lock is free.
 const IMPORT_PENDING_FILE: &str = "import.pending";
 
+pub(crate) mod audio_source;
 mod capture;
 mod chapters;
+mod chunk_level;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod detection;
 #[cfg(target_os = "linux")]
@@ -37,18 +38,21 @@ mod os;
 #[cfg(target_os = "windows")]
 #[path = "meeting/windows.rs"]
 mod os;
+pub(crate) mod window_title;
 /// Linux's Trash, for capture retention too: distros ship no `trash` command.
 #[cfg(target_os = "linux")]
 pub(crate) use os::move_to_trash;
-pub(crate) use os::reveal;
 #[cfg(target_os = "macos")]
 pub(crate) use os::{
     SystemAudioAuthorization, create_tap_aggregate, request_screen_recording,
     request_system_audio_access, reset_system_audio_request, screen_recording_permitted,
     system_audio_authorization, system_audio_ready,
 };
+pub(crate) use os::{open_folder, reveal};
+mod delete;
 mod delta;
 mod echo;
+mod edit;
 mod export_name;
 mod finish;
 pub(crate) mod finished_events;
@@ -57,31 +61,47 @@ pub(crate) mod generator;
 pub(crate) mod import;
 #[cfg(any(target_os = "windows", test))]
 mod loopback_route;
+mod markdown;
 pub(crate) mod mcp;
 mod notes;
 mod notes_file;
 pub mod query;
+mod recording;
+mod recovery;
 mod retention;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod runtime;
+pub(crate) mod seen_calls;
 pub(crate) mod sweep;
 mod transcript;
+mod turn;
 mod warning;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod watcher;
+pub use capture::{microphone_muted, track_levels};
 #[cfg(all(debug_assertions, target_os = "macos"))]
 pub use chapters::chapters_file;
 #[cfg(target_os = "macos")]
 pub use chapters::section_for_id;
 pub use chapters::{Chapter, chapter_entries, section_markdown};
+#[cfg(test)]
+pub use delete::DeleteRefusal;
+pub use delete::{DeleteError, TrashedMeeting, delete, trash};
 pub use delta::*;
+pub(crate) use finish::keep_or_discard;
+pub use markdown::{
+    live_transcript_markdown, render_turns_markdown, speaker_label, transcript_markdown,
+    transcript_markdown_with,
+};
 pub use notes::{MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary};
 #[cfg(all(debug_assertions, target_os = "macos"))]
 pub use notes::{summarize, summarize_file};
+pub use recording::recording;
 #[cfg(test)]
 pub use retention::audio_expired;
-pub use retention::{expire, expire_audio, expired, retention_for};
+pub use retention::{expire, expire_audio, list, retention_for};
 pub use transcript::TranscriptReader;
+pub use turn::coalesce_transcript;
 pub use warning::TrackWarning;
 
 /// What the recorder knows about a meeting when it starts.
@@ -142,7 +162,11 @@ pub enum RecordingUpdate {
 }
 
 pub fn default_title(app: Option<&str>, created_at_ms: u64) -> String {
-    let clock = transcript::LocalTime::from_ms(created_at_ms).clock();
+    titled(app, &transcript::LocalTime::from_ms(created_at_ms).clock())
+}
+
+/// The default title naming a meeting at `clock`, `2:30 PM` or `14:30`.
+fn titled(app: Option<&str>, clock: &str) -> String {
     match app {
         Some(app) => format!("{app} call — {clock}"),
         None => format!("Meeting — {clock}"),
@@ -160,6 +184,15 @@ pub enum MeetingRequest {
     Summarize(String),
     /// Import a local audio file as a meeting (macOS; Labs › Import audio).
     Import(PathBuf),
+    /// Delete selected lines from a saved meeting's transcript
+    /// (Labs › Delete transcript lines).
+    DeleteTranscript {
+        id: String,
+        entries: Vec<TranscriptEntryKey>,
+    },
+    /// Leave Hex's microphone out of the recording under way, or put it back
+    /// (macOS; Labs › Mute the microphone while recording).
+    SetMicrophoneMuted(bool),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -210,29 +243,28 @@ pub struct MeetingManifest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chapters_refined: bool,
     /// Recorded since retention began: until the user chooses one, it is
-    /// kept 24 hours by default. Older meetings stay until then.
+    /// kept 7 days by default. Older meetings stay until then.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retention_applies: bool,
-    /// SHA-256 of the exported Markdown as Hex last wrote it. Expiry moves
-    /// that file to the Trash only while it still matches, so a copy the
-    /// user edited stays.
+    /// SHA-256 of the exported Markdown as Hex last wrote it, so Hex's own
+    /// rewrites know the copy is still the one it wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_sha256: Option<String>,
-    /// The notes file beside the transcript while Labs › Separate notes file
+    /// The notes file beside the transcript while Separate notes file
     /// wrote one, tracked so renames, Trash, and retention follow it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_export_path: Option<PathBuf>,
     /// SHA-256 of the notes file as Hex last wrote it. A later notes
-    /// regeneration rewrites it only while it still matches, and expiry moves
-    /// it only then, so a copy the user edited stays.
+    /// regeneration rewrites it only while it still matches, so a copy the
+    /// user edited stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_export_sha256: Option<String>,
     /// The tracked notes file was deleted outside Hex. Hex forgets its path
     /// and never writes another notes file for this meeting.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notes_export_removed: bool,
-    /// When the meeting's WAV tracks moved to the Trash (Labs › Expire
-    /// meeting audio separately); the transcript, notes, and Markdown stay.
+    /// When the meeting's WAV tracks moved to the Trash (Meetings ›
+    /// Settings › Keep audio); the transcript, notes, and Markdown stay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_removed_at_ms: Option<u64>,
     /// Imported from an audio file rather than recorded: one speaker track,
@@ -245,17 +277,19 @@ impl MeetingManifest {
     /// What a transcript line's source is called in the user's Markdown: an
     /// imported meeting has one track, so every turn is just Speaker.
     pub fn speaker_label(&self, source: MeetingSource) -> &'static str {
-        if self.imported {
-            "Speaker"
-        } else {
-            source.label()
-        }
+        markdown::speaker_label(source, self.imported)
     }
 
     /// Where `title` came from, inferred for manifests that predate the field.
     pub fn title_source(&self) -> TitleSource {
         self.title_source.unwrap_or_else(|| {
-            if self.title == default_title(self.app.as_deref(), self.created_at_ms) {
+            let app = self.app.as_deref();
+            let time = transcript::LocalTime::from_ms(self.created_at_ms);
+            // A default from before meeting times followed the language was
+            // named with English's 12-hour clock.
+            if self.title == titled(app, &time.clock())
+                || self.title == titled(app, &time.twelve_hour_clock())
+            {
                 TitleSource::Default
             } else {
                 TitleSource::User
@@ -279,14 +313,6 @@ impl MeetingStatus {
     pub fn is_active(self) -> bool {
         matches!(self, Self::Starting | Self::Recording | Self::Transcribing)
     }
-}
-
-pub fn active(meetings: &[MeetingManifest]) -> Option<&MeetingManifest> {
-    meetings.iter().find(|meeting| meeting.status.is_active())
-}
-
-pub fn active_or_latest(meetings: &[MeetingManifest]) -> Option<&MeetingManifest> {
-    active(meetings).or_else(|| meetings.first())
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -347,25 +373,30 @@ pub struct TranscriptEntry {
     pub text: String,
 }
 
-pub fn coalesce_transcript(
-    entries: impl IntoIterator<Item = TranscriptEntry>,
-) -> Vec<TranscriptEntry> {
-    let mut turns: Vec<TranscriptEntry> = Vec::new();
-    for entry in entries {
-        if let Some(turn) = turns.last_mut()
-            && turn.source == entry.source
-            && entry.start_ms.saturating_sub(turn.end_ms) <= TRANSCRIPT_TURN_GAP_MS
-        {
-            if !turn.text.ends_with(char::is_whitespace) {
-                turn.text.push(' ');
-            }
-            turn.text.push_str(entry.text.trim());
-            turn.end_ms = turn.end_ms.max(entry.end_ms);
-        } else {
-            turns.push(entry);
+/// Identifies one published transcript line by its speaker and exact span,
+/// not its text: the Meetings pane carries these keys so an edit deletes the
+/// lines it showed even if the words were rewritten meanwhile.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct TranscriptEntryKey {
+    pub source: MeetingSource,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+impl TranscriptEntryKey {
+    pub fn of(entry: &TranscriptEntry) -> Self {
+        Self {
+            source: entry.source,
+            start_ms: entry.start_ms,
+            end_ms: entry.end_ms,
         }
     }
-    turns
+
+    pub fn matches(self, entry: &TranscriptEntry) -> bool {
+        self.source == entry.source
+            && self.start_ms == entry.start_ms
+            && self.end_ms == entry.end_ms
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -440,15 +471,22 @@ pub fn root() -> Result<PathBuf> {
     Ok(crate::app_paths::support_dir()?.join("meetings"))
 }
 
+/// Records a meeting until `shutdown`, then transcribes it. With `discard`
+/// set by then, it skips the final pass and returns the stopped recording
+/// for its caller to move to the Trash.
 pub fn record(
     start: MeetingStart,
     shutdown: &AtomicBool,
+    discard: Option<&AtomicBool>,
     updates: Option<SyncSender<RecordingUpdate>>,
 ) -> Result<MeetingManifest> {
+    if crate::desktop::process_exit::quitting() {
+        return Err(eyre!("Hex is quitting"));
+    }
     let (_, transcription_selection) = crate::app_settings::transcription_selection();
     let transcription_model = crate::transcription::models::validate(&transcription_selection)?;
     if !crate::transcription::models::is_installed(
-        transcription_model,
+        &transcription_model,
         &transcription_selection.language,
     ) {
         return Err(eyre!("{} is not installed", transcription_model.name));
@@ -460,6 +498,16 @@ pub fn record(
     fs::create_dir_all(&meeting_dir).wrap_err("could not create meeting directory")?;
     set_owner_only(&meeting_dir, true)?;
     let _active = ActiveMeeting::acquire(&meeting_dir)?;
+    // A quit may have begun while this recording was being set up: refuse
+    // rather than start audio the drain will cut off.
+    if crate::desktop::process_exit::quitting() {
+        drop(_active);
+        recovery::discard_refused_start(&meeting_dir);
+        return Err(eyre!("Hex is quitting"));
+    }
+    // Held until this recording returns: a quit or a restart to update can
+    // see it and wait for the audio to be finalised.
+    let _recording = recording::Recording::start();
 
     let given_title = start.title.filter(|title| !title.trim().is_empty());
     #[cfg(target_os = "macos")]
@@ -520,7 +568,6 @@ pub fn record(
         let mut rolling =
             transcript::Rolling::start(meeting_dir.clone(), transcription_selection.clone());
         let rolling_feed = rolling.feed();
-        let flush_registration = transcript::register_flusher(&manifest.id, rolling.flusher());
         let writer_dir = meeting_dir.clone();
         let writer = thread::spawn(move || write_tracks(&writer_dir, receiver, rolling_feed));
         let cleanup_failed_setup =
@@ -537,6 +584,8 @@ pub fn record(
             sender: sender.clone(),
             drops: drops.clone(),
             clock: capture_clock,
+            // The system supervisor fills this in with its own watch.
+            system_silence: None,
         };
         // Each source recovers on its own: losing system audio (for example
         // when ScreenCaptureKit loses its display) never stops the microphone.
@@ -591,7 +640,6 @@ pub fn record(
         drop(titles);
         drop(live_chapters);
         keep_rename(&meeting_dir, &mut manifest);
-        drop(flush_registration);
         drop(system_capture);
         drop(microphone_capture);
         drop(sender);
@@ -605,6 +653,15 @@ pub fn record(
         manifest.system = stats.system;
         manifest.microphone = stats.microphone;
         manifest.microphone.warning = microphone_warnings.persisted();
+        if discard.is_some_and(|discard| discard.load(Ordering::Relaxed)) {
+            // Discarded from its capsule: no final pass, and the caller moves
+            // the folder to the Trash once this returns and frees its lock.
+            drop(rolling.finish());
+            manifest.status = MeetingStatus::Interrupted;
+            write_manifest(&meeting_dir, &manifest)?;
+            tracing::info!(meeting = manifest.id, "meeting recording discarded");
+            return Ok(manifest);
+        }
         if crate::desktop::process_exit::quitting() && has_recorded_audio(&manifest) {
             // Final transcription would outlast quitting's drain.
             drop(rolling.finish());
@@ -660,7 +717,6 @@ pub fn record(
         }
         keep_rename(&meeting_dir, &mut manifest);
         write_manifest(&meeting_dir, &manifest)?;
-        finished_events::publish(&manifest.id);
         println!("Saved meeting {}", meeting_dir.display());
         Ok(manifest)
     })();
@@ -939,33 +995,13 @@ fn transcribe(
     manifest.echo_suppressed_utterances = echo_suppressed;
     // Transcription takes a while; the headings use a rename made meanwhile.
     keep_rename(directory, manifest);
-
-    let ndjson_temporary = directory.join("transcript.ndjson.tmp");
-    let markdown_temporary = directory.join("transcript.md.tmp");
-    let mut ndjson = BufWriter::new(File::create(&ndjson_temporary)?);
-    let mut markdown = BufWriter::new(File::create(&markdown_temporary)?);
-    set_owner_only(&ndjson_temporary, false)?;
-    set_owner_only(&markdown_temporary, false)?;
-    writeln!(markdown, "# {}\n", display_title(manifest))?;
-    for entry in &transcript {
-        serde_json::to_writer(&mut ndjson, entry)?;
-        ndjson.write_all(b"\n")?;
-        writeln!(markdown, "{}", markdown_line(entry))?;
-    }
-    ndjson.flush()?;
-    markdown.flush()?;
-    ndjson.get_ref().sync_all()?;
-    markdown.get_ref().sync_all()?;
-    sync_directory(directory)?;
-    fs::rename(&ndjson_temporary, directory.join("transcript.ndjson"))?;
-    fs::rename(&markdown_temporary, directory.join("transcript.md"))?;
-    sync_directory(directory)?;
+    publish_transcript_files(directory, &display_title(manifest), &transcript)?;
 
     match transcript::export_markdown(
         &crate::app_settings::meeting_output_folder(),
         manifest,
         &transcript,
-        crate::labs::meeting_notes_file(),
+        crate::app_settings::meeting_notes_file(),
     ) {
         Ok(path) => {
             tracing::info!(path = %path.display(), "published meeting transcript");
@@ -978,6 +1014,37 @@ fn transcribe(
         }
     }
     let _ = fs::remove_file(directory.join(FINAL_PENDING_FILE));
+    Ok(())
+}
+
+/// Replaces `transcript.ndjson` and `transcript.md` atomically: both
+/// temporary files are written and synced, then renamed over the published
+/// pair. Final publication and a transcript edit write the same files.
+pub(super) fn publish_transcript_files(
+    directory: &Path,
+    title: &str,
+    entries: &[TranscriptEntry],
+) -> Result<()> {
+    let ndjson_temporary = directory.join("transcript.ndjson.tmp");
+    let markdown_temporary = directory.join("transcript.md.tmp");
+    let mut ndjson = BufWriter::new(File::create(&ndjson_temporary)?);
+    let mut markdown = BufWriter::new(File::create(&markdown_temporary)?);
+    set_owner_only(&ndjson_temporary, false)?;
+    set_owner_only(&markdown_temporary, false)?;
+    writeln!(markdown, "# {title}\n")?;
+    for entry in entries {
+        serde_json::to_writer(&mut ndjson, entry)?;
+        ndjson.write_all(b"\n")?;
+        writeln!(markdown, "{}", markdown_line(entry))?;
+    }
+    ndjson.flush()?;
+    markdown.flush()?;
+    ndjson.get_ref().sync_all()?;
+    markdown.get_ref().sync_all()?;
+    sync_directory(directory)?;
+    fs::rename(&ndjson_temporary, directory.join("transcript.ndjson"))?;
+    fs::rename(&markdown_temporary, directory.join("transcript.md"))?;
+    sync_directory(directory)?;
     Ok(())
 }
 
@@ -996,34 +1063,8 @@ pub fn pending_final_transcripts() -> Vec<String> {
     ids
 }
 
-/// Transcribes and publishes a meeting left with `final.pending` (Hex quit
-/// while recording or importing), as Stop would have. `None` when it is no
-/// longer pending or another process holds it. Quitting again, or a missing
-/// model, leaves it pending for the next launch; any other failure keeps it
-/// Interrupted with its draft.
-pub fn finish_pending(id: &str) -> Result<Option<MeetingManifest>> {
-    let directory = root()?.join(id);
-    let Some(_active) = ActiveMeeting::try_acquire(&directory)? else {
-        return Ok(None);
-    };
-    let pending = directory.join(FINAL_PENDING_FILE);
-    if !pending.exists() {
-        return Ok(None);
-    }
-    let (_, selection) = crate::app_settings::transcription_selection();
-    let model = crate::transcription::models::validate(&selection)?;
-    if !crate::transcription::models::is_installed(model, &selection.language) {
-        return Err(eyre!("{} is not installed", model.name));
-    }
-    let manifest = read_manifest(&directory)?;
-    tracing::info!(
-        meeting = id,
-        "finishing a meeting transcript left pending by an earlier quit"
-    );
-    finish::finish_transcription(&directory, manifest, &selection).map(Some)
-}
-
-pub fn list() -> Result<Vec<MeetingManifest>> {
+/// Maintenance must still see expired folders, including failed Trash attempts.
+fn list_all() -> Result<Vec<MeetingManifest>> {
     let root = root()?;
     let mut meetings = Vec::new();
     for entry in match fs::read_dir(root) {
@@ -1095,13 +1136,6 @@ fn meeting_is_active(directory: &Path) -> Option<bool> {
     }
 }
 
-/// Whether a failed try-lock means another handle holds the lock: `flock`'s
-/// `EWOULDBLOCK` on Unix, `ERROR_LOCK_VIOLATION` on Windows.
-fn lock_contended(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-}
-
 fn recovered_status(
     status: MeetingStatus,
     process_is_active: bool,
@@ -1123,7 +1157,8 @@ fn recovered_status(
     }
 }
 
-/// The local clock time of a timestamp, such as `2:30 PM`.
+/// The local clock time of a timestamp: `2:30 PM` in English, `14:30` in
+/// every other language.
 pub fn clock(milliseconds: u64) -> String {
     transcript::LocalTime::from_ms(milliseconds).clock()
 }
@@ -1149,22 +1184,6 @@ pub fn notes_markdown(notes: &MeetingNotes) -> String {
         .join("\n")
         .trim()
         .to_string()
-}
-
-/// Speaker turns as Markdown, for copying.
-pub fn transcript_markdown(entries: &[TranscriptEntry]) -> String {
-    coalesce_transcript(entries.iter().cloned())
-        .into_iter()
-        .map(|turn| {
-            format!(
-                "**{}** · {}\n{}",
-                turn.source.label(),
-                format_duration(turn.start_ms),
-                turn.text.trim()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// The exported Markdown while it is still on disk: the file the pane's
@@ -1220,31 +1239,17 @@ fn explorer_select(path: &Path) -> std::ffi::OsString {
     select
 }
 
-/// Moves a finished meeting to the Trash: its exported Markdown first, then
-/// its recording folder. Refuses while it records, transcribes, or writes
-/// notes. A missing Markdown file is skipped.
-pub fn trash(id: &str) -> Result<()> {
-    trash_meeting(&root()?.join(id), os::move_to_trash)
-}
-
-fn trash_meeting(
-    directory: &Path,
-    mut move_to_trash: impl FnMut(&Path) -> Result<()>,
-) -> Result<()> {
-    let manifest = read_manifest(directory)?;
-    if meeting_is_active(directory) != Some(false) {
-        return Err(eyre!("Stop the recording before deleting it"));
-    }
-    if notes_in_progress(&manifest.id) {
-        return Err(eyre!("Wait for the notes to finish before deleting"));
-    }
-    if let Some(path) = exported_markdown(&manifest) {
-        move_to_trash(&path)?;
-    }
-    if let Some(path) = notes_file::tracked(&manifest) {
-        move_to_trash(&path)?;
-    }
-    move_to_trash(directory)
+/// Explorer's argument that opens `path` itself: the quoted path alone, with
+/// no select switch, so a folder opens rather than its parent selecting it.
+///
+/// The path is quoted on its own because Explorer splits its command line on
+/// commas, and `Command` quotes only the paths that contain a space.
+#[cfg(any(windows, test))]
+fn explorer_open(path: &Path) -> std::ffi::OsString {
+    let mut open = std::ffi::OsString::from("\"");
+    open.push(path.as_os_str());
+    open.push("\"");
+    open
 }
 
 /// The lowercase hex SHA-256 of a file, `None` when it can't be read.
@@ -1261,8 +1266,8 @@ fn text_sha256(bytes: &[u8]) -> String {
 }
 
 /// Renames a meeting. The Markdown heading follows only while it still reads
-/// the previous title. The file keeps its name unless Labs › Descriptive
-/// meeting file names is on, which renames it to the new title.
+/// the previous title. The file keeps its name unless Descriptive meeting file
+/// names is on, which renames it to the new title.
 pub fn rename(id: &str, title: &str) -> Result<MeetingManifest> {
     rename_meeting(&root()?.join(id), title)
 }
@@ -1271,7 +1276,7 @@ fn rename_meeting(directory: &Path, title: &str) -> Result<MeetingManifest> {
     rename_meeting_with(
         directory,
         title,
-        crate::labs::meeting_descriptive_filenames(),
+        crate::app_settings::meeting_descriptive_filenames(),
     )
 }
 
@@ -1328,7 +1333,7 @@ fn rename_meeting_with(
 pub fn transcribe_meeting(id: &str) -> Result<MeetingManifest> {
     let (_, selection) = crate::app_settings::transcription_selection();
     let model = crate::transcription::models::validate(&selection)?;
-    if !crate::transcription::models::is_installed(model, &selection.language) {
+    if !crate::transcription::models::is_installed(&model, &selection.language) {
         return Err(eyre!("{} is not installed", model.name));
     }
     let directory = root()?.join(id);
