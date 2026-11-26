@@ -74,7 +74,7 @@ pub(super) fn merge(
                 .iter()
                 .cloned()
                 .collect::<Option<Vec<_>>>()
-                .map(|shares| joined(&shares));
+                .and_then(|shares| joined(&shares, &entry.text));
         }
     }
     kept.into_iter()
@@ -177,9 +177,14 @@ fn covered(entry: &TranscriptEntry, answered: &[Answered<'_>]) -> bool {
 
 /// `shares` in order, with a space where a word of a script written with
 /// spaces, such as `café`, meets the next word, and none after an opening
-/// bracket or before closing punctuation.
-fn joined(shares: &[String]) -> String {
+/// bracket or before closing punctuation. Where a letter or digit meets
+/// another, `local` decides, since a 178 s cut can fall inside a word: a
+/// space when it writes the two words apart, none when it writes them as
+/// one, and `None` when it writes them neither way.
+fn joined(shares: &[String], local: &str) -> Option<String> {
     let opening = |character: char| matches!(character, '(' | '[' | '{');
+    let letter = |character: char| character.is_alphanumeric() && !unspaced(character);
+    let local = local.to_lowercase();
     let mut text = String::new();
     for share in shares.iter().filter(|share| !share.is_empty()) {
         let ends_word = text.chars().next_back().is_some_and(|character| {
@@ -188,12 +193,20 @@ fn joined(shares: &[String]) -> String {
         let starts_word = share.chars().next().is_some_and(|character| {
             (character.is_alphanumeric() || opening(character)) && !unspaced(character)
         });
-        if ends_word && starts_word {
+        if text.ends_with(letter) && share.starts_with(letter) {
+            let tail = text[text.trim_end_matches(letter).len()..].to_lowercase();
+            let head = share[..share.len() - share.trim_start_matches(letter).len()].to_lowercase();
+            if local.contains(&format!("{tail} {head}")) {
+                text.push(' ');
+            } else if !local.contains(&format!("{tail}{head}")) {
+                return None;
+            }
+        } else if ends_word && starts_word {
             text.push(' ');
         }
         text.push_str(share);
     }
-    text
+    Some(text)
 }
 
 /// Each of `local`'s entries' share of `remote`, and the share of
@@ -620,6 +633,21 @@ mod tests {
                 (YOU, 4_000, "we will deploy tomorrow morning."),
             ]
         );
+        // A 178 s cut inside a word: the local text writes it as one.
+        let before = [entry(YOU, 4_000, 8_000, "qa ship the deployment today")];
+        let merged = merge(
+            &before,
+            shifted(&before, 0),
+            0,
+            &[
+                segment(1, 0, 5_000, "QA ship the deplo"),
+                segment(2, 5_000, 10_000, "yment today."),
+            ],
+        );
+        assert_eq!(
+            texts(&merged),
+            [(YOU, 4_000, "QA ship the deployment today.")]
+        );
         // Alone in a short segment, the entry aligns too weakly there and
         // keeps all of its local text.
         let before = [entry(
@@ -645,21 +673,35 @@ mod tests {
 
     #[test]
     fn shares_join_with_a_space_only_between_words_of_scripts_written_with_spaces() {
-        for (shares, expected) in [
-            (["we will", "deploy."], "we will deploy."),
+        for (shares, local, expected) in [
+            (
+                ["we will", "deploy."],
+                "we will deploy",
+                Some("we will deploy."),
+            ),
             (
                 ["Nous aimons le café", "vraiment délicieux."],
-                "Nous aimons le café vraiment délicieux.",
+                "nous aimons le café vraiment délicieux",
+                Some("Nous aimons le café vraiment délicieux."),
             ),
-            (["OK,", "then"], "OK, then"),
-            (["hello (", "world)"], "hello (world)"),
-            (["done", "."], "done."),
-            (["我們下週", "一起上線。"], "我們下週一起上線。"),
-            (["上線。", "OK"], "上線。OK"),
-            (["สวัสดี", "ครับ"], "สวัสดีครับ"),
-            (["", "alone"], "alone"),
+            (["OK,", "then"], "", Some("OK, then")),
+            (["hello (", "world)"], "", Some("hello (world)")),
+            (["done", "."], "", Some("done.")),
+            (["我們下週", "一起上線。"], "", Some("我們下週一起上線。")),
+            (["上線。", "OK"], "", Some("上線。OK")),
+            (["สวัสดี", "ครับ"], "", Some("สวัสดีครับ")),
+            (["", "alone"], "", Some("alone")),
+            (
+                ["the deplo", "yment"],
+                "the deployment",
+                Some("the deployment"),
+            ),
+            (["the deplo", "yment"], "the deploiment", None),
         ] {
-            assert_eq!(joined(&shares.map(String::from)), expected);
+            assert_eq!(
+                joined(&shares.map(String::from), local).as_deref(),
+                expected
+            );
         }
     }
 
