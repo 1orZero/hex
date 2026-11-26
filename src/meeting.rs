@@ -936,8 +936,6 @@ fn transcribe(
 ) -> Result<()> {
     let (transcript, echo_suppressed) =
         transcript::transcribe(directory, manifest, selection, rolling)?;
-    #[cfg(target_os = "macos")]
-    crate::fork::dropline::meeting::require_clear_outcome(directory)?;
     manifest.echo_suppressed_utterances = echo_suppressed;
     // Transcription takes a while; the headings use a rename made meanwhile.
     keep_rename(directory, manifest);

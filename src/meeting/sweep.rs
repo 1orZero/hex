@@ -13,6 +13,8 @@ const MANIFEST: &str = "manifest.json";
 /// Removes abandoned import folders under the meetings root. Runs once per
 /// launch, before the pending-finals pass; never fails launch.
 pub(crate) fn remove_orphaned_imports() -> usize {
+    #[cfg(target_os = "macos")]
+    crate::fork::dropline::meeting::clear_owed();
     let Ok(root) = super::root() else {
         return 0;
     };

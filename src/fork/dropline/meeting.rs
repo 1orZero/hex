@@ -257,19 +257,55 @@ pub(crate) fn join<E>(
     (kept, dropped)
 }
 
-/// Fails a final pass that Hex's quit left with audio sent and no memory
-/// clear recorded, so the meeting stays pending and the next launch, which
-/// finishes it from its files, clears.
-pub(crate) fn require_clear_outcome(directory: &Path) -> color_eyre::eyre::Result<()> {
-    if !crate::desktop::process_exit::quitting() || !sidecar::exists(directory) {
-        return Ok(());
+/// At launch, on its own thread: the memory clear a quit cut short, for
+/// each meeting that sent audio and has no clear outcome recorded. Meetings
+/// still waiting for their final pass clear when it runs.
+pub(crate) fn clear_owed() {
+    if cfg!(test) {
+        return;
     }
-    let summary = sidecar::Summary::of(sidecar::read(directory));
-    color_eyre::eyre::ensure!(
-        !summary.sent() || summary.clear_recorded,
-        "Hex quit before Dropline's memory clear was recorded"
-    );
-    Ok(())
+    let started = thread::Builder::new()
+        .name("hex-dropline-owed-clears".into())
+        .spawn(|| {
+            let Ok(root) = crate::meeting::root() else {
+                return;
+            };
+            clear_owed_in(
+                &root,
+                &crate::meeting::pending_final_transcripts(),
+                &*production(),
+                saved_credentials().as_ref(),
+            );
+        });
+    if let Err(error) = started {
+        tracing::warn!(%error, "could not start Dropline's owed memory clears");
+    }
+}
+
+fn clear_owed_in(
+    root: &Path,
+    pending: &[String],
+    transport: &dyn Transport,
+    credentials: Option<&Credentials>,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if crate::desktop::process_exit::quitting() {
+            return;
+        }
+        let directory = entry.path();
+        let waiting = pending.iter().any(|id| entry.file_name() == id.as_str());
+        if waiting || !sidecar::exists(&directory) {
+            continue;
+        }
+        let summary = sidecar::Summary::of(sidecar::read(&directory));
+        let live = lock(&LIVE).iter().any(|live| live.directory == directory);
+        if summary.sent() && !summary.clear_recorded && !live {
+            sidecar::Writer::new(&directory).write(&clear(transport, credentials));
+        }
+    }
 }
 
 /// A meeting Hex quit in, finished at the next launch: the segments

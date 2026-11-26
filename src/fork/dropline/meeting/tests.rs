@@ -592,13 +592,47 @@ fn quitting_with_a_request_in_flight_child() {
     let summary = summary(&directory);
     assert_eq!(summary.segments[0].reason.as_deref(), Some("Hex 結束"));
     assert!(summary.sent() && !summary.clear_recorded);
-    // The final pass fails, so the meeting stays pending for the next launch.
-    assert!(require_clear_outcome(&directory).is_err());
-    sidecar::Writer::new(&directory).write(&Line::Clear {
-        result: "cleared".into(),
-        reason: None,
+}
+
+#[test]
+fn the_next_launch_clears_once_for_each_meeting_a_quit_left_uncleared() {
+    let root = scratch("owed");
+    let fake = Arc::new(Fake::texts(&[]));
+    let meeting = |name: &str, lines: &[Line]| {
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut writer = sidecar::Writer::new(&directory);
+        for line in lines {
+            writer.write(line);
+        }
+        directory
+    };
+    let sent = Line::Segment(SegmentLine {
+        track: SYSTEM,
+        seq: 1,
+        start: 0,
+        end: 16_000,
+        state: State::Failed,
+        sent: true,
+        text: None,
+        reason: Some("Hex 結束".into()),
     });
-    assert!(require_clear_outcome(&directory).is_ok());
+    let cleared = Line::Clear {
+        result: "failed".into(),
+        reason: Some("HTTP 500".into()),
+    };
+    let owed = meeting("qa-owed", std::slice::from_ref(&sent));
+    let done = meeting("qa-done", &[sent.clone(), cleared]);
+    let waiting = meeting("qa-waiting", &[sent]);
+    std::fs::create_dir_all(root.join("qa-local")).unwrap();
+    clear_owed_in(&root, &["qa-waiting".into()], &*fake, Some(&credentials()));
+    assert_eq!(fake.log(), ["clear"]);
+    assert!(summary(&owed).clear_recorded);
+    assert_eq!(sidecar::read(&done).len(), 2);
+    assert!(!summary(&waiting).clear_recorded);
+    clear_owed_in(&root, &[], &Fake::texts(&[]), Some(&credentials()));
+    assert!(summary(&waiting).clear_recorded);
+    assert_eq!(fake.log(), ["clear"]);
 }
 
 #[test]
