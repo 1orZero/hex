@@ -37,6 +37,10 @@ nonisolated struct ForkDroplineSettings: @unchecked Sendable {
         nonmutating set { defaults?.set(newValue, forKey: Key.enabled) }
     }
 
+    /// Dropline transcribes this iPhone's dictations: no other speech engine runs for them
+    /// unless Dropline's final text fails.
+    var isSelected: Bool { isEnabled && endpoint != nil }
+
     var lastFallback: Fallback? {
         guard let reason = defaults?.string(forKey: Key.fallbackReason),
               let at = defaults?.object(forKey: Key.fallbackAt) as? Double else { return nil }

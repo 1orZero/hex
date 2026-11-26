@@ -77,6 +77,7 @@ final class KeyboardParakeet {
         if measured.available > 0 {
             KeyboardParakeetSettings().recordKeyboardLimit(measured.footprint + measured.available)
         }
+        if ForkDroplineSettings().isSelected { return }
         // No model for this keyboard (`KeyboardParakeetPlan`): Hex reads the same plan and says
         // why itself (a limit under 131 MB, another language, nothing downloaded).
         guard let choice = Self.choice() else { return }

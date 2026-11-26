@@ -105,6 +105,7 @@ final class KeyboardLiveDictation {
     /// Finds the language the dictation will be transcribed in and starts Apple's recogniser
     /// for it, only if its model is already on the iPhone.
     private func resolve() {
+        if let source = ForkDroplineLiveWords.source(sampleRate: sampleRate) { attach(source); return }
         guard #available(iOS 26.0, *) else {
             giveUp("needs iOS 26")
             return

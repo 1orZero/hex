@@ -22,6 +22,8 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXMobile/DictationController.swift` | `finishRecording()`: `activeTranscriber.transcribe(` becomes `activeTranscriber.transcribePreferringDropline(` with the same arguments | The app's dictation-finish point: Dropline first, the local engine on failure. |
 | `ios/HEXMobile/ContentView.swift` | `homeView`: `ForkDroplineSettingsCard()` and a blank line after the Settings pages card (`.padding(.top, 8)`) | Adds, selects, and deletes the provider. |
 | `ios/HEXKeyboard/KeyboardParakeet.swift` | `KeyboardTranscription.transcribe(_:hints:audioSeconds:)`: `if let dropline = try await ForkKeyboardDropline.transcribe(url, hints: hints) { return dropline }` as its first line | The keyboard's own dictation: Dropline first, the keyboard's local engines when Dropline isn't selected or fails. |
+| `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let source = ForkDroplineLiveWords.source(sampleRate: sampleRate) { attach(source); return }` as its first line (1 line) | While Dropline is selected, the keyboard's live words are Dropline's drafts (`ForkDroplineLiveTranscriber`) and Apple's speech recognition doesn't start. |
+| `ios/HEXKeyboard/KeyboardParakeet.swift` | `warmUp(memoryWarned:)`: `if ForkDroplineSettings().isSelected { return }` after `recordKeyboardLimit` (1 line) | The keyboard doesn't load its speech model while Dropline is selected. |
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `begin(in:microphone:pressedAt:armed:)`: `ForkDroplineRecognition.prepare()` after `let jobID = UUID().uuidString` | Opens the Dropline session as the keyboard starts recording (best effort). |
 | `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links, since upstream's handler ignores hosts other than `keyboard`, and folds in the Mac's vocabulary each time Hex becomes active. |
 | `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyChanged)` after upstream's `.onReceive(… .hexWordsListsDidChange)`, which follows the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link or the Mac's vocabulary changes it; otherwise the editor's next add or remove writes its stale list back. |
@@ -70,8 +72,8 @@ nothing inserted, as when a local engine hears none, and doesn't fall back.
   identifiers marked by an underscore, and runs with kana or Hangul. For mixed Chinese text, it
   uses a simplified copy to look up the whole phrase and keeps the input characters that were
   already distinctly traditional. This distinguishes `干擾` from `干燥` without treating either
-  spelling as a rule for every name or phrase. Local and fallback transcripts and live words
-  bypass this parser.
+  spelling as a rule for every name or phrase. Local and fallback transcripts bypass this
+  parser; Dropline's live drafts go through it.
 - In the app: dictations Hex records itself (the app's Dictate, the Action button, Control Center, Siri,
   and the keyboard's dictations handed to Hex) finish in `DictationController.finishRecording()`.
 - In the keyboard: from iOS 26 the keyboard records and transcribes by itself
@@ -84,8 +86,33 @@ nothing inserted, as when a local engine hears none, and doesn't fall back.
   (about 3 KB a second, under 600 KB at the 178 s limit) and one level byte per 20 ms, against the 24 MB
   a keyboard must have free before it dictates by itself. The memory of the network stack in a keyboard
   hasn't been measured on an iPhone. A local engine Hex hasn't already loaded loads only when Dropline
-  fails. The keyboard's live words (Show what I say, Type as I speak) stay local; the final text is
-  Dropline's.
+  fails. While recording, the keyboard's live words are Dropline's (below).
+
+### While recording
+
+While Dropline is selected, nothing else transcribes a dictation the keyboard records by itself:
+
+- Live words (Settings › Dictation › Live words, In bar or Into field) come from Dropline
+  (`ios/HEXShared/Fork/ForkDroplineLiveWords.swift`). Every 4 s of audio, the recording so far (kept
+  at 16 kHz, encoded as the final recording is) goes to `/client/dictate` in the session the final
+  text uses, with the custom vocabulary as context, and its `final_text` replaces what shows. Until
+  the first text the preview says Listening…, and an empty answer leaves it. A round whose time
+  comes while the previous request is still out is skipped, so at most 15 go out a minute. Past
+  180 s of audio no request goes out and the last text stays. A 429, a missing bearer, a second
+  401, a token endpoint failure, or audio Dropline would refuse ends the drafts for that
+  dictation; a timeout, a network error, or another HTTP error leaves the next round going.
+  Drafts never record a fallback or run a local engine. With Live words Off, none go out.
+- Apple's speech recognition doesn't start for live words, and the keyboard doesn't load its
+  speech model (Parakeet) as it appears.
+- The final text is Dropline's, as before. Only when it fails does the keyboard's local engine
+  transcribe the recording: Parakeet if this keyboard process had it loaded already, else Apple's
+  speech recognition on the iPhone. The card shows the fallback.
+- Dictations Hex records itself (the app, Keep mic warm, Open Hex) have no live words, so they
+  send no drafts. The app still prepares its local engine at launch, since its setup and the
+  keyboard's handoff wait on it; it doesn't run during a Dropline dictation unless the final text
+  fails.
+- Unknown: whether Dropline writes each draft into the account's memory, and whether it counts
+  the requests of one session as one dictation.
 
 ## Vocabulary link
 
