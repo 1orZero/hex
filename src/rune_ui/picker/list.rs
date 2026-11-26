@@ -316,6 +316,10 @@ fn model_row(ui: &Ui, p: Paint, entry: &Entry, language: &str) -> El {
         actions = actions.child(delete);
     }
     actions = actions.child(match &entry.state {
+        #[cfg(target_os = "macos")]
+        State::InUse if crate::rune_ui::fork_dropline::local_is_fallback(ui) => {
+            crate::rune_ui::fork_dropline::fallback_badge(p)
+        }
         State::InUse => facts::in_use(p),
         State::Preparing { .. } => row()
             .key("progress-slot")

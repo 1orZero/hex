@@ -15,6 +15,7 @@ pub(crate) mod meeting;
 mod store;
 mod text;
 
+use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -32,6 +33,10 @@ const MAX_AUDIO_MS: usize = 178_000;
 const DICTATE_BUDGET: Duration = Duration::from_secs(10);
 /// A prepared session older than this belongs to no capture still recording.
 const SESSION_AGE: Duration = Duration::from_secs(200);
+/// Answers kept for History; a dictation that never reaches History
+/// (cancelled, no speech, a failed paste) leaves its answer until newer ones
+/// push it out.
+const KEPT_ANSWERS: usize = 16;
 
 /// The saved provider: its token endpoint and whether dictation uses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +70,17 @@ static STATE: Mutex<State> = Mutex::new(State {
     prepared: None,
     fallback: None,
 });
+
+/// Which text a Dropline dictation used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    Dropline,
+    Fallback,
+}
+
+/// Recent Dropline dictations' answers by submission instant, which the
+/// dictation pipeline carries to History as `JobTimings::total_started`.
+static ANSWERS: Mutex<VecDeque<(Instant, Answer)>> = Mutex::new(VecDeque::new());
 
 fn state() -> MutexGuard<'static, State> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -203,11 +219,13 @@ pub struct Job {
     samples: Vec<f32>,
     session: String,
     vocabulary: Vec<String>,
+    submitted: Instant,
 }
 
 /// The clip (16 kHz mono) for Dropline while it is selected, with the
-/// session its capture prepared.
-pub fn job(samples: &[f32]) -> Option<Job> {
+/// session its capture prepared. `submitted` is the dictation's submission
+/// instant, which later names it to [`history_model`].
+pub fn job(samples: &[f32], submitted: Instant) -> Option<Job> {
     if !selected() {
         return None;
     }
@@ -220,6 +238,7 @@ pub fn job(samples: &[f32]) -> Option<Job> {
         samples: samples.to_vec(),
         session: prepared.unwrap_or_else(new_session),
         vocabulary: crate::dictation::vocabulary::terms(),
+        submitted,
     })
 }
 
@@ -227,6 +246,18 @@ pub fn job(samples: &[f32]) -> Option<Job> {
 /// When Dropline answers, the local transcript is still waited for off this
 /// thread, so its deadlines keep a wedged engine from holding later jobs.
 pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, String> {
+    answer(job, local, transcribe, |fallback| {
+        state().fallback = fallback
+    })
+}
+
+/// [`wait`] with Dropline's request and General's fallback status passed in.
+fn answer(
+    job: Option<Job>,
+    local: PendingTranscript,
+    transcribe: impl FnOnce(&Job) -> Result<String, client::Failure>,
+    status: impl FnOnce(Option<Fallback>),
+) -> Result<Transcribed, String> {
     let Some(job) = job else {
         return local.wait();
     };
@@ -241,7 +272,8 @@ pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, S
                 chars = text.chars().count(),
                 "transcribed dictation with Dropline"
             );
-            state().fallback = None;
+            status(None);
+            remember(job.submitted, Answer::Dropline);
             let watched = std::thread::Builder::new()
                 .name("hex-dropline-local".into())
                 .spawn(move || {
@@ -259,12 +291,39 @@ pub fn wait(job: Option<Job>, local: PendingTranscript) -> Result<Transcribed, S
         Err(failure) => {
             let reason = failure.to_string();
             tracing::warn!(provider = "dropline-private", %reason, "Dropline failed; using the local model");
-            state().fallback = Some(Fallback {
+            status(Some(Fallback {
                 reason,
                 at: SystemTime::now(),
-            });
+            }));
+            remember(job.submitted, Answer::Fallback);
             local.wait()
         }
+    }
+}
+
+fn remember(submitted: Instant, answer: Answer) {
+    let mut answers = ANSWERS.lock().unwrap_or_else(|error| error.into_inner());
+    answers.push_front((submitted, answer));
+    answers.truncate(KEPT_ANSWERS);
+}
+
+/// The speech model History records for the dictation submitted at
+/// `submitted`: Dropline when it answered, the local model marked as the
+/// fallback when Dropline failed, else the local model as upstream names it.
+pub fn history_model(submitted: Instant) -> Option<String> {
+    let answer = {
+        let mut answers = ANSWERS.lock().unwrap_or_else(|error| error.into_inner());
+        answers
+            .iter()
+            .position(|(at, _)| *at == submitted)
+            .and_then(|index| answers.remove(index))
+            .map(|(_, answer)| answer)
+    };
+    let local = crate::history::dictation_model();
+    match answer {
+        Some(Answer::Dropline) => Some(NAME.to_owned()),
+        Some(Answer::Fallback) => local.map(|model| format!("{model}（Dropline 失敗後改用）")),
+        None => local,
     }
 }
 
@@ -382,6 +441,93 @@ mod tests {
             .foreground(vec![], Box::new(|_, _| Ok("qa-本机软件".into())))
             .unwrap();
         assert_eq!(wait(None, local).unwrap().text, "qa-本机软件");
+    }
+
+    fn qa_job() -> Job {
+        Job {
+            samples: vec![0.0; 1_600],
+            session: new_session(),
+            vocabulary: Vec::new(),
+            submitted: Instant::now(),
+        }
+    }
+
+    fn local(
+        engine: &crate::transcription::engine::TranscriptionEngine,
+        delay: Duration,
+    ) -> PendingTranscript {
+        engine
+            .foreground(
+                vec![],
+                Box::new(move |_, _| {
+                    std::thread::sleep(delay);
+                    Ok("qa-本機".into())
+                }),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn history_names_dropline_when_it_answers() {
+        let engine =
+            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+        let job = qa_job();
+        let submitted = job.submitted;
+        let mut fallback = None;
+        let started = Instant::now();
+        let transcribed = answer(
+            Some(job),
+            local(&engine, Duration::from_secs(3)),
+            |_| {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok("qa-Dropline".into())
+            },
+            |status| fallback = Some(status),
+        )
+        .unwrap();
+        let waited = started.elapsed();
+        assert_eq!(transcribed.text, "qa-Dropline");
+        assert!(matches!(fallback, Some(None)));
+        assert!(transcribed.finish_ms >= 200, "{}", transcribed.finish_ms);
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert_eq!(history_model(submitted).as_deref(), Some(NAME));
+        assert_eq!(history_model(submitted), crate::history::dictation_model());
+    }
+
+    #[test]
+    fn history_marks_the_local_model_after_dropline_fails() {
+        let engine =
+            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+        let job = qa_job();
+        let submitted = job.submitted;
+        let mut fallback = None;
+        let transcribed = answer(
+            Some(job),
+            local(&engine, Duration::ZERO),
+            |_| Err(client::Failure::Timeout),
+            |status| fallback = status,
+        )
+        .unwrap();
+        assert_eq!(transcribed.text, "qa-本機");
+        assert_eq!(
+            fallback.map(|fallback| fallback.reason),
+            Some(client::Failure::Timeout.to_string())
+        );
+        let model = crate::history::dictation_model().unwrap();
+        assert_eq!(
+            history_model(submitted),
+            Some(format!("{model}（Dropline 失敗後改用）"))
+        );
+    }
+
+    #[test]
+    fn history_names_the_local_model_without_dropline() {
+        let engine =
+            crate::transcription::engine::TranscriptionEngine::start(Default::default()).unwrap();
+        let submitted = Instant::now();
+        let transcribed = wait(None, local(&engine, Duration::ZERO)).unwrap();
+        assert_eq!(transcribed.text, "qa-本機");
+        assert_eq!(history_model(submitted), crate::history::dictation_model());
     }
 
     #[test]

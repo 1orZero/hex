@@ -22,11 +22,13 @@ are upstream fixes carried before a release has them, not hooks.
 | Upstream file | Hook | Purpose |
 | --- | --- | --- |
 | `src/main.rs` | `mod fork;` (macOS) after `mod feedback;` | Compiles the fork module. |
-| `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples, submitted_at)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/parakeet.rs` | `record_history`: `model: crate::fork::dropline::history_model(completed.timings.total_started),` in place of `model: crate::history::dictation_model(),` (1 line) | History names what made the text: Dropline, or the local model marked as Dropline's fallback. `total_started` is the job's `submitted_at`, the same instant `job` received. Upstream `dev` moved `record_history` to `src/dictation/modes/output.rs`, which all three OSes build; there the hook becomes `model: crate::fork::dropline::history_model(input.total_started)` behind `#[cfg(target_os = "macos")]`, keeping upstream's line for the other OSes. |
 | `src/recognition.rs` | `fork::dropline::prepare()` after `worker.prepare_paste()` on capture start | Opens the Dropline session early (best effort). |
 | `src/macos_rune.rs` | `fork::dropline::deselect()` in `StatusItemAction::SelectModel` | Choosing a local model in the menu bar stops using Dropline. |
 | `src/rune_ui.rs` | `mod fork_dropline;`, `Ui.fork_dropline` field and its default, both behind `#[cfg(target_os = "macos")]` | The picker section's form state, which only macOS reads. |
 | `src/rune_ui/picker.rs` | `fork_dropline::model_chosen()` at the top of `choose`; `content.children(fork_dropline::section(ui, p))` after the body in `modal` | Choosing a local model in the picker stops using Dropline; the picker's last section adds, uses, and deletes the provider. |
+| `src/rune_ui/picker/compare.rs`, `src/rune_ui/picker/list.rs` | `#[cfg(target_os = "macos")] State::InUse if crate::rune_ui::fork_dropline::local_is_fallback(ui) => { … fallback_badge(p) }` before `State::InUse => facts::in_use(p),` (4 lines each) | While Dropline is in use, the local model's card and row read 失敗時改用 instead of In use. |
 | `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name)` in the Speech model button; `description.or_else(\|\| fork_dropline::status(ui, p))` after the description match | General names Dropline while it is in use and shows the last fallback. |
 | `src/capture_host.rs` | `scrawl_engine`: `let transcriber = crate::fork::annotate::traditional(transcriber);` first (macOS, 2 lines) | Annotate's capture engine transcribes through the conversion, whichever of Hex's model or Apple Speech `ChosenTranscriber` picks. |
 | `src/capture_host/replay.rs` | after `let transcriber = ChosenTranscriber;` in the replay's finish: `let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));` (macOS, 2 lines) | The 15 s replay transcribes with its own `ChosenTranscriber`, outside the engine. |
@@ -90,7 +92,7 @@ are still where the hooks expect them.
 
 A custom transcription provider, "Dropline 私人 API", in the Mac and iPhone apps. While it is selected, a
 finished dictation's recording is sent to Dropline's private API and its text replaces the local model's;
-the rest of the pipeline (corrections, modes, transformations, paste, History) is unchanged. When Dropline
+the rest of the pipeline (corrections, modes, transformations, paste) is unchanged. When Dropline
 fails (network error, timeout, a second 401 after one token refetch, a bad answer), the dictation uses the
 local model's text of the same recording and says why. An empty `final_text` is a valid answer: Dropline
 heard no speech, so the dictation inserts nothing and does not fall back.
@@ -116,6 +118,15 @@ heard no speech, so the dictation inserts nothing and does not fall back.
 - The local model still transcribes every clip while Dropline runs, so a fallback needs no second
   transcription. When Dropline answers, the local transcript still finishes in the background under its own
   deadlines. General and the model picker show the last fallback.
+- History's Speech model names what made each dictation's text: `Dropline 私人 API` when Dropline
+  answered, the local model followed by `（Dropline 失敗後改用）` when it fell back (for example
+  `Qwen3-ASR 1.7B（Dropline 失敗後改用）`), and the local model alone when Dropline wasn't selected.
+  `hex history` and History's search read the same text. Inference is how long the text took: Dropline's
+  request when it answered (the local transcript isn't waited for), or Dropline's attempt plus the rest of
+  the local transcript when it fell back. The answers live in memory by submission instant, the newest
+  16 kept, until History records the dictation.
+- While Dropline is in use, the picker's local model reads 失敗時改用 where it read In use; Dropline's row
+  reads 使用中.
 - The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data
   folder); the endpoint and selection in `fork/dropline-private.json` in the data folder. Opus comes from
   macOS's encoder.
@@ -424,78 +435,3 @@ fork/daily.sh [--continue] [--continue-ios] [--allow-identity-change] [--no-push
 | 44 | Reading the Mac's vocabulary or copying it to the iPhone failed |
 
 ### Merge conflicts
-
-On exit 20 the merge stays in progress in `~/.hex-fork/repo`. Resolve each file by taking upstream's
-version and re-applying only the fork hooks listed under "Upstream files the fork changes". Commit,
-then run `fork/daily.sh --continue`, which builds both apps, pushes, and installs. When the right
-resolution isn't clear, run `git -C ~/.hex-fork/repo merge --abort` and report the conflict; the next
-run aborts any merge still in progress and tries again.
-
-On exit 23 the `ios-stable` merge stays in `~/.hex-fork/ios-src`. App Store tags are release trees beside
-upstream's `dev`, so the script merges against the App Store tag `ios-stable` last merged rather than
-git's merge base: it applies the fork's changes (`ios-stable` against that tag) to the new tag, and only
-those changes can conflict. `HEAD` there is the new tag; resolve each file by taking upstream's version
-and re-applying only the hooks in `ios-stable`'s `FORK.md`, `git add` it (don't commit), then run
-`fork/daily.sh --continue-ios`, which commits the merge with `ios-stable` and the tag as parents, builds,
-pushes, and installs. When the right resolution isn't clear, run
-`git -C ~/.hex-fork/ios-src cherry-pick --abort` and report the conflict; the next run drops any merge
-still in progress and tries again.
-
-## Mac app
-
-- Built by upstream's `scripts/build-app.sh` with `HEX_RELEASE_UNSIGNED=1` (Hex, `anomaly.hex`),
-  `HEX_BUILD_CHANNEL=stable`, and `HEX_VERSION` set to the release tag, so it behaves as a stable release
-  and dev-only Labs stay hidden. The bundle ID and the data folder (`~/Library/Application Support/hex`)
-  are the official app's.
-- Updates are off through `HEX_DISABLE_UPDATES=1` in `Info.plist`'s `LSEnvironment`, the runtime switch
-  upstream's updater reads (`updates_off_by_env` in `src/updater.rs`). `HEX_LOCAL_BUILD=1` also turns updates off,
-  but it makes the app a dev build. `HexForkCommit` in `Info.plist` records the fork commit.
-- Signed with the Apple Development identity of team 67A6AV33K9, because `scripts/macos-signing.sh` accepts
-  only a Developer ID identity, which the team doesn't have. The app needs no provisioning profile, and
-  its designated requirement stays the same across rebuilds, so macOS permissions survive them.
-- The install waits while Hex records, transcribes, or runs a meeting (up to `HEX_FORK_IDLE_WAIT` seconds,
-  default 600), quits it with `hex quit`, replaces `/Applications/Hex.app`, and reopens it if it was running.
-  Replacing a Hex signed by another identity needs `--allow-identity-change`: the old app moves to
-  `~/.hex-fork/backup/Hex.app` and `tccutil` resets its permissions, so Hex asks for them again.
-- The clone builds in its own `target/`, because `build-app.sh` copies from `<repo>/target/release` and would
-  ship a stale binary with a shared `CARGO_TARGET_DIR`. Rust comes from `~/.hex-fork/rustup` (stable, updated
-  each run), which leaves the Mac's own toolchains alone.
-
-## iPhone app
-
-- Built from `ios-stable` in a staging worktree, `~/.hex-fork/ios-src`, so the repo is never rewritten. The
-  script reads the app's bundle ID from `ios/project.yml` (`anomaly.hex.mobile` since the App Store
-  releases) and replaces it under `ios/` (Swift, entitlements, `project.yml`) with `io.veraze.hex.mobile`,
-  which moves the keyboard and widget extensions, the App Group, and any keychain group with it.
-  `ios/project.fork.yml` includes `project.yml` and sets team 67A6AV33K9 and the names "Hex Fork" and
-  "Hex Fork Keyboard". As upstream's App Store build does, the version is the tag's (`1.0.4` for
-  `ios-beta-appstore-1.0.4`).
-- The build is checked before it installs: the app's ID and team, the `group.io.veraze.hex.mobile`
-  entitlement on the app and the keyboard, and every extension's ID under `io.veraze.hex.mobile`.
-- `xcodebuild -allowProvisioningUpdates` builds Release with the team's profiles for `io.veraze.hex.mobile`,
-  and `xcrun devicectl device install app` installs it on Derek888 over Wi-Fi.
-- The iPhone app has no in-app updater.
-
-## The Mac's vocabulary on the iPhone
-
-One way, Mac to iPhone, each run after the installs:
-
-1. Read the Mac's vocabulary in its order (`hex vocabulary list --json`, from the running Hex) into
-   `~/.hex-fork/state/ios-vocabulary/next/fork-mac-vocabulary.json` as `{"terms": [...]}`. When Hex
-   isn't running, the step is skipped (`skipped-hex-not-running`) and the next run copies.
-2. When the terms differ from the last copy (`~/.hex-fork/state/ios-vocabulary/fork-mac-vocabulary.json`),
-   the iPhone app was installed in this run, or `--force` is given, copy the file to
-   `Library/fork-mac-vocabulary.json` in the App Group `group.io.veraze.hex.mobile` with
-   `xcrun devicectl device copy to --domain-type appGroupDataContainer`. devicectl can't write to the
-   container's root (CoreDeviceError 7000), so the file goes under `Library/`.
-   The iPhone app folds it into its list as `ios-stable`'s `FORK.md` describes, the next time the keyboard
-   or Hex comes on screen, without Derek opening Hex.
-3. `--no-push` reads and compares only (`changed` or `up-to-date`).
-
-The file holds names and email addresses, so it is written owner-only under `~/.hex-fork/state/` and never
-inside a repository or a build. Copying rather than building it into the app means a changed vocabulary
-needs no rebuild or reinstall, which would close the keyboard and Hex on the iPhone each night. The nightly
-vocabulary upkeep (`fork/vocabulary.py apply`) should run before `daily.sh`, so the iPhone gets the
-same night's order.
-
-Environment overrides: `HEX_FORK_HOME`, `HEX_FORK_BRANCH`, `HEX_FORK_IOS_BRANCH`, `HEX_FORK_REPO`, `HEX_FORK_UPSTREAM_REPO`, `HEX_FORK_TEAM_ID`, `HEX_FORK_IPHONE`, `HEX_FORK_IOS_BUNDLE_PREFIX`, `HEX_FORK_IOS_APP_NAME`, `HEX_FORK_IDLE_WAIT`, `HEX_FORK_HEX` (the `hex` command the vocabulary is read with).

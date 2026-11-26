@@ -1,8 +1,8 @@
 //! The fork's Dropline private API in the window (`crate::fork::dropline`,
 //! macOS): a section closing the speech model picker that adds, uses, and
-//! deletes the provider, and General's Speech model row naming it while
-//! dictation uses it. Elsewhere, and in scenes and tests, every hook leaves
-//! the window as it is.
+//! deletes the provider, the picker's local model marked as the fallback,
+//! and General's Speech model row naming it while dictation uses it.
+//! Elsewhere, and in scenes and tests, every hook leaves the window as it is.
 
 #[cfg(not(target_os = "macos"))]
 mod other {
@@ -30,7 +30,9 @@ mod other {
 pub(super) use other::{model_chosen, model_name, section, status};
 
 #[cfg(target_os = "macos")]
-pub(super) use macos::{Form, model_chosen, model_name, section, status};
+pub(super) use macos::{
+    Form, fallback_badge, local_is_fallback, model_chosen, model_name, section, status,
+};
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -117,6 +119,27 @@ mod macos {
             minutes => format!("{} 小時前", minutes / 60),
         };
         format!("{when}改用 {}：{}", local_name(ui), fallback.reason)
+    }
+
+    /// Whether the picker's model in use only answers when Dropline fails.
+    pub(in crate::rune_ui) fn local_is_fallback(ui: &Ui) -> bool {
+        in_use(ui)
+    }
+
+    /// Takes the place of the local model's In use while Dropline is in use.
+    pub(in crate::rune_ui) fn fallback_badge(p: Paint) -> El {
+        row()
+            .key("fork-dropline-fallback")
+            .h(28.0)
+            .gap(8.0)
+            .center_y()
+            .child(status_dot(p.faint()))
+            .child(
+                text("失敗時改用")
+                    .key("label")
+                    .font(p.k.ty.ui_medium)
+                    .color(p.muted()),
+            )
     }
 
     /// A local model was chosen in the picker.

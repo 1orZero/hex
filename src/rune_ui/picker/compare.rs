@@ -257,6 +257,10 @@ pub(super) fn body(ui: &Ui, p: Paint, entries: &[Entry], language: &str) -> El {
             column = column.child(cell(p, measure.key, ROW, value));
         }
         let action = match &entry.state {
+            #[cfg(target_os = "macos")]
+            State::InUse if crate::rune_ui::fork_dropline::local_is_fallback(ui) => {
+                crate::rune_ui::fork_dropline::fallback_badge(p)
+            }
             State::InUse => facts::in_use(p),
             State::Preparing { .. } => progress_line(p, entry),
             _ if entry.def.available() => facts::choose_button(p, entry, primary == Some(index)),
