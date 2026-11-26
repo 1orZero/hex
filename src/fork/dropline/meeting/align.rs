@@ -192,7 +192,8 @@ fn shares(local: &[&str], remote: &str) -> Option<(f64, Vec<String>)> {
             .iter()
             .find(|(i, _)| *i >= first)
             .map_or(remote.len(), |(_, j)| remote_chars[*j].1.start);
-        let cut = near_punctuation(remote, &remote_chars, at, next).max(previous);
+        let cut = near_punctuation(remote, &remote_chars, at, next);
+        let cut = outside_word(remote, cut, next).max(previous);
         cuts.push(cut);
     }
     cuts.push(remote.len());
@@ -232,6 +233,23 @@ fn near_punctuation(
         .filter(|end| *end <= next.max(at))
         .min_by_key(|end| end.abs_diff(at))
         .unwrap_or(at)
+}
+
+/// A boundary at byte `cut` of `text` moved out of a word it falls inside,
+/// a run of ASCII letters, digits, and marks: to the word's end when that
+/// comes no later than `next`, else to its start.
+fn outside_word(text: &str, cut: usize, next: usize) -> usize {
+    let word = |character: char| character.is_ascii_graphic();
+    let (before, after) = text.split_at(cut);
+    if !before.ends_with(word) || !after.starts_with(word) {
+        return cut;
+    }
+    let end = text.len() - after.trim_start_matches(word).len();
+    if end <= next.max(cut) {
+        end
+    } else {
+        before.trim_end_matches(word).len()
+    }
 }
 
 /// Punctuation that ends a phrase, unlike a mark inside a word or number
@@ -387,6 +405,25 @@ mod tests {
                 ["qa I can’t", "go"],
                 "QA I can’t go.",
                 ["QA I can’t", "go."],
+            ),
+        ] {
+            let (_, shared) = shares(&local, remote).unwrap();
+            assert_eq!(shared, expected);
+        }
+    }
+
+    #[test]
+    fn a_boundary_never_splits_a_word_dropline_corrected_or_joined() {
+        for (local, remote, expected) in [
+            (
+                ["qa I saw a cat", "yesterday"],
+                "QA I saw a kitten yesterday.",
+                ["QA I saw a kitten", "yesterday."],
+            ),
+            (
+                ["qa see the pre", "view"],
+                "QA see the preview",
+                ["QA see the", "preview"],
             ),
         ] {
             let (_, shared) = shares(&local, remote).unwrap();
