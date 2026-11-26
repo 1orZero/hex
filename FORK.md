@@ -191,9 +191,11 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   Hex is quitting; segments still unanswered fail. The local transcript is merged and echo-suppressed as
   before. Then each local entry whose middle falls in an answered segment takes the part of Dropline's text
   aligned with it (characters compared in Simplified form, without spaces or punctuation, lower case), its
-  ends moved to nearby punctuation; Dropline's words for entries dropped as echo are dropped too. A segment
-  whose alignment ratio is below 0.4 keeps local text (ADR-0008), as do failed, unsent, and uncovered
-  stretches. The ratio is logged as a number; no text is logged.
+  ends moved to nearby punctuation; Dropline's words for entries dropped as echo are dropped too. An entry
+  that crosses into a segment but gets no Dropline text of its own (echo, or its own segment failed or
+  aligned too weakly) is aligned there too, so its words there are dropped instead of joining a neighbour.
+  A segment whose alignment ratio is below 0.4 keeps local text (ADR-0008), as do failed, unsent, and
+  uncovered stretches. The ratio is logged as a number; no text is logged.
 - `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,
   `[start, end)` in samples of the track resampled to 16 kHz (not the WAV's own rate), whether it was sent,
   its state and text, and the memory clear's outcome. It holds no audio or credentials, skips a last line cut

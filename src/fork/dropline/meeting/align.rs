@@ -56,53 +56,18 @@ pub(super) fn merge(
             }
         }
     }
+    // An entry that crosses into a segment but gets no Dropline text of its
+    // own (judged echo, or its segment failed or aligned too weakly) is
+    // aligned there too, so Dropline's words for it are dropped with it
+    // instead of going to a neighbour.
+    let mut texted = vec![false; before.len()];
+    for (index, _) in owned_shares(&before, answered, &|_| false, false) {
+        texted[index] = kept_at[index].is_some();
+    }
     let mut texts: Vec<Option<String>> = vec![None; kept.len()];
-    for segment in answered {
-        let inside = before
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                let middle = (entry.start_ms + entry.end_ms) / 2;
-                entry.source == segment.track
-                    && segment.start_ms <= middle
-                    && middle < segment.end_ms
-            })
-            .map(|(index, entry)| (index, entry.text.as_str()))
-            .collect::<Vec<_>>();
-        let local = inside.iter().map(|(_, text)| *text).collect::<Vec<_>>();
-        if segment.text.trim().is_empty() {
-            if !local.is_empty() {
-                tracing::info!(
-                    track = ?segment.track,
-                    seq = segment.seq,
-                    entries = local.len(),
-                    "Dropline heard no speech where the local model did; keeping local text"
-                );
-            }
-            continue;
-        }
-        let Some((ratio, shares)) = shares(&local, segment.text) else {
-            tracing::info!(
-                track = ?segment.track,
-                seq = segment.seq,
-                entries = local.len(),
-                "could not align a Dropline meeting segment; keeping local text"
-            );
-            continue;
-        };
-        tracing::info!(
-            track = ?segment.track,
-            seq = segment.seq,
-            ratio = (ratio * 1000.0).round() / 1000.0,
-            "aligned a Dropline meeting segment"
-        );
-        if ratio < THRESHOLD {
-            continue;
-        }
-        for ((index, _), share) in inside.iter().zip(shares) {
-            if let Some(kept) = kept_at[*index] {
-                texts[kept] = Some(share);
-            }
+    for (index, share) in owned_shares(&before, answered, &|index| !texted[index], true) {
+        if let Some(kept) = kept_at[index] {
+            texts[kept] = Some(share);
         }
     }
     kept.into_iter()
@@ -116,6 +81,74 @@ pub(super) fn merge(
             }
         })
         .collect()
+}
+
+/// Each entry of `before`'s share of Dropline's text in the answered
+/// segment holding its middle, when that segment aligns well enough.
+/// Entries `crossing` accepts also take part in a segment they only cross
+/// into, and their share there is dropped.
+fn owned_shares(
+    before: &[TranscriptEntry],
+    answered: &[Answered<'_>],
+    crossing: &dyn Fn(usize) -> bool,
+    log: bool,
+) -> Vec<(usize, String)> {
+    let mut owned = Vec::new();
+    for segment in answered {
+        let inside = before
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.source == segment.track)
+            .filter_map(|(index, entry)| {
+                let middle = (entry.start_ms + entry.end_ms) / 2;
+                let owns = segment.start_ms <= middle && middle < segment.end_ms;
+                let crosses = entry.start_ms < segment.end_ms && segment.start_ms < entry.end_ms;
+                (owns || crosses && crossing(index)).then_some((index, entry.text.as_str(), owns))
+            })
+            .collect::<Vec<_>>();
+        let local = inside.iter().map(|(_, text, _)| *text).collect::<Vec<_>>();
+        if segment.text.trim().is_empty() {
+            if log && !local.is_empty() {
+                tracing::info!(
+                    track = ?segment.track,
+                    seq = segment.seq,
+                    entries = local.len(),
+                    "Dropline heard no speech where the local model did; keeping local text"
+                );
+            }
+            continue;
+        }
+        let Some((ratio, shares)) = shares(&local, segment.text) else {
+            if log {
+                tracing::info!(
+                    track = ?segment.track,
+                    seq = segment.seq,
+                    entries = local.len(),
+                    "could not align a Dropline meeting segment; keeping local text"
+                );
+            }
+            continue;
+        };
+        if log {
+            tracing::info!(
+                track = ?segment.track,
+                seq = segment.seq,
+                ratio = (ratio * 1000.0).round() / 1000.0,
+                "aligned a Dropline meeting segment"
+            );
+        }
+        if ratio < THRESHOLD {
+            continue;
+        }
+        owned.extend(
+            inside
+                .iter()
+                .zip(shares)
+                .filter(|((_, _, owns), _)| *owns)
+                .map(|((index, _, _), share)| (*index, share)),
+        );
+    }
+    owned
 }
 
 /// Each of `local`'s entries' share of `remote`, and the share of
@@ -353,6 +386,62 @@ mod tests {
             [
                 (THEM, 0, "qa 我們 下週 上線"),
                 (YOU, 2_600, "好的，沒問題！")
+            ]
+        );
+    }
+
+    fn segment(seq: u32, start_ms: u64, end_ms: u64, text: &str) -> Answered<'_> {
+        Answered {
+            track: YOU,
+            seq,
+            start_ms,
+            end_ms,
+            text,
+        }
+    }
+
+    #[test]
+    fn echo_crossing_into_a_segment_takes_its_words_there_with_it() {
+        // The echoed entry starts in the first segment; its middle is in the
+        // second.
+        let before = [
+            entry(YOU, 1_000, 3_000, "qa 好 的 我 知道"),
+            entry(YOU, 4_000, 8_000, "我們 下週 一起 上線"),
+            entry(YOU, 8_500, 9_500, "沒 問題"),
+        ];
+        let kept = shifted(&[before[0].clone(), before[2].clone()], 1_000);
+        let merged = merge(
+            &before,
+            kept,
+            1_000,
+            &[
+                segment(1, 0, 5_000, "QA 好的我知道。我們下週"),
+                segment(2, 5_000, 10_000, "一起上線。沒問題！"),
+            ],
+        );
+        assert_eq!(
+            texts(&merged),
+            [(YOU, 0, "QA 好的我知道。"), (YOU, 7_500, "沒問題！")]
+        );
+    }
+
+    #[test]
+    fn an_entry_crossing_from_a_failed_segment_keeps_its_words_from_its_neighbour() {
+        let before = [
+            entry(YOU, 1_000, 3_000, "qa 好 的 我 知道"),
+            entry(YOU, 4_000, 8_000, "我們 下週 一起 上線"),
+        ];
+        let merged = merge(
+            &before,
+            shifted(&before, 1_000),
+            1_000,
+            &[segment(1, 0, 5_000, "QA 好的我知道。我們下週")],
+        );
+        assert_eq!(
+            texts(&merged),
+            [
+                (YOU, 0, "QA 好的我知道。"),
+                (YOU, 3_000, "我們 下週 一起 上線")
             ]
         );
     }
