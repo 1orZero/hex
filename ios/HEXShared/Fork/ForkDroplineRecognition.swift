@@ -40,6 +40,15 @@ actor ForkDroplineSessions {
         return UUID().uuidString.lowercased()
     }
 
+    /// The session a live draft goes out in, kept for the next draft and the final text: the
+    /// prepared one while it is fresh, else a new one.
+    func shared(now: Date) -> String {
+        let id = prepared.flatMap { now.timeIntervalSince($0.at) < Self.maxAge ? $0.id : nil }
+            ?? UUID().uuidString.lowercased()
+        prepared = (id, now)
+        return id
+    }
+
     func clear() {
         prepared = nil
     }
@@ -54,6 +63,7 @@ nonisolated struct ForkDroplineRecognition: Sendable {
     var client = ForkDroplineClient()
     var sessions: ForkDroplineSessions = .shared
     var encode: @Sendable (URL) throws -> Data = { try ForkDroplineAudio.encodedRecording(at: $0) }
+    var encodeDraft: @Sendable ([[Int16]]) throws -> Data = { try ForkDroplineAudio.encoded(chunks: $0) }
 
     private static let log = Logger(subsystem: "anomaly.hex.mobile", category: "fork-dropline")
 
@@ -85,7 +95,7 @@ nonisolated struct ForkDroplineRecognition: Sendable {
         hints: [String],
         local: @escaping @Sendable () async throws -> Local
     ) async throws -> ForkDroplineResult<Local> {
-        guard settings.isEnabled, settings.endpoint != nil else {
+        guard settings.isSelected else {
             return .local(try await local(), fallback: nil)
         }
         let started = client.clock.now()
@@ -110,6 +120,22 @@ nonisolated struct ForkDroplineRecognition: Sendable {
             Self.log.error("Dropline failed (\(failure.reason, privacy: .public)); using the local engine")
             return .local(try await local(), fallback: failure)
         }
+    }
+
+    /// One live draft while recording (`ForkDroplineLiveTranscriber`): the 16 kHz recording so far,
+    /// in the session the final text will use. It records no fallback and never runs a local engine.
+    @concurrent
+    func draft(_ chunks: [[Int16]], hints: [String]) async throws -> ForkDroplineAnswer {
+        guard settings.isSelected, let credential else { throw ForkDroplineFailure.notConfigured }
+        let audio = try encodeDraft(chunks)
+        try Task.checkCancellation()
+        let session = await sessions.shared(now: client.clock.now())
+        return try await client.dictate(
+            credential,
+            audio: audio,
+            session: session,
+            context: ForkDroplineClient.context(hints: hints)
+        )
     }
 
     /// For a caller whose local engine runs after this returns (the keyboard): Dropline's

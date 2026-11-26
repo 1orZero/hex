@@ -33,10 +33,22 @@ nonisolated enum ForkDroplineAudio {
     /// Reads the recording twice, measuring each 20 ms block and then encoding the kept ones,
     /// so a long keyboard recording never sits in memory as samples.
     static func encodedRecording(at url: URL) throws -> Data {
+        try encoded { body in try forEachBlock(of: url, body) }
+    }
+
+    /// A live draft's audio: the recording so far as 16 kHz mono 16-bit chunks, encoded as a
+    /// recording file is.
+    static func encoded(chunks: [[Int16]]) throws -> Data {
+        try encoded { body in try forEachBlock(of: chunks, body) }
+    }
+
+    private static func encoded(
+        _ blocks: (_ body: (UnsafeBufferPointer<Float>) throws -> Void) throws -> Void
+    ) throws -> Data {
         var levels: [UInt8] = []
         var frames: [Int] = []
         do {
-            try forEachBlock(of: url) { block in
+            try blocks { block in
                 levels.append(level(of: block))
                 frames.append(block.count)
             }
@@ -49,7 +61,7 @@ nonisolated enum ForkDroplineAudio {
         do {
             let encoder = try ForkOpusOggEncoder()
             var index = 0
-            try forEachBlock(of: url) { block in
+            try blocks { block in
                 defer { index += 1 }
                 if index < keep.count, keep[index] {
                     try encoder.append(block)
@@ -176,6 +188,24 @@ nonisolated enum ForkDroplineAudio {
                 if status == .error { throw error ?? ForkOpusOggEncoder.EncodingError.unavailable as NSError }
                 try emit(converted)
                 if status == .endOfStream || (status == .inputRanDry && feed.finished) { break }
+            }
+        }
+        if !block.isEmpty {
+            try block.withUnsafeBufferPointer(body)
+        }
+    }
+
+    /// The same blocks from 16 kHz mono 16-bit chunks held in memory.
+    static func forEachBlock(of chunks: [[Int16]], _ body: (UnsafeBufferPointer<Float>) throws -> Void) throws {
+        var block: [Float] = []
+        block.reserveCapacity(blockFrames)
+        for chunk in chunks {
+            for sample in chunk {
+                block.append(Float(sample) / 32_768)
+                if block.count == blockFrames {
+                    try block.withUnsafeBufferPointer(body)
+                    block.removeAll(keepingCapacity: true)
+                }
             }
         }
         if !block.isEmpty {
