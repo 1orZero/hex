@@ -38,7 +38,7 @@ pub(crate) fn keep_across(
         }
     }
     let text = strip_repeated_speech(&ending, &entry.text);
-    if text.is_empty() {
+    if !text.chars().any(char::is_alphanumeric) {
         return;
     }
     entry.text = text.to_string();
@@ -246,10 +246,17 @@ mod tests {
 
     #[test]
     fn a_segment_with_nothing_new_stays_before_the_seam() {
-        let previous = entry(0, 10_000, "qa-今天我們討論會議逐字稿的修正方式");
+        let previous = [entry(0, 10_000, "qa-今天我們討論會議逐字稿的修正方式")];
         let mut incoming = [entry(8_000, 9_500, "逐字稿的修正方式")];
-        keep_across(&mut incoming, &[previous], 9_000);
+        keep_across(&mut incoming, &previous, 9_000);
         assert_eq!(incoming, [entry(8_000, 9_500, "逐字稿的修正方式")]);
+        let mut incoming = [entry(8_000, 9_500, "……")];
+        keep_across(&mut incoming, &previous, 9_000);
+        assert_eq!(
+            incoming,
+            [entry(8_000, 9_500, "……")],
+            "punctuation is not speech"
+        );
     }
 
     #[test]
