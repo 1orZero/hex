@@ -51,6 +51,11 @@ enum KeyboardSpeech {
         }
         let speech = AppleSpeechModule(language)
 
+        if let threeLanguage = await ForkThreeLanguage.transcribe(url, language: language, vocabulary: hints, lingeringModels: false) {
+            guard !threeLanguage.isEmpty else { throw Failure.empty }
+            return (threeLanguage, language)
+        }
+
         // Labs › Two-language dictation: the same recording read by a second installed
         // language too, merged word by word; the pipeline still runs as the primary language.
         let twoLanguage = TwoLanguageDictationSettings()

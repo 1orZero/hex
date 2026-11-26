@@ -301,6 +301,11 @@ actor AppleSpeechTranscriber: LocalTranscribing {
             throw TranscriberError.unavailable
         }
 
+        if let threeLanguage = await ForkThreeLanguage.transcribe(audioURL, language: language, vocabulary: vocabulary, lingeringModels: true) {
+            guard !threeLanguage.isEmpty else { throw TranscriberError.emptyTranscript }
+            return threeLanguage
+        }
+
         // Labs › Two-language dictation: the same recording read by a second installed
         // language too, merged word by word. Off, or without a usable second language, the
         // single-language path below runs exactly as before.
