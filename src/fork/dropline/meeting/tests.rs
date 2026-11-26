@@ -553,6 +553,65 @@ fn the_final_pass_waits_at_most_its_budget_then_keeps_local_text() {
     assert!(summary.segments[0].sent && summary.clear_recorded);
 }
 
+const QUIT_CHILD: &str = "HEX_DROPLINE_QUIT_CHILD";
+
+/// The child half of
+/// `quitting_with_a_request_in_flight_clears_and_leaves_the_next_launch_to_clear_again`:
+/// quitting is process-wide, so it runs in its own process.
+#[test]
+fn quitting_with_a_request_in_flight_child() {
+    if std::env::var_os(QUIT_CHILD).is_none() {
+        return;
+    }
+    let directory = scratch("quit");
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let opened = gate.clone();
+    let fake = Arc::new(Fake::new(move |_| {
+        let (open, changed) = &*opened;
+        let mut open = lock(open);
+        while !*open {
+            open = changed.wait(open).unwrap();
+        }
+        Ok(segment("qa-太晚了"))
+    }));
+    let recording = recording(&directory, fake.clone());
+    let mut position = 0;
+    feed(
+        &directory,
+        SYSTEM,
+        &mut position,
+        16_000,
+        &track(&[(true, 110), (false, 40)]),
+    );
+    wait_until("the request", || fake.in_flight.load(Ordering::SeqCst) == 1);
+    crate::desktop::process_exit::begin_quitting_for_test();
+    let entries = vec![entry(SYSTEM, 10_100, 10_700, "qa 本機")];
+    let (merged, _) = finish(&recording, ORIGINS, entries, 10_000, &[]);
+    assert_eq!(shown(&merged), [(SYSTEM, 100, 700, "qa 本機")]);
+    assert_eq!(fake.log(), ["token", "dictate", "clear"]);
+    let summary = summary(&directory);
+    assert_eq!(summary.segments[0].reason.as_deref(), Some("Hex 結束"));
+    assert!(summary.sent() && !summary.clear_recorded);
+}
+
+#[test]
+fn quitting_with_a_request_in_flight_clears_and_leaves_the_next_launch_to_clear_again() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fork::dropline::meeting::tests::quitting_with_a_request_in_flight_child",
+            "--nocapture",
+        ])
+        .env(QUIT_CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{output:?}"
+    );
+}
+
 #[test]
 fn dropline_forbidding_a_segment_stops_sending_and_still_clears_once() {
     let directory = scratch("forbidden");

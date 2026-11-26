@@ -472,7 +472,8 @@ impl Meeting {
     /// The final pass: cuts the tails, waits for the queue (at most the
     /// budget, and not at all once Hex quits), stops what is left, merges
     /// with `merge`, and clears Dropline's memory once if audio was sent:
-    /// after a request still in flight is over, unless Hex is quitting.
+    /// after a request still in flight is over, or at once when Hex is
+    /// quitting, leaving the outcome unrecorded while that request runs.
     fn complete(
         self: &Arc<Self>,
         input: &SyncSender<Input>,
@@ -521,7 +522,7 @@ impl Meeting {
         if sending && !crate::desktop::process_exit::quitting() {
             Arc::clone(self).clear_later();
         } else {
-            self.clear_once();
+            self.clear_once(!sending);
         }
         merged
     }
@@ -543,17 +544,22 @@ impl Meeting {
                         .unwrap_or_else(|error| error.into_inner())
                         .0;
                 }
+                let settled = !progress.sending;
                 drop(progress);
-                meeting.clear_once();
+                meeting.clear_once(settled);
             });
         if let Err(error) = waiter {
             tracing::warn!(%error, "could not wait for the request in flight; clearing Dropline's memory now");
-            self.clear_once();
+            let settled = !self.progress().sending;
+            self.clear_once(settled);
         }
     }
 
-    /// The meeting's one memory clear, when audio was sent.
-    fn clear_once(&self) {
+    /// The meeting's one memory clear in this process, when audio was sent.
+    /// With `record` false the outcome stays out of the file, so the next
+    /// launch clears again: a request still in flight may reach Dropline
+    /// after this clear.
+    fn clear_once(&self, record: bool) {
         let mut progress = self.progress();
         let sent = progress.segments.iter().any(|segment| segment.sent);
         if !sent || progress.clear_ran {
@@ -562,7 +568,9 @@ impl Meeting {
         progress.clear_ran = true;
         drop(progress);
         let line = clear(&*self.transport, self.credentials.as_ref());
-        self.progress().sidecar.write(&line);
+        if record {
+            self.progress().sidecar.write(&line);
+        }
     }
 }
 

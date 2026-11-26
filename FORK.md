@@ -193,16 +193,18 @@ in-call draft, Copy new, and ⌥⌃V stay local (ADR-0003). `src/fork/dropline/m
   whose alignment ratio is below 0.4 keeps local text (ADR-0008), as do failed, unsent, and uncovered
   stretches. The ratio is logged as a number; no text is logged.
 - `fork-dropline.ndjson` (0600) in the meeting folder records the provider, each segment's track, number,
-  `[start, end)` in 16 kHz WAV samples, whether it was sent, its state and text, and the memory clear's
-  outcome. It holds no audio or credentials, skips a last line cut short (even inside a character), and goes
-  to the Trash with the meeting.
+  `[start, end)` in samples of the track resampled to 16 kHz (not the WAV's own rate), whether it was sent,
+  its state and text, and the memory clear's outcome. It holds no audio or credentials, skips a last line cut
+  short (even inside a character), removes a record a failed write left half-written, and goes to the Trash
+  with the meeting.
 - Memory clear (ADR-0004, ADR-0007): once per meeting, after its last possible send, when a segment was sent
   and no clear outcome is recorded, Hex posts to `…/dropline-private/memory/clear` beside the token
   endpoint with the saved bearer. A token endpoint that doesn't end in `/dropline-private/token` is skipped.
   `cleared: true` is recorded as `cleared`, `cleared: false` as `not_cleared`, and a 403, a 429, or
-  any other failure as `failed` with its status; the answer's other content isn't kept. When the final pass
-  ends with a request still in flight, the clear waits for it (at most 65 s) on its own thread; when Hex is
-  quitting, the clear runs at once (at most 10 s).
+  any other failure as `failed` with its HTTP status or failure reason; the answer's other content isn't
+  kept. When the final pass ends with a request still in flight, the clear waits for it (at most 65 s) on its
+  own thread. When Hex is quitting, the clear runs at once (at most 10 s); if a request was still in flight,
+  its outcome isn't recorded, so the next launch clears again.
 - Quit and the next launch: quitting while a meeting records stops its sends. The next launch finishes the
   meeting from its WAV files as before; the final pass reads the file, reuses the answered segments, sends
   no audio, and runs the memory clear if it never ran. A meeting dropped without its final pass stops

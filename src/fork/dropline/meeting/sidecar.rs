@@ -35,7 +35,8 @@ pub(super) enum Line {
 pub(super) struct SegmentLine {
     pub track: MeetingSource,
     pub seq: u32,
-    /// Half-open, in 16 kHz samples of the track's WAV.
+    /// Half-open, in samples of the track resampled to 16 kHz, on its WAV's
+    /// timeline.
     pub start: u64,
     pub end: u64,
     pub state: State,
@@ -89,7 +90,12 @@ impl Writer {
         let file = self.file.as_mut().expect("opened above");
         let mut bytes = serde_json::to_vec(line).map_err(std::io::Error::other)?;
         bytes.push(b'\n');
-        file.write_all(&bytes)?;
+        let length = file.metadata()?.len();
+        if let Err(error) = file.write_all(&bytes) {
+            // A torn record would swallow the next one into its line.
+            let _ = file.set_len(length);
+            return Err(error);
+        }
         file.sync_data()
     }
 }
