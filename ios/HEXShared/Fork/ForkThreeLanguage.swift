@@ -38,10 +38,16 @@ nonisolated enum ForkThreeLanguage {
 
     /// The languages to read in, primary first, or nil to dictate as before: the lab off, a
     /// dictation language outside the three, or any of the three models not installed.
+    /// Cantonese in any region (`yue-CN`, Settings' "Cantonese") counts as `zh-HK`, the
+    /// Cantonese reading, and leads with it; when every reading fails, dictation still falls
+    /// back to the Cantonese the person picked.
     static func plan(enabled: Bool, primary: String?, installed: [String: Bool]) -> [String]? {
-        guard enabled, let primary, locales.contains(primary) else { return nil }
+        guard enabled, let primary else { return nil }
+        let isCantonese = Locale(identifier: primary).language.languageCode?.identifier == "yue"
+        let lead = isCantonese ? "zh-HK" : primary
+        guard locales.contains(lead) else { return nil }
         guard locales.allSatisfy({ installed[$0] == true }) else { return nil }
-        return [primary] + locales.filter { $0 != primary }
+        return [lead] + locales.filter { $0 != lead }
     }
 
     /// The reading to insert: the highest score among readings with text, ties to the first.
@@ -148,7 +154,7 @@ nonisolated enum ForkThreeLanguage {
             let ready = await isInstalled(locale)
             installed[id] = ready && !settings.speechModuleFailed(id)
         }
-        guard let ids = plan(enabled: enabled, primary: primaryID, installed: installed) else { return nil }
+        guard let ids = plan(enabled: enabled, primary: primaryID ?? primary?.identifier(.bcp47), installed: installed) else { return nil }
         return ids.compactMap { id in resolved[id].map { UsableLocale(id: id, locale: $0) } }
     }
 
