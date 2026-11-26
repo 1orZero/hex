@@ -126,8 +126,11 @@ heard no speech, so the dictation inserts nothing and does not fall back.
   `Qwen3-ASR 1.7B（Dropline 失敗後改用）`), and the local model alone when Dropline wasn't selected.
   History's search matches the same text (`hex history` doesn't print the model). Inference is how long
   the text took: Dropline's request when it answered (the local transcript isn't waited for), or
-  Dropline's attempt plus the rest of the local transcript when it fell back. The answers live in memory
-  by submission instant, the newest 16 kept, until History records the dictation.
+  Dropline's attempt plus the rest of the local transcript when it fell back. The fallback's model is read
+  when the local transcript finishes, so a model chosen before History records the dictation doesn't
+  rename it. Answers live in memory by submission instant until History records the dictation or 16
+  newer answers push them out (a dictation History never records: cancelled, no speech, a failed paste,
+  the local API's).
 - While Dropline is in use, the picker's local model reads 失敗時改用 where it read In use; Dropline's row
   reads 使用中.
 - The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data

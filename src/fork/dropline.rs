@@ -34,8 +34,8 @@ const DICTATE_BUDGET: Duration = Duration::from_secs(10);
 /// A prepared session older than this belongs to no capture still recording.
 const SESSION_AGE: Duration = Duration::from_secs(200);
 /// Answers kept for History; a dictation that never reaches History
-/// (cancelled, no speech, a failed paste) leaves its answer until newer ones
-/// push it out.
+/// (cancelled, no speech, a failed paste, the local API's) leaves its answer
+/// until newer ones push it out.
 const KEPT_ANSWERS: usize = 16;
 
 /// The saved provider: its token endpoint and whether dictation uses it.
@@ -71,16 +71,10 @@ static STATE: Mutex<State> = Mutex::new(State {
     fallback: None,
 });
 
-/// Which text a Dropline dictation used.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Answer {
-    Dropline,
-    Fallback,
-}
-
-/// Recent Dropline dictations' answers by submission instant, which the
-/// dictation pipeline carries to History as `JobTimings::total_started`.
-static ANSWERS: Mutex<VecDeque<(Instant, Answer)>> = Mutex::new(VecDeque::new());
+/// Recent Dropline dictations' History speech model by submission instant,
+/// which the dictation pipeline carries to History as
+/// `JobTimings::total_started`.
+static ANSWERS: Mutex<VecDeque<(Instant, String)>> = Mutex::new(VecDeque::new());
 
 fn state() -> MutexGuard<'static, State> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -273,7 +267,7 @@ fn answer(
                 "transcribed dictation with Dropline"
             );
             status(None);
-            remember(job.submitted, Answer::Dropline);
+            remember(job.submitted, NAME.to_owned());
             let watched = std::thread::Builder::new()
                 .name("hex-dropline-local".into())
                 .spawn(move || {
@@ -295,15 +289,22 @@ fn answer(
                 reason,
                 at: SystemTime::now(),
             }));
-            remember(job.submitted, Answer::Fallback);
-            local.wait()
+            let transcribed = local.wait();
+            // Read now, while the engine still holds the model that made the
+            // text; a model chosen before History records it didn't.
+            if transcribed.is_ok()
+                && let Some(model) = crate::history::dictation_model()
+            {
+                remember(job.submitted, format!("{model}（Dropline 失敗後改用）"));
+            }
+            transcribed
         }
     }
 }
 
-fn remember(submitted: Instant, answer: Answer) {
+fn remember(submitted: Instant, model: String) {
     let mut answers = ANSWERS.lock().unwrap_or_else(|error| error.into_inner());
-    answers.push_front((submitted, answer));
+    answers.push_front((submitted, model));
     answers.truncate(KEPT_ANSWERS);
 }
 
@@ -311,20 +312,15 @@ fn remember(submitted: Instant, answer: Answer) {
 /// `submitted`: Dropline when it answered, the local model marked as the
 /// fallback when Dropline failed, else the local model as upstream names it.
 pub fn history_model(submitted: Instant) -> Option<String> {
-    let answer = {
-        let mut answers = ANSWERS.lock().unwrap_or_else(|error| error.into_inner());
-        answers
-            .iter()
-            .position(|(at, _)| *at == submitted)
-            .and_then(|index| answers.remove(index))
-            .map(|(_, answer)| answer)
-    };
-    let local = crate::history::dictation_model();
-    match answer {
-        Some(Answer::Dropline) => Some(NAME.to_owned()),
-        Some(Answer::Fallback) => local.map(|model| format!("{model}（Dropline 失敗後改用）")),
-        None => local,
-    }
+    let mut answers = ANSWERS.lock().unwrap_or_else(|error| error.into_inner());
+    let answer = answers
+        .iter()
+        .position(|(at, _)| *at == submitted)
+        .and_then(|index| answers.remove(index));
+    drop(answers);
+    answer
+        .map(|(_, model)| model)
+        .or_else(crate::history::dictation_model)
 }
 
 fn transcribe(job: &Job) -> Result<String, client::Failure> {
