@@ -1207,6 +1207,10 @@ impl DictationCapture {
     /// first sample (pre-roll included) as it arrives, travels with the
     /// finished clip, and is cancelled with the recording.
     pub fn begin_stream(&mut self, engine: &TranscriptionEngine) {
+        #[cfg(target_os = "macos")]
+        if self.fork_dropline_live() {
+            return;
+        }
         let Some(recording) = &mut self.recording else {
             return;
         };
@@ -2216,3 +2220,7 @@ mod tests {
         assert!(commands.try_iter().next().is_none());
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "fork/dropline/live.rs"]
+mod fork_dropline_live;

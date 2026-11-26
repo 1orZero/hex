@@ -42,6 +42,8 @@ mod captures;
 mod meetings_host;
 pub(crate) use meetings_host::{meeting_corner_moved, meeting_failed, meeting_provider_chosen};
 mod fork_dropline;
+#[cfg(target_os = "macos")]
+mod fork_output;
 mod model_details;
 mod model_import;
 mod models;

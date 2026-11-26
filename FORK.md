@@ -13,8 +13,8 @@ fork change has to touch an upstream file, add a row here with the file, the hoo
 line), and the purpose, so whoever resolves a release merge knows what to keep. The hooks belong to
 the Dropline private API provider (see "Dropline private API"), the iPhone vocabulary link (see
 "Vocabulary"), screen text (see "Screen text"), Traditional Chinese in Annotate and meetings (see
-"Traditional Chinese in Annotate and meetings"), and meetings through Dropline (see "Meetings through
-Dropline"). Every hook in a file all three OSes build runs only on macOS (behind
+"Traditional Chinese in Annotate and meetings"), meetings through Dropline (see "Meetings through
+Dropline"), and the Output pane's switches (see "Output switches"). Every hook in a file all three OSes build runs only on macOS (behind
 `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build upstream's
 code unchanged. The `crates/capture/build.rs` row, the `clean_summary` cut in `src/meeting/notes.rs`, and the
 `keep_across` hook in `src/meeting/transcript.rs` are upstream fixes carried before a release has
@@ -24,6 +24,8 @@ them, not features.
 | --- | --- | --- |
 | `src/main.rs` | `mod fork;` (macOS) after `mod feedback;` | Compiles the fork module. |
 | `src/parakeet.rs` | `InferenceJob.dropline` field; `fork::dropline::job(&samples, submitted_at)` after `diagnostics::persist` in the submit path; `fork::dropline::wait(job.dropline, job.transcript)` in `run_inference_worker` | The dictation-finish point: takes the clip for Dropline and picks Dropline's text or the local one. |
+| `src/parakeet.rs` | `InferenceJob.transcript: crate::fork::dropline::Local` in place of `PendingTranscript` (and `PendingTranscript` dropped from the `transcription::engine` import); `crate::fork::dropline::local(&dropline, engine, stream, samples, offline)` in place of `engine.finish_with(stream, samples, offline)` in the submit path | While Dropline takes the clip, the local model transcribes it only after Dropline fails. Without Dropline, or with a live stream, the engine starts it at once as upstream does. |
+| `src/dictation.rs` | `begin_stream`: `#[cfg(target_os = "macos")] if self.fork_dropline_live() { return; }` at the top (4 lines); `#[cfg(target_os = "macos")] #[path = "fork/dropline/live.rs"] mod fork_dropline_live;` at the end of the file (4 lines) | While Dropline is selected a hotkey capture opens no local stream, and Dropline gives its live text. The module sits in `src/fork/dropline/` but is `dictation`'s child, so it reads the private recording. |
 | `src/parakeet.rs` | `record_history`: `model: crate::fork::dropline::history_model(completed.timings.total_started),` in place of `model: crate::history::dictation_model(),` (1 line) | History names what made the text: Dropline, or the local model marked as Dropline's fallback. `total_started` is the job's `submitted_at`, the same instant `job` received. Upstream `dev` moved `record_history` to `src/dictation/modes/output.rs`, which all three OSes build; there the hook becomes `model: crate::fork::dropline::history_model(input.total_started)` behind `#[cfg(target_os = "macos")]`, keeping upstream's line for the other OSes. |
 | `src/recognition.rs` | `fork::dropline::prepare()` after `worker.prepare_paste()` on capture start | Opens the Dropline session early (best effort). |
 | `src/macos_rune.rs` | `fork::dropline::deselect()` in `StatusItemAction::SelectModel` | Choosing a local model in the menu bar stops using Dropline. |
@@ -55,6 +57,8 @@ them, not features.
 | `src/dictation/processor.rs`, `src/meeting/detection.rs` | `fork_screen_text: Default::default()` (macOS) in the tests' `context` helpers (2 lines each) | Struct literals that name every field need the new one. |
 | `src/personal_commands.rs` | `InvocationContext.screen_lines` (macOS) after `window_title`; `screen_lines: context.fork_screen_text.lines()` in `invocation_context`; `mod fork_screen_text_tests` (`#[path]` to `src/fork/screen_text/transformation_tests.rs`) at the end of the file (9 lines) | Each transformation chain waits for its dictation's read and passes it as `screenLines`; the test module runs a real config against the worker. |
 | `src/personal_commands/hex.d.ts` | `screenLines?: readonly string[]` at the end of `HandlerContext` (2 lines) | Types the field for configs. |
+| `src/rune_ui.rs` | `#[cfg(target_os = "macos")] mod fork_output;` after `mod fork_dropline;` (2 lines) | Compiles the Output switches' section. |
+| `src/rune_ui/output.rs` | `pane`: a `#[cfg(target_os = "macos")]` block with `content = content.child(super::fork_output::section(ui, p));` right after the statement that adds the Try card (4 lines) | Output's 轉換選項 section, below Try, with 讀取螢幕文字 and 使用 Jev. |
 | `crates/capture/build.rs` | `compile_helper`: `profile_dir` is the parent of the `build` directory in `OUT_DIR`, not `out_dir.ancestors().nth(3)` | Upstream backport: anomalyco/hex#1734 (`db338045`), cherry-picked unchanged with `-x`, which also touches `.github/workflows/build-desktop.yml` and `docs/plans/capture-in-hex.md`. Under cargo 1.100's build-dir layout, v3.4.0 puts `scrawl-helper` in `target/release/build/`, so `scripts/build-app.sh` can't copy it from `target/release/`. The row goes away once a release that includes #1734 is merged; until then, take upstream's version on a conflict. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
@@ -87,6 +91,7 @@ are still where the hooks expect them. For History's speech source and the picke
 - `fork/vocabulary.py`: nightly vocabulary upkeep (see "Vocabulary").
 - `src/fork/screen_text.rs`, `src/fork/screen_text.swift`, `src/fork/screen_text/transformation_tests.rs`, and
   `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
+- `src/rune_ui/fork_output.rs`: the Output switches (see "Output switches").
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
 - `src/fork/dropline/meeting.rs` and `src/fork/dropline/meeting/`: meetings through Dropline.
@@ -122,16 +127,21 @@ heard no speech, so the dictation inserts nothing and does not fall back.
   characters that were already distinctly traditional. This distinguishes `干擾` from `干燥` without
   treating either spelling as a rule for every name or phrase. Local and fallback transcripts bypass
   this parser.
-- The local model still transcribes every clip while Dropline runs, so a fallback needs no second
-  transcription. When Dropline answers, the local transcript still finishes in the background under its own
-  deadlines. General and the model picker show the last fallback.
+- No other speech model runs while Dropline is selected: a hotkey capture opens no local live stream, and
+  the local model transcribes the finished clip only after Dropline fails. The local model stays loaded for
+  that fallback. General and the model picker show the last fallback.
+- Live text (`src/fork/dropline/live.rs`): with Labs › Live text on (or during the first run's practice),
+  a hotkey capture past its hold threshold shows Listening… until Dropline's first words, and every 4 s
+  sends the whole recording so far to Dropline in the session and with the vocabulary the final request
+  uses. That is at most 15 requests a minute: a round is skipped, not made up, while the previous request
+  is out, and none goes once the recording passes 180 s, which keeps the last words shown. An empty answer keeps Listening…; a failed one is
+  logged by reason and changes nothing. With Live text off, nothing is sent until the recording finishes.
 - History's Speech model names what made each dictation's text: `Dropline 私人 API` when Dropline
   answered, the local model followed by `（Dropline 失敗後改用）` when it fell back (for example
   `Qwen3-ASR 1.7B（Dropline 失敗後改用）`), and the local model alone when Dropline wasn't selected.
   History's search matches the same text (`hex history` doesn't print the model). Inference is how long
-  the text took: Dropline's request when it answered (the local transcript isn't waited for), or
-  Dropline's attempt plus the rest of the local transcript when it fell back. The fallback's model is read
-  when the local transcript finishes, so a model chosen before History records the dictation doesn't
+  the text took: Dropline's request when it answered, or Dropline's attempt plus the local transcript when
+  it fell back. The fallback's model is read when the local transcript finishes, so a model chosen before History records the dictation doesn't
   rename it. Answers live in memory by submission instant until History records the dictation or 16
   newer answers push them out (a dictation History never records: cancelled, no speech, a failed paste,
   the local API's).
@@ -349,8 +359,8 @@ does what Derek's `hex-screen-ocr` LaunchAgent did from another process through
 `~/.local/share/hex-lab/screen.json`, for his `jev` transformation
 (`fork/docs/adr/0006-screen-ocr-fork-module.md`).
 
-- Only while some mode uses a script transformation, the condition under which Hex reads the window
-  title. A capture reads once: when it becomes real (held past the hold threshold, a control start, or a
+- Only while Output's 讀取螢幕文字 switch is on (see "Output switches") and some mode uses a script
+  transformation, the condition under which Hex reads the window title. A capture reads once: when it becomes real (held past the hold threshold, a control start, or a
   released microphone opening), or, for a short tap, when it finishes. A discarded or cancelled press and
   a raw dictation read nothing.
 - The window is the frontmost on-screen one at layer 0, wider and taller than 50 points, that no Hex
@@ -384,6 +394,30 @@ both. `dev` moves `handle_hotkey_action` from `src/recognition.rs` to `src/recog
 take `dev`'s `recognition.rs` and put `context.screen_text.raw(raw)` back after `context.begin()` there
 (the Dropline `prepare()` hook moves with it). `build.rs`, `src/personal_commands.rs`, and `hex.d.ts`
 merge cleanly.
+
+## Output switches
+
+The Mac app's Output pane ends its Global steps with a 轉換選項 section (`src/rune_ui/fork_output.rs`), below
+Try, holding two switches:
+
+- 讀取螢幕文字 turns screen text off and on. It is saved as `{"enabled": false}` in `fork/screen-text.json`
+  in the data folder's owner-only `fork` folder (`HEX_APPLICATION_SUPPORT_DIR` moves it with the data
+  folder), not in `settings.json`, so it stays out of the upstream settings and Derek's dotfiles. A missing
+  or unreadable file reads as on, which is how screen text behaved before the switch. While it is off, no
+  capture reads the screen, the listener doesn't load Vision, and `screenLines` is left out of every
+  transformation. Turning it on loads Vision right away (when a script transformation is set up and Screen
+  Recording is allowed); turning it off doesn't unload a model Vision already holds. The switch takes
+  effect from the next dictation. It has no `hex settings` key: the registry only addresses
+  `settings.json`, so a key would mean a new upstream `AppSettings` field.
+- 使用 Jev is on while the Global mode's `transformations` contain `jev`. Turning it on puts `jev` right
+  after `traditional-chinese`, else right before `cjk-spacing`, else last; turning it off removes `jev`
+  and leaves every other step in its order. It saves `settings.json` the way the window saves any setting,
+  and `hex settings set dictation_processing.default_mode '<json>'` changes the same list from the CLI.
+  When `hex.config.ts` doesn't register `jev`, the switch shows the list's state, disabled, with
+  `hex.config.ts 沒有註冊 jev`.
+
+Both hooks are macOS-only, so Linux and Windows build the Output pane unchanged and the goldens (rendered
+on Linux) don't change.
 
 ## Daily pipeline
 
