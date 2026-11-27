@@ -202,6 +202,10 @@ pub(super) fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Option<El> {
         )
         .into(),
     );
+    #[cfg(target_os = "macos")]
+    if let Some(row) = super::fork_dropline::general_row(ui, p) {
+        rows.push(row.into());
+    }
     if let Some(row) = language_row(ui, p, layer) {
         rows.push(row.into());
     }

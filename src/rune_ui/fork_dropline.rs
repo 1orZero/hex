@@ -31,7 +31,7 @@ pub(super) use other::{model_chosen, model_name, section, status};
 
 #[cfg(target_os = "macos")]
 pub(super) use macos::{
-    Form, fallback_badge, local_is_fallback, model_chosen, model_name, section, status,
+    Form, fallback_badge, general_row, local_is_fallback, model_chosen, model_name, section, status,
 };
 
 #[cfg(target_os = "macos")]
@@ -42,13 +42,19 @@ mod macos {
     use rune::{El, TextEdit, col, edit_access, row, text};
     use rune_kit::{Button, ButtonVariant, TextInput};
 
-    use super::super::controls::{ButtonKind, Paint, PushSize, button, status_dot};
+    use super::super::controls::{
+        ButtonKind, Paint, PushSize, button, icon_toggle_row, status_dot,
+    };
+    use super::super::icons::GLOBE;
     use super::super::lists::group_label;
     use super::super::{Ui, picker};
     use crate::fork::dropline::{self, DEFAULT_ENDPOINT, NAME, Provider};
     use crate::transcription::models as transcription_models;
 
     const TITLE: &str = "自訂辨識服務";
+    /// Starts the pane error a failed General switch shows, so the next
+    /// switch that works clears it and no one else's.
+    const SWITCH_ERROR: &str = "無法切換 Dropline：";
 
     type Outcome = Arc<Mutex<Option<Result<(), String>>>>;
 
@@ -121,6 +127,44 @@ mod macos {
             minutes => format!("{} 小時前", minutes / 60),
         };
         format!("{when}改用 {}：{}", local_name(ui), fallback.reason)
+    }
+
+    /// General's switch under the speech model, shown once the provider is
+    /// set up. It flips the provider's selection, the same one the picker's
+    /// 使用 and a local model's Use change: on, dictation goes to Dropline
+    /// and falls back to the local model; off, the local model alone.
+    pub(in crate::rune_ui) fn general_row(ui: &Ui, p: Paint) -> Option<El> {
+        if !ui.live() {
+            return None;
+        }
+        dropline::provider()?;
+        let on = dropline::selected();
+        Some(icon_toggle_row(
+            p,
+            "fork-dropline-switch",
+            &GLOBE,
+            "使用 Dropline 辨識",
+            None,
+            on,
+            move |ui: &mut Ui| {
+                if !ui.live() {
+                    return;
+                }
+                match dropline::select(!on) {
+                    Ok(()) => {
+                        ui.fork_dropline.error = None;
+                        if ui
+                            .error
+                            .as_deref()
+                            .is_some_and(|error| error.starts_with(SWITCH_ERROR))
+                        {
+                            ui.error = None;
+                        }
+                    }
+                    Err(error) => ui.error = Some(format!("{SWITCH_ERROR}{error}")),
+                }
+            },
+        ))
     }
 
     /// Whether the picker's model in use only answers when Dropline fails.
