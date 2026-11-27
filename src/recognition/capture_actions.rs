@@ -70,6 +70,7 @@ pub(super) fn handle_hotkey_action(
         }
         HotkeyAction::Discard(_) | HotkeyAction::Cancel | HotkeyAction::CancelShortcut => {
             context.cancel();
+            crate::fork::jev_key::cancelled();
             feedback::retract_start();
             #[cfg(hex_capture)]
             crate::screenshots::narration::ended();

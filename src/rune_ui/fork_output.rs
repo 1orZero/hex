@@ -3,19 +3,21 @@
 //! text"), and 使用 Jev adds or removes Derek's `jev` transformation in the
 //! Global mode (FORK.md "Output switches").
 
-use rune::{El, col};
+use rune::{El, Tx, col};
 
 use super::Ui;
 use super::controls::{CardRow, METRICS, Paint, card, setting_row, toggle_row};
+use crate::fork::jev::{JEV, has_jev, with_jev, without_jev};
 use crate::fork::screen_text;
 
-const JEV: &str = "jev";
-/// `jev` runs on the Traditional Chinese text and before CJK spacing.
-const AFTER: &str = "traditional-chinese";
-const BEFORE: &str = "cjk-spacing";
+mod jev_key;
 
 pub(super) fn section(ui: &Ui, p: Paint) -> El {
-    let rows: Vec<CardRow> = vec![screen_text_row(ui, p).into(), jev_row(ui, p).into()];
+    let rows: Vec<CardRow> = vec![
+        screen_text_row(ui, p).into(),
+        jev_row(ui, p).into(),
+        jev_key::row_el(ui, p).into(),
+    ];
     col()
         .key("fork-switches")
         .gap(METRICS.label_gap)
@@ -43,13 +45,12 @@ fn screen_text_row(ui: &Ui, p: Paint) -> El {
 }
 
 fn jev_row(ui: &Ui, p: Paint) -> El {
-    let on = ui
-        .settings
-        .dictation_processing
-        .default_mode
-        .transformations
-        .iter()
-        .any(|id| id == JEV);
+    let on = has_jev(
+        &ui.settings
+            .dictation_processing
+            .default_mode
+            .transformations,
+    );
     let registered = ui
         .modes
         .status
@@ -89,73 +90,7 @@ fn jev_row(ui: &Ui, p: Paint) -> El {
     })
 }
 
-/// The steps with `jev` after Traditional Chinese, else before CJK spacing,
-/// else last.
-fn with_jev(steps: &[String]) -> Vec<String> {
-    let mut steps = without_jev(steps);
-    let at = steps
-        .iter()
-        .position(|id| id == AFTER)
-        .map(|index| index + 1)
-        .or_else(|| steps.iter().position(|id| id == BEFORE))
-        .unwrap_or(steps.len());
-    steps.insert(at, JEV.into());
-    steps
-}
-
-fn without_jev(steps: &[String]) -> Vec<String> {
-    steps.iter().filter(|id| *id != JEV).cloned().collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ids(steps: &[&str]) -> Vec<String> {
-        steps.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn jev_goes_after_traditional_chinese_and_before_cjk_spacing() {
-        let off = ids(&["traditional-chinese", "cjk-spacing"]);
-        let on = ids(&["traditional-chinese", "jev", "cjk-spacing"]);
-        assert_eq!(with_jev(&off), on);
-        assert_eq!(without_jev(&on), off);
-        assert_eq!(
-            with_jev(&ids(&[
-                "qa-first",
-                "traditional-chinese",
-                "qa-middle",
-                "cjk-spacing"
-            ])),
-            ids(&[
-                "qa-first",
-                "traditional-chinese",
-                "jev",
-                "qa-middle",
-                "cjk-spacing"
-            ])
-        );
-        assert_eq!(
-            with_jev(&ids(&["qa-first", "cjk-spacing", "qa-last"])),
-            ids(&["qa-first", "jev", "cjk-spacing", "qa-last"])
-        );
-        assert_eq!(with_jev(&ids(&["qa-only"])), ids(&["qa-only", "jev"]));
-        assert_eq!(with_jev(&[]), ids(&["jev"]));
-    }
-
-    #[test]
-    fn turning_jev_off_keeps_every_other_step_in_order() {
-        assert_eq!(
-            without_jev(&ids(&[
-                "qa-a",
-                "jev",
-                "traditional-chinese",
-                "jev",
-                "cjk-spacing"
-            ])),
-            ids(&["qa-a", "traditional-chinese", "cjk-spacing"])
-        );
-        assert_eq!(without_jev(&ids(&["qa-a", "qa-b"])), ids(&["qa-a", "qa-b"]));
-    }
+/// The Jev key's recorder, on every poll.
+pub(super) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
+    jev_key::poll(ui, tx)
 }

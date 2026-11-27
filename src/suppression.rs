@@ -591,6 +591,9 @@ unsafe extern "C" fn physical_event_callback(
     // SAFETY: CoreGraphics supplied a valid event.
     let flags = unsafe { CGEventGetFlags(event) };
     let flags = crate::app_settings::normalized_modifier_flags(flags, physical_keys::snapshot());
+    if crate::fork::jev_key::claims(code, flags) {
+        return event;
+    }
     if !is_chord_evidence(code, flags, crate::app_settings::runtime_hotkeys()) {
         return event;
     }
@@ -860,6 +863,9 @@ unsafe extern "C" fn event_callback(
             .unwrap_or_else(|error| error.into_inner())
             .reset();
         return event;
+    }
+    if crate::fork::jev_key::take(input) {
+        return ptr::null_mut();
     }
     let delivered = send_input(context, input, capture_at);
     let mut suppression = context

@@ -3,6 +3,8 @@
 
 pub mod annotate;
 pub mod dropline;
+pub mod jev;
+pub mod jev_key;
 pub mod meeting_seam;
 pub mod screen_text;
 pub mod traditional;

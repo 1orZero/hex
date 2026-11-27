@@ -959,7 +959,15 @@ impl DotUniforms {
                 Some(island) if island.ears => [island.notch[0] / 2.0, 1.0, pose.level, pose.clock],
                 _ => [field_radius(layout, pose), 0.0, 0.0, 0.0],
             },
+            #[cfg(not(target_os = "macos"))]
             ears: [pose.done, pose.fail, pose.shift, 0.0],
+            #[cfg(target_os = "macos")]
+            ears: [
+                pose.done,
+                pose.fail,
+                pose.shift,
+                crate::fork::jev_key::hud_border(),
+            ],
         }
     }
 }

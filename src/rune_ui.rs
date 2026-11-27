@@ -1508,6 +1508,8 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     {
         changed |= scrawl::routing_rules::poll(ui, clock, visible);
     }
+    #[cfg(target_os = "macos")]
+    let changed = changed | fork_output::poll(ui, tx);
     changed | settings::advance_capture(ui, clock, tx)
 }
 

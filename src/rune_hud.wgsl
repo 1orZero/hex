@@ -134,6 +134,7 @@ const TAU: f32 = 6.2831853;
 const SYSTEM_ORANGE: vec3f = vec3f(1.0, 0.624, 0.039);
 const SYSTEM_GREEN: vec3f = vec3f(0.188, 0.820, 0.345);
 const SYSTEM_RED: vec3f = vec3f(1.0, 0.271, 0.227);
+const SYSTEM_PURPLE: vec3f = vec3f(0.749, 0.353, 0.949);
 const LABEL: vec3f = vec3f(0.92, 0.92, 0.94);
 
 fn segment(point: vec2f, a: vec2f, b: vec2f, radius: f32) -> f32 {
@@ -282,6 +283,9 @@ fn dot_scope_fragment(in: Varyings) -> @location(0) vec4f {
         composite(&result, u.shadow.rgb, u.shadow.a * (0.5 - 0.5 * tanh(shadow_distance / 6.5)));
         composite(&result, u.plate.rgb, u.plate.a * shape);
         composite(&result, u.rim.rgb, u.rim.a * coverage(abs(distance) - 0.3, aa));
+        if (u.ears.w > 0.0) {
+            composite(&result, SYSTEM_PURPLE, u.ears.w * coverage(abs(distance + 1.0) - 1.0, aa) * island_shape);
+        }
     }
 
     if (!dots_only && u.glow > 0.01) {

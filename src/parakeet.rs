@@ -451,6 +451,7 @@ impl DictationWorker {
         let samples = clip.into_transcription_samples();
         crate::dictation::diagnostics::persist(&samples);
         let dropline = crate::fork::dropline::job(&samples, submitted_at);
+        crate::fork::jev_key::submitted(submitted_at);
         let recording = match target {
             TranscriptionTarget::Service => None,
             _ => crate::history::Recording::keep(&samples),
@@ -764,7 +765,7 @@ fn process_job_text(
     profiles: impl FnOnce() -> crate::dictation::processor::Profiles,
     processing: impl FnOnce(),
 ) -> crate::dictation::processor::Processed {
-    let profiles = profiles();
+    let profiles = crate::fork::jev_key::profiles(profiles(), job.timings.total_started);
     // A voice prompt can run a request even when the mode's own rewrite and
     // transformations are off, so the HUD shows its stage too.
     if profiles.processes(&job.context)
