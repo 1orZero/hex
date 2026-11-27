@@ -191,7 +191,11 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
 - Choice: each reading's score is its words' confidence times their duration, summed, in seconds. The
   highest score among readings with text wins; ties go to the dictation language. A Mandarin winner
   leading the Cantonese reading by less than 0.3 s gives way to it when the Cantonese reading writes a
-  Cantonese-only character (嘅, 咗, 喺, 佢, 哋, 啲, …). The winner's text is inserted as Apple wrote
+  Cantonese-only character (嘅, 咗, 喺, 佢, 哋, 啲, …). A Chinese winner leading the English reading by
+  less than 0.5 s gives way to it when more than half of the Chinese winner's words are in Latin
+  letters (`ForkThreeLanguage.latinShare`: each run of Latin letters is one word, every other
+  character but spaces and punctuation one more), since the Chinese models write a short English
+  sentence in English too and score it close. The winner's text is inserted as Apple wrote
   it, Cantonese colloquial characters included; readings are never merged. No text in any reading
   throws the usual no-speech error. The readings run two at a time (`ForkThreeLanguage.maximumReadings`):
   Derek888 refuses a third ("Maximum number of recognizers reached"). A reading that still fails
