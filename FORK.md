@@ -34,6 +34,7 @@ them, not features.
 | `src/rune_ui/picker.rs` | `fork_dropline::model_chosen()` at the top of `choose`; `content.children(fork_dropline::section(ui, p))` after the body in `modal` | Choosing a local model in the picker stops using Dropline; the picker's last section adds, uses, and deletes the provider. |
 | `src/rune_ui/picker/compare.rs`, `src/rune_ui/picker/list.rs` | `#[cfg(target_os = "macos")] State::InUse if crate::rune_ui::fork_dropline::local_is_fallback(ui) => { … fallback_badge(p) }` before `State::InUse => facts::in_use(p),` (4 lines each) | While Dropline is in use, the local model's card and row read 失敗時改用 instead of In use. |
 | `src/rune_ui/general.rs` | `fork_dropline::model_name(ui, model.name.as_ref())` in the Speech model button; `let description = description.or_else(\|\| super::fork_dropline::status(ui, p));` right before the `rows.push(icon_described_row(… "transcription" …))` that shows the row | General names Dropline while it is in use and shows the last fallback. |
+| `src/rune_ui/general.rs` | `basics`: `#[cfg(target_os = "macos")] if let Some(row) = super::fork_dropline::general_row(ui, p) { rows.push(row.into()); }` right after the `rows.push(icon_described_row(… "transcription" …))` (4 lines) | General's 使用 Dropline 辨識 switch, under the Speech model row. |
 | `src/capture_host.rs` | `scrawl_engine`: `let transcriber = crate::fork::annotate::traditional(transcriber);` first (macOS, 2 lines) | Annotate's capture engine transcribes through the conversion, whichever of Hex's model or Apple Speech `ChosenTranscriber` picks. |
 | `src/capture_host/replay.rs` | after `let transcriber = ChosenTranscriber;` in the replay's finish: `let transcriber = crate::fork::annotate::Traditional(std::sync::Arc::new(transcriber));` (macOS, 2 lines) | The 15 s replay transcribes with its own `ChosenTranscriber`, outside the engine. |
 | `src/meeting/transcript.rs` | `TrackTranscript::accept`: `let transcript = crate::fork::traditional::transcript(transcript);` first (macOS, 2 lines) | Every meeting chunk before its words are joined with spaces: the in-call draft, the final pass, a track rebuilt from its WAV, and imports. |
@@ -145,6 +146,12 @@ heard no speech, so the dictation inserts nothing and does not fall back.
   the local API's).
 - While Dropline is in use, the picker's local model reads 失敗時改用 where it read In use; Dropline's row
   reads 使用中.
+- General's 使用 Dropline 辨識 switch, under the Speech model row, shows once the provider is set up. It
+  flips the provider's `selected`, the same state the picker changes, so there is nothing to keep in step:
+  on is the picker's 使用 (Dropline, falling back to the local model), off goes straight to the local model
+  the picker names as 失敗時改用, and choosing a local model in the picker or the menu bar turns it off and
+  makes that model the fallback. `hex settings` has no key for it, because the registry reads and writes only
+  `settings.json` and the selection lives in `fork/dropline-private.json`.
 - The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data
   folder); the endpoint and selection in `fork/dropline-private.json` in the data folder. Opus comes from
   macOS's encoder.

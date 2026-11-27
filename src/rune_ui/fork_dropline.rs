@@ -31,7 +31,7 @@ pub(super) use other::{model_chosen, model_name, section, status};
 
 #[cfg(target_os = "macos")]
 pub(super) use macos::{
-    Form, fallback_badge, local_is_fallback, model_chosen, model_name, section, status,
+    Form, fallback_badge, general_row, local_is_fallback, model_chosen, model_name, section, status,
 };
 
 #[cfg(target_os = "macos")]
@@ -42,7 +42,10 @@ mod macos {
     use rune::{El, TextEdit, col, edit_access, row, text};
     use rune_kit::{Button, ButtonVariant, TextInput};
 
-    use super::super::controls::{ButtonKind, Paint, PushSize, button, status_dot};
+    use super::super::controls::{
+        ButtonKind, Paint, PushSize, button, icon_toggle_row, status_dot,
+    };
+    use super::super::icons::GLOBE;
     use super::super::lists::group_label;
     use super::super::{Ui, picker};
     use crate::fork::dropline::{self, DEFAULT_ENDPOINT, NAME, Provider};
@@ -121,6 +124,35 @@ mod macos {
             minutes => format!("{} 小時前", minutes / 60),
         };
         format!("{when}改用 {}：{}", local_name(ui), fallback.reason)
+    }
+
+    /// General's switch under the speech model, shown once the provider is
+    /// set up. It flips the provider's selection, the same one the picker's
+    /// 使用 and a local model's Use change: on, dictation goes to Dropline
+    /// and falls back to the local model; off, the local model alone.
+    pub(in crate::rune_ui) fn general_row(ui: &Ui, p: Paint) -> Option<El> {
+        if !ui.live() {
+            return None;
+        }
+        dropline::provider()?;
+        let on = dropline::selected();
+        Some(icon_toggle_row(
+            p,
+            "fork-dropline-switch",
+            &GLOBE,
+            "使用 Dropline 辨識",
+            None,
+            on,
+            move |ui: &mut Ui| {
+                if !ui.live() {
+                    return;
+                }
+                match dropline::select(!on) {
+                    Ok(()) => ui.fork_dropline.error = None,
+                    Err(error) => ui.error = Some(error),
+                }
+            },
+        ))
     }
 
     /// Whether the picker's model in use only answers when Dropline fails.
