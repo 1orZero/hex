@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Keeps the front of Hex's vocabulary on the terms Derek used most in the last 30 days.
 
-Transcription reads only the front of the vocabulary (src/dictation/vocabulary.rs): Parakeet with
-Labs › Vocabulary biasing on biases toward the first 64 terms, and Whisper reads the first terms that
-fit 500 characters joined by ", ", and Qwen3-ASR and QwenCleo 1,000. The rest still serves rewriting and
+Transcription reads only the front of the vocabulary (src/dictation/vocabulary.rs): Parakeet biases
+toward the first 64 terms unless vocabulary_boost is off, and Whisper reads the first terms that fit
+500 characters joined by ", ", and Qwen3-ASR and QwenCleo 1,000. The rest still serves rewriting and
 search. Each night the automation lists the new dictations, picks up to 5 new terms, and runs
 apply, which adds them and ranks the vocabulary:
 
@@ -55,6 +55,7 @@ SETTINGS = os.path.join(
 )
 
 PARAKEET_TERMS = 64
+DEFAULT_BOOST = "normal"
 MAX_ADDS = 5
 MAX_CHARS = 64
 USAGE_DAYS = 30
@@ -66,15 +67,31 @@ DAY_MS = 86_400_000
 
 
 class HexError(Exception):
-    pass
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 def run_hex(*args):
     proc = subprocess.run([HEX, *args, "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
         detail = " ".join((proc.stdout.strip() or proc.stderr.strip()).split())
-        raise HexError(f"hex {' '.join(args)} exited {proc.returncode}: {detail[:300]}")
+        try:
+            code = json.loads(proc.stdout).get("code")
+        except (ValueError, AttributeError):
+            code = None
+        raise HexError(f"hex {' '.join(args)} exited {proc.returncode}: {detail[:300]}", code)
     return json.loads(proc.stdout)
+
+
+def vocabulary_boost():
+    """Hex's vocabulary_boost (off, light, normal, strong); None when this Hex has no such setting."""
+    try:
+        return run_hex("settings", "get", "vocabulary_boost")["settings"][0]["value"]
+    except HexError as error:
+        if error.code != "unknown-setting":
+            raise
+        return None
 
 
 def load(path, default):
@@ -148,7 +165,8 @@ def build(additions_path, exclude_app):
         "none",
     )
     model = {"id": selected["id"], "name": selected["name"], "vocabulary": kind}
-    biasing = run_hex("settings", "get", "labs.vocabulary_biasing")["settings"][0]["value"]
+    boost = vocabulary_boost()
+    biasing = (boost or DEFAULT_BOOST) != "off"
     history = run_hex("history", "--since", f"{USAGE_DAYS}d", "--limit", "10000")["entries"]
     if exclude_app:
         history = [entry for entry in history if (entry.get("application") or "").casefold() != exclude_app.casefold()]
@@ -262,6 +280,7 @@ def build(additions_path, exclude_app):
     return {
         "model": model,
         "biasing": biasing,
+        "vocabulary_boost": boost,
         "front_rule": rule,
         "usage": {"since_days": USAGE_DAYS, "dictations": len(history), "excluded_app": exclude_app},
         "count": {"before": len(vocabulary), "after": len(final)},

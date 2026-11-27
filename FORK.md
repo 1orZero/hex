@@ -85,7 +85,7 @@ anomalyco/hex#1734, so the fork no longer carries it in `crates/capture/build.rs
   provider in the iPhone app.
 - `ios/HEXMobile/Fork/VocabularyLink.swift` and `ios/HEXMobileTests/Fork/VocabularyLinkTests.swift`: the
   iPhone vocabulary link.
-- `fork/vocabulary.py`: nightly vocabulary upkeep (see "Vocabulary").
+- `fork/vocabulary.py` and `fork/test_vocabulary.py`: nightly vocabulary upkeep and its tests (see "Vocabulary").
 - `src/fork/screen_text.rs`, `src/fork/screen_text.swift`, `src/fork/screen_text/transformation_tests.rs`, and
   `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
 - `src/rune_ui/fork_output.rs`: the Output switches (see "Output switches").
@@ -308,7 +308,7 @@ Hex must be running; otherwise the notification says so.
 ### Nightly vocabulary upkeep
 
 Transcription reads only the front of the vocabulary: Qwen3-ASR and QwenCleo the first terms that
-fit 1,000 characters (Whisper 500), Parakeet with Labs › Vocabulary biasing on the first 64 terms
+fit 1,000 characters (Whisper 500), Parakeet the first 64 terms unless `vocabulary_boost` is `off`
 (`src/dictation/vocabulary.rs`). The rest still serves rewriting and search. The 22:00 automation
 runs `fork/vocabulary.py` from `~/.hex-fork/repo` before `fork/daily.sh` to keep the most used terms in front
 and to add new ones; `fork/daily.sh` then copies the result to the iPhone (see "The Mac's vocabulary on
@@ -339,7 +339,9 @@ only when the front changes or a term is added or removed, copies `settings.json
 `~/.hex-fork/backup/vocab/` first, and afterwards checks that every term and spelling is unchanged
 and the front matches the plan; otherwise it stops and names the backup, keeps the terms it already
 added as its own, and leaves the analyzed window for the next night. A model that reads no
-vocabulary (or Parakeet with biasing off) gets no reordering.
+vocabulary (or Parakeet with `vocabulary_boost` off) gets no reordering. Hex 3.5.0 retired Labs › Vocabulary
+biasing (anomalyco/hex#1922), so the script reads `vocabulary_boost` and prints it as `vocabulary_boost`
+beside `biasing`; a Hex without that setting prints `null` and is planned as Hex's default, `normal`.
 
 Terms Derek added or imported are never removed and get no new spellings. A term the script added is
 removed after 90 days without a use or a new spelling. `~/.hex-fork/state/vocab/` holds `own.json` (the script's terms with
