@@ -379,9 +379,8 @@ nonisolated enum ForkThreeLanguage {
         return (ids.compactMap { id in resolved[id].map { UsableLocale(id: id, locale: $0) } }, "")
     }
 
-    /// One lane's reading. Cancelling it cancels Apple's analysis too, so a reading nobody
-    /// waits for any more (the live words' scoring once the recording stops) stops taking a
-    /// share of Apple's analyses.
+    /// One lane's reading. Cancelling it asks Apple to end the analysis (`cancelAndFinishNow`)
+    /// and counts as a failure, never as a reading that heard nothing.
     private static func readOutcome(
         _ audioURL: URL,
         lane: UsableLocale,

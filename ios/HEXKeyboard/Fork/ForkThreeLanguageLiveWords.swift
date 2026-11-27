@@ -100,7 +100,10 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         let lanes = planned.filter { running[$0.id] != nil }
         let at = audioSeconds
         nextScore = at + Self.scoreInterval
-        guard writeScratch() else { return }
+        guard writeScratch() else {
+            fail("scoring audio not written")
+            return
+        }
         let url = scratch
         scoring = Task { [weak self] in
             let readings = await ForkThreeLanguage.readAll(url, lanes: lanes, vocabulary: [], lingeringModels: false)
@@ -125,8 +128,8 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
 
     /// The last scoring is in: the other languages' recognisers stop.
     private func settle() {
-        guard let shown = leader.shown else {
-            fail("no reading scored in \(Int(Self.longestScored)) s")
+        guard let shown = leader.shown, running[shown] != nil else {
+            fail("no running reading scored in \(Int(Self.longestScored)) s")
             return
         }
         for (id, reader) in running where id != shown {
