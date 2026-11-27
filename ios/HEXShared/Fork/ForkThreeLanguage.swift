@@ -213,7 +213,12 @@ nonisolated enum ForkThreeLanguage {
         return chosen?.text ?? ""
     }
 
-    /// Reads `audioURL` in every lane at once, in `lanes`' order; nil where a reading failed.
+    /// Readings run at once: an iPhone refuses analyses past about two at a time
+    /// (`SFSpeechErrorDomain` 16, "Maximum number of recognizers reached", on Derek888).
+    static let maximumReadings = 2
+
+    /// Reads `audioURL` in every lane, `maximumReadings` at a time, in `lanes`' order; nil where
+    /// a reading failed.
     static func readAll(
         _ audioURL: URL,
         lanes: [UsableLocale],
@@ -230,14 +235,19 @@ nonisolated enum ForkThreeLanguage {
         lingeringModels: Bool
     ) async -> [Result<Lane, any Error>] {
         await withTaskGroup(of: (Int, Result<Lane, any Error>).self) { group in
-            for (index, lane) in lanes.enumerated() {
+            var pending = Array(lanes.enumerated())
+            func addNext() {
+                guard !pending.isEmpty else { return }
+                let (index, lane) = pending.removeFirst()
                 group.addTask {
                     (index, await readOutcome(audioURL, lane: lane, vocabulary: vocabulary, lingeringModels: lingeringModels))
                 }
             }
+            for _ in 0..<maximumReadings { addNext() }
             var outcomes = [Result<Lane, any Error>](repeating: .failure(CancellationError()), count: lanes.count)
             for await (index, outcome) in group {
                 outcomes[index] = outcome
+                addNext()
             }
             return outcomes
         }

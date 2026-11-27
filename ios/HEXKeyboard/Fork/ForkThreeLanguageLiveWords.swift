@@ -3,14 +3,16 @@ import Foundation
 import Speech
 
 /// Three-language dictation's live words (fork): while three-language dictation applies
-/// (`ForkThreeLanguage.usableLocales`), the keyboard reads the recording live in each of its
-/// languages (one `AppleLiveTranscriber` each) and shows the one the dictation will most likely
-/// be inserted in. Live results carry no confidence, so every `scoreInterval` of audio the
-/// recording so far is read again the way the dictation itself is
-/// (`ForkThreeLanguage.readAll`), and `ForkThreeLanguage.LiveLeader` turns those scores into the
-/// reading to show. Nothing shows until the first scores. Only for the preview: the inserted
-/// text still comes from `ForkThreeLanguage.transcribe` once the recording stops. Readings
-/// start with the first audio, so a source the keyboard never attaches never starts one.
+/// (`ForkThreeLanguage.usableLocales`), the keyboard shows the recording in the language the
+/// dictation will most likely be inserted in. Live results carry no confidence, so every
+/// `scoreInterval` of audio the recording so far is read again the way the dictation itself is
+/// (`ForkThreeLanguage.readAll`), one language at a time, and `ForkThreeLanguage.LiveLeader`
+/// turns those scores into the language to show. Only that language's `AppleLiveTranscriber`
+/// runs, started on the audio so far when the shown language changes: an iPhone refuses
+/// analyses past a small number at once (`insufficientResources`), so the preview holds at most
+/// two, its recogniser and one scoring reading. Nothing shows until the first scores. Only for
+/// the preview: the inserted text still comes from `ForkThreeLanguage.transcribe` once the
+/// recording stops.
 @available(iOS 26.0, *)
 @MainActor
 final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
@@ -20,10 +22,8 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
     /// Audio before the first scores, and between later ones.
     static let firstScore: Double = 1
     static let scoreInterval: Double = 1.5
-    /// Past this much audio the shown reading stays as it is and only its recogniser keeps
-    /// running: Apple caps the analyses running at once per device and each scoring reads the
-    /// whole recording again, while the dictation's own readings need those analyses free when
-    /// the recording stops.
+    /// Past this much audio the shown language stays as it is: each scoring reads the whole
+    /// recording again.
     static let longestScored: Double = 12
 
     /// The live source for `language`, or nil when three-language dictation doesn't apply and
@@ -35,15 +35,21 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
 
     private let planned: [ForkThreeLanguage.UsableLocale]
     private let sampleRate: Double
-    private var running: [String: AppleLiveTranscriber] = [:]
-    private var transcripts: [String: LiveTranscript] = [:]
+    /// Languages whose recogniser gave up: no longer scored or shown.
+    private var dropped: Set<String> = []
+    private var reader: AppleLiveTranscriber?
+    private var readerID: String?
+    /// Whether the running recogniser has had the recording so far.
+    private var fed = false
+    /// The recording from its start, replayed into a recogniser started later; kept until the
+    /// shown language settles and its recogniser has had it.
     private var audio = Data()
     private var nextScore = firstScore
     private var scoring: Task<Void, Never>?
     private var scores = 0
     private var leader = ForkThreeLanguage.LiveLeader()
     private var switches = 0
-    private var started = false
+    private var settled = false
     private var stopped = false
     private let scratch = FileManager.default.temporaryDirectory
         .appendingPathComponent("fork-three-language-live-\(UUID().uuidString).wav")
@@ -57,11 +63,10 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
 
     func append(_ pcm: Data) {
         guard !stopped else { return }
-        if !started { start() }
-        running.values.forEach { $0.append(pcm) }
-        guard audioSeconds < Self.longestScored else { return }
+        if fed { reader?.append(pcm) }
+        guard !settled || !fed else { return }
         audio.append(pcm)
-        if scoring == nil, audioSeconds >= nextScore { score() }
+        if !settled, scoring == nil, audioSeconds >= nextScore, nextScore < Self.longestScored { score() }
     }
 
     func stop() {
@@ -69,35 +74,19 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         stopped = true
         onUpdate = nil
         scoring?.cancel()
-        running.values.forEach { $0.stop() }
-        running = [:]
+        reader?.stop()
+        reader = nil
+        audio = Data()
         try? FileManager.default.removeItem(at: scratch)
         KeyboardProbeLog.shared.write(
             "three-language live: stopped, lanes=\(planned.map(\.id).joined(separator: ",")) shown=\(leader.shown ?? "none") scores=\(scores) switches=\(switches)"
         )
     }
 
-    private func start() {
-        started = true
-        for lane in planned {
-            guard let reader = AppleLiveTranscriber(
-                locale: lane.locale,
-                module: .speech,
-                sampleRate: sampleRate,
-                log: { KeyboardProbeLog.shared.write($0) }
-            ) else { continue }
-            let id = lane.id
-            reader.onUpdate = { [weak self] transcript in self?.received(id, transcript: transcript) }
-            reader.onFailure = { [weak self] reason in self?.laneFailed(id, reason: reason) }
-            running[id] = reader
-        }
-        KeyboardProbeLog.shared.write("three-language live: started \(running.keys.sorted().joined(separator: ","))")
-        if running.isEmpty { fail("no audio format") }
-    }
-
-    /// Reads the audio so far in every running language and moves the shown reading.
+    /// Reads the audio so far in every language still in play, one after another, and moves
+    /// the shown language.
     private func score() {
-        let lanes = planned.filter { running[$0.id] != nil }
+        let lanes = planned.filter { !dropped.contains($0.id) }
         let at = audioSeconds
         nextScore = at + Self.scoreInterval
         guard writeScratch() else {
@@ -106,19 +95,25 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         }
         let url = scratch
         scoring = Task { [weak self] in
-            let readings = await ForkThreeLanguage.readAll(url, lanes: lanes, vocabulary: [], lingeringModels: false)
+            var readings: [ForkThreeLanguage.Lane] = []
+            for lane in lanes {
+                guard !Task.isCancelled else { return }
+                if let reading = await ForkThreeLanguage.readAll(url, lanes: [lane], vocabulary: [], lingeringModels: false).first ?? nil {
+                    readings.append(reading)
+                }
+            }
             guard let self, !self.stopped else { return }
             self.scoring = nil
-            self.scored(zip(lanes, readings).compactMap { $0.1 }, at: at)
+            self.scored(readings, at: at)
         }
     }
 
     private func scored(_ lanes: [ForkThreeLanguage.Lane], at seconds: Double) {
         scores += 1
         let before = leader.shown
-        let shown = leader.update(lanes.filter { running[$0.locale] != nil }, at: seconds)
+        let shown = leader.update(lanes.filter { !dropped.contains($0.locale) }, at: seconds)
         if before != nil, shown != before { switches += 1 }
-        publish()
+        if let shown, shown != readerID, !dropped.contains(shown) { startReader(shown) }
         guard nextScore < Self.longestScored else {
             settle()
             return
@@ -126,18 +121,56 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         if scoring == nil, audioSeconds >= nextScore { score() }
     }
 
-    /// The last scoring is in: the other languages' recognisers stop.
+    /// The last scoring is in: the shown language stays and the held audio goes.
     private func settle() {
-        guard let shown = leader.shown, running[shown] != nil else {
-            fail("no running reading scored in \(Int(Self.longestScored)) s")
+        guard reader != nil, let shown = leader.shown else {
+            fail("no reading scored in \(Int(Self.longestScored)) s")
             return
         }
-        for (id, reader) in running where id != shown {
-            reader.stop()
-            running[id] = nil
-            transcripts[id] = nil
-        }
+        settled = true
+        if fed { audio = Data() }
         KeyboardProbeLog.shared.write("three-language live: settled on \(shown) after \(scores) scores")
+    }
+
+    /// Replaces the running recogniser with `id`'s, fed the recording so far once it is ready
+    /// (it holds only `AppleLiveTranscriber.maximumPendingSeconds` before). The words on screen
+    /// stay until the new one's first update.
+    private func startReader(_ id: String) {
+        reader?.stop()
+        reader = nil
+        readerID = id
+        fed = false
+        guard let lane = planned.first(where: { $0.id == id }),
+              let next = AppleLiveTranscriber(
+                  locale: lane.locale,
+                  module: .speech,
+                  sampleRate: sampleRate,
+                  log: { KeyboardProbeLog.shared.write($0) }
+              ) else {
+            laneFailed(id, reason: "no audio format")
+            return
+        }
+        next.onUpdate = { [weak self] transcript in
+            guard let self, !self.stopped, self.readerID == id else { return }
+            self.onUpdate?(transcript)
+        }
+        next.onFailure = { [weak self] reason in self?.laneFailed(id, reason: reason) }
+        reader = next
+        Task { [weak self, weak next] in
+            let deadline = ContinuousClock.now + .seconds(AppleLiveTranscriber.maximumPendingSeconds)
+            while let next, next.readyAfter == nil, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard let self, let next, !self.stopped, self.reader === next else { return }
+            guard next.readyAfter != nil else {
+                self.laneFailed(id, reason: "not ready in \(Int(AppleLiveTranscriber.maximumPendingSeconds)) s")
+                return
+            }
+            KeyboardProbeLog.shared.write("three-language live: showing \(id) from \(String(format: "%.1f", self.audioSeconds)) s")
+            next.append(self.audio)
+            self.fed = true
+            if self.settled { self.audio = Data() }
+        }
     }
 
     private func writeScratch() -> Bool {
@@ -163,23 +196,19 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         }
     }
 
-    private func received(_ id: String, transcript: LiveTranscript) {
-        guard !stopped else { return }
-        transcripts[id] = transcript
-        if id == leader.shown { publish() }
-    }
-
-    private func publish() {
-        guard let shown = leader.shown, let transcript = transcripts[shown] else { return }
-        onUpdate?(transcript)
-    }
-
+    /// A language's recogniser gave up: it is no longer scored or shown, and the next scoring
+    /// picks another. Once settled, or with none left, the live words go.
     private func laneFailed(_ id: String, reason: String) {
         guard !stopped else { return }
         KeyboardProbeLog.shared.write("three-language live: \(id) gave up: \(reason)")
-        running[id] = nil
-        transcripts[id] = nil
-        guard running.isEmpty else { return }
+        dropped.insert(id)
+        if readerID == id {
+            reader?.stop()
+            reader = nil
+            readerID = nil
+            fed = false
+        }
+        guard settled || planned.allSatisfy({ dropped.contains($0.id) }) else { return }
         fail(reason)
     }
 
