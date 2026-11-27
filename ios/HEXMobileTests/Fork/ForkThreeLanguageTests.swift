@@ -56,6 +56,35 @@ final class ForkThreeLanguageTests: XCTestCase {
         }
     }
 
+    /// The keyboard's live words start with the first reading that has text and move to the
+    /// reading `pick` chooses only once it has kept choosing it for `LiveLeader.delay`.
+    func testLiveWordsFollowTheReadingPickKeepsChoosing() {
+        var leader = ForkThreeLanguage.LiveLeader()
+        XCTAssertNil(leader.update([lane("zh-HK", "", score: 0), lane("zh-TW", "", score: 0)], at: 0))
+        XCTAssertEqual(leader.update([lane("zh-HK", "我今", score: 0.4), lane("zh-TW", "", score: 0)], at: 0.3), "zh-HK")
+
+        let mandarinAhead = [lane("zh-HK", "我今天下", score: 1.1), lane("zh-TW", "我今天下午", score: 1.5)]
+        XCTAssertEqual(leader.update(mandarinAhead, at: 0.8), "zh-HK")
+        XCTAssertEqual(leader.update(mandarinAhead, at: 1.2), "zh-HK")
+        XCTAssertEqual(leader.update(mandarinAhead, at: 1.5), "zh-TW")
+        XCTAssertEqual(leader.shown, "zh-TW")
+    }
+
+    func testLiveWordsDontFlipOnABriefLead() {
+        var leader = ForkThreeLanguage.LiveLeader()
+        XCTAssertEqual(leader.update([lane("zh-TW", "我們", score: 0.8), lane("zh-HK", "我", score: 0.5)], at: 0), "zh-TW")
+        XCTAssertEqual(leader.update([lane("zh-TW", "我們今天", score: 1.0), lane("zh-HK", "我今日", score: 1.3)], at: 0.2), "zh-TW")
+        XCTAssertEqual(leader.update([lane("zh-TW", "我們今天要", score: 1.6), lane("zh-HK", "我今日要", score: 1.4)], at: 0.5), "zh-TW")
+        XCTAssertEqual(leader.update([lane("zh-TW", "我們今天要去", score: 1.7), lane("zh-HK", "我今日要去", score: 2.0)], at: 0.9), "zh-TW")
+        XCTAssertEqual(leader.update([lane("zh-TW", "我們今天要去", score: 1.7), lane("zh-HK", "我今日要去", score: 2.0)], at: 1.5), "zh-HK")
+    }
+
+    func testLiveWordsMoveAtOnceWhenTheShownReadingIsGone() {
+        var leader = ForkThreeLanguage.LiveLeader()
+        XCTAssertEqual(leader.update([lane("zh-HK", "我", score: 0.5), lane("zh-TW", "", score: 0)], at: 0), "zh-HK")
+        XCTAssertEqual(leader.update([lane("zh-TW", "我們", score: 0.6)], at: 0.1), "zh-TW")
+    }
+
     func testScoreIsConfidenceTimesDuration() {
         let reading = ForkThreeLanguage.Lane(
             locale: "en-US",

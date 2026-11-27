@@ -30,6 +30,7 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXKeyboard/KeyboardViewController.swift` | `viewWillAppear(_:)`: `ForkMacVocabulary.apply()` after `super.viewWillAppear(animated)` (1 line) | Folds in the Mac's vocabulary as the keyboard comes on screen, before the keys and dictation read the list, so the iPhone gets it without opening Hex. |
 | `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let threeLanguage = await ForkThreeLanguage.transcribe(…) { … }` before the `// Labs › Two-language dictation` comment (4 lines) | The app's Apple Speech dictation reads the recording in English, Cantonese, and Mandarin when three-language dictation applies, else runs upstream's Two-language and single-language paths unchanged. |
 | `ios/HEXKeyboard/KeyboardSpeech.swift` | `transcribe(_:hints:)`: the same `if let threeLanguage = …` block before the `// Labs › Two-language dictation` comment, returning the dictation language with the text (4 lines) | The same for the keyboard's own Apple Speech dictation. |
+| `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let three = await ForkThreeLanguageLiveWords.source(for: picked, sampleRate: rate), !self.stopped { self.attach(three); return }` after `guard let self, !self.stopped else { return }` in the lookup task (1 line) | While three-language dictation applies, the keyboard's live words come from `ForkThreeLanguageLiveWords` instead of one recogniser in the dictation language. |
 
 ## Fork-only files
 
@@ -40,8 +41,9 @@ whoever resolves a tag merge knows what to keep.
   vocabulary link.
 - `ios/HEXShared/Fork/ForkMacVocabulary.swift` and `ios/HEXMobileTests/Fork/ForkMacVocabularyTests.swift`:
   the Mac's vocabulary on the iPhone.
-- `ios/HEXShared/Fork/ForkThreeLanguage.swift`, `ios/HEXMobileTests/Fork/ForkThreeLanguageTests.swift`, and
-  `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`: three-language dictation.
+- `ios/HEXShared/Fork/ForkThreeLanguage.swift`, `ios/HEXKeyboard/Fork/ForkThreeLanguageLiveWords.swift`,
+  `ios/HEXMobileTests/Fork/ForkThreeLanguageTests.swift`, and `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`:
+  three-language dictation.
 
 ## Dropline private API
 
@@ -192,6 +194,14 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   Cantonese-only character (嘅, 咗, 喺, 佢, 哋, 啲, …). The winner's text is inserted as Apple wrote
   it, Cantonese colloquial characters included; readings are never merged. No text in any reading
   throws the usual no-speech error. Every reading failing falls through to the paths above.
+- Live words (the keyboard's preview while it records): each running language gets its own
+  `AppleLiveTranscriber`. Live results carry no confidence, so after 1 s of audio, and every 1.5 s after
+  that (up to 60 s), the recording so far is read again the way the dictation is
+  (`ForkThreeLanguage.readAll`) and scored. `ForkThreeLanguage.LiveLeader` shows `pick`'s first choice and
+  moves to another only after `pick` chooses it at two scorings in a row (0.6 s of audio apart at least),
+  so the words follow the language the dictation will be inserted in without flipping. Nothing shows
+  before the first scores. A language whose recogniser gives up is dropped; with none left, the live
+  words go and the dictation goes on. The inserted text and the pick are unchanged.
 - Language downstream: both hooks keep the dictation language for the rest of the pipeline (formatting,
   translation source, and the keyboard's `noteKeyboardDictation`), as Two-language does, so the
   language Automatic recorded for the keyboard never changes with the winner.
