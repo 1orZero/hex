@@ -167,7 +167,6 @@ nonisolated enum ForkThreeLanguage {
         let started = ContinuousClock.now
         let readings = await readAll(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels)
         let seconds = (ContinuousClock.now - started) / .seconds(1)
-        Task { await keepReserved(lanes.map(\.locale)) }
 
         guard readings.contains(where: { $0 != nil }) else {
             log.error("three-language: every reading failed")
@@ -333,6 +332,11 @@ nonisolated enum ForkThreeLanguage {
             if locale.identifier(.bcp47) == primary?.identifier(.bcp47) {
                 primaryID = id
             }
+        }
+        // A model reads as installed only to a process that reserved it, and the app and the
+        // keyboard reserve apart: reserving first finds a model already on the iPhone.
+        await keepReserved(locales.compactMap { resolved[$0] })
+        for (id, locale) in resolved {
             let ready = await isInstalled(locale)
             installed[id] = ready && !settings.speechModuleFailed(id)
         }

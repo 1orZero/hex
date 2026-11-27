@@ -209,8 +209,10 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   that language changes, so iOS may reclaim the other two. Each time Hex opens or becomes active with
   the lab on and a dictation language among the three, `ForkThreeLanguage.prepareModels()` (called
   from `forkVocabularyLinks()` in `ios/HEXMobile/Fork/VocabularyLink.swift`, one run at a time)
-  keeps all three reserved and downloads any that isn't installed. After each three-language
-  dictation the three are reserved again. Reserving releases the oldest other languages when at
+  keeps all three reserved and downloads any that isn't installed. A model reads as installed only to
+  a process that has reserved it, and the app and the keyboard hold separate reservations, so the
+  keyboard reserves the three before each check of what's installed (`usableLocales`), for the
+  dictation and for the live words. Reserving releases the oldest other languages when at
   `AssetInventory.maximumReservedLocales`; with a limit under three nothing changes. The keyboard
   never downloads.
 - Log: `anomaly.hex.mobile` category `fork-three-language` records each dictation's pick, the
