@@ -4,8 +4,9 @@ import OSLog
 import Speech
 
 /// Three-language dictation (fork): while Labs › Two-language dictation is on, the dictation
-/// language is English, Cantonese, or Mandarin, and all three `SpeechTranscriber` models are
-/// installed, one recording is read in `en-US`, `zh-HK`, and `zh-TW` at once. The reading
+/// language is English, Cantonese, or Mandarin, and the `SpeechTranscriber` models `required`
+/// names are installed, one recording is read in `en-US` (when its model is installed too),
+/// `zh-HK`, and `zh-TW` at once. The reading
 /// with the most confidence-weighted seconds is inserted exactly as Apple Speech wrote it,
 /// never merged with the others: a speaker keeps one language for a whole dictation, and the
 /// Chinese models already write the English words mixed into it. Shared by the app
@@ -37,14 +38,22 @@ nonisolated enum ForkThreeLanguage {
     }
 
     /// The languages to read in, primary first, or nil to dictate as before: the lab off, a
-    /// dictation language outside the three, or any of the three models not installed.
+    /// dictation language outside the three, or a `required` model not installed.
     /// Cantonese in any region (`yue-CN`, Settings' "Cantonese") counts as `zh-HK`, the
     /// Cantonese reading, and leads with it; when every reading fails, dictation still falls
     /// back to the Cantonese the person picked.
     static func plan(enabled: Bool, primary: String?, installed: [String: Bool]) -> [String]? {
         guard enabled, let lead = lead(for: primary) else { return nil }
-        guard locales.allSatisfy({ installed[$0] == true }) else { return nil }
-        return [lead] + locales.filter { $0 != lead }
+        guard required(lead: lead).allSatisfy({ installed[$0] == true }) else { return nil }
+        return [lead] + locales.filter { $0 != lead && installed[$0] == true }
+    }
+
+    /// The models a dictation led by `lead` can't go without: both Chinese readings, which tell
+    /// Cantonese from Mandarin, and the dictation language's own. English is read only when its
+    /// model is installed: the Chinese models write the English words mixed into Chinese, and a
+    /// Chinese dictation language without three languages would read English in Chinese anyway.
+    static func required(lead: String) -> [String] {
+        locales.filter { $0 == lead || $0 != "en-US" }
     }
 
     /// Which of the three readings a dictation language leads with, or nil for another language.
@@ -65,7 +74,7 @@ nonisolated enum ForkThreeLanguage {
         guard enabled else { return "lab-off" }
         guard speechModule else { return "dictation-module" }
         guard lead(for: primary) != nil else { return "language=\(primary ?? "none")" }
-        let missing = locales.filter { installed[$0] != true }
+        let missing = required(lead: lead(for: primary) ?? "").filter { installed[$0] != true }
         return missing.isEmpty ? nil : "not-installed=\(missing.joined(separator: ","))"
     }
 
@@ -147,8 +156,9 @@ nonisolated enum ForkThreeLanguage {
         let scores = heard.map { "\($0.locale)=\(String(format: "%.2f", $0.score))" }.joined(separator: " ")
         let failed = zip(lanes, readings).filter { $0.1 == nil }.map { $0.0.id }.joined(separator: ",")
         let cantonese = heard.first { $0.locale == "zh-HK" }.map { writesCantonese($0.text) } ?? false
+        let missing = locales.filter { id in !lanes.contains { $0.id == id } }
         log.notice(
-            "three-language picked=\(chosen?.locale ?? "none", privacy: .public) \(scores, privacy: .public) cantonese=\(cantonese, privacy: .public) failed=\(failed, privacy: .public) seconds=\(String(format: "%.2f", seconds), privacy: .public)"
+            "three-language picked=\(chosen?.locale ?? "none", privacy: .public) \(scores, privacy: .public) cantonese=\(cantonese, privacy: .public) failed=\(failed, privacy: .public) missing=\(missing.joined(separator: ","), privacy: .public) seconds=\(String(format: "%.2f", seconds), privacy: .public)"
         )
         Record.append(Record(
             event: "picked",
@@ -156,6 +166,7 @@ nonisolated enum ForkThreeLanguage {
             scores: Dictionary(uniqueKeysWithValues: heard.map { ($0.locale, ($0.score * 100).rounded() / 100) }),
             cantonese: cantonese,
             failed: failed.isEmpty ? [] : failed.components(separatedBy: ","),
+            missing: missing,
             seconds: (seconds * 100).rounded() / 100
         ))
         return chosen?.text ?? ""
@@ -172,6 +183,8 @@ nonisolated enum ForkThreeLanguage {
         var scores: [String: Double] = [:]
         var cantonese = false
         var failed: [String] = []
+        /// Readings skipped because their model isn't installed (English only, see `required`).
+        var missing: [String] = []
         var seconds: Double?
         var at = Date()
         var process = Bundle.main.bundleURL.pathExtension == "appex" ? "keyboard" : "app"
@@ -220,8 +233,16 @@ nonisolated enum ForkThreeLanguage {
             resolved.append((id, locale))
         }
         await keepReserved(resolved.map(\.locale))
-        for (id, locale) in resolved {
-            guard !(await isInstalled(locale)) else { continue }
+        var absent: [(id: String, locale: Locale)] = []
+        for entry in resolved {
+            if !(await isInstalled(entry.locale)) { absent.append(entry) }
+        }
+        if !absent.isEmpty {
+            let detail = "downloading=\(absent.map(\.id).joined(separator: ","))"
+            log.notice("three-language prepared \(detail, privacy: .public)")
+            Record.append(Record(event: "prepared", detail: detail))
+        }
+        for (id, locale) in absent {
             do {
                 if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber(for: locale)]) {
                     try await request.downloadAndInstall()
