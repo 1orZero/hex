@@ -197,19 +197,22 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   running at once per device, `insufficientResources`) is read again alone, once, 0.3 s later; every
   reading still failing falls through to the paths above. A cancelled reading asks Apple to end its
   analysis (`cancelAndFinishNow`) and counts as failed, never as a reading that heard nothing.
-- Live words (the keyboard's preview while it records): each running language gets its own
-  `AppleLiveTranscriber`. Live results carry no confidence, so after 1 s of audio, and every 1.5 s after
-  that (up to 12 s of audio), the recording so far is read again the way the dictation is
-  (`ForkThreeLanguage.readAll`) and scored. After the last scoring only the shown language's
-  recogniser keeps running, so a long recording runs one analysis, as without three languages, and
-  the dictation's own readings find Apple's analyses free when it stops; a language change after
-  12 s shows only in the inserted text. When no scoring succeeds in those 12 s, or the shown
-  language's recogniser has given up by then, or the scoring audio can't be written, the live words go
-  and the dictation goes on. `ForkThreeLanguage.LiveLeader` shows `pick`'s first choice and
-  moves to another only after `pick` chooses it at two scorings in a row (0.6 s of audio apart at least),
-  so the words follow the language the dictation will be inserted in without flipping. Nothing shows
-  before the first scores. A language whose recogniser gives up is dropped; with none left, the live
-  words go and the dictation goes on. The inserted text and the pick are unchanged.
+- Live words (the keyboard's preview while it records): live results carry no confidence, so after
+  1 s of audio, and every 1.5 s after that (up to 12 s of audio), the recording so far is read again
+  the way the dictation is (`ForkThreeLanguage.readAll`), one language at a time, and scored.
+  `ForkThreeLanguage.LiveLeader` shows `pick`'s first choice and moves to another only after `pick`
+  chooses it at two scorings in a row (0.6 s of audio apart at least), so the words follow the
+  language the dictation will be inserted in without flipping. Only the shown language's
+  `AppleLiveTranscriber` runs: it starts when that language is first shown or changes, and once
+  ready it is fed the recording from its start, so the preview never holds more than two analyses,
+  its recogniser and one scoring reading. An iPhone refuses analyses past a small number at once
+  (`SFSpeechErrorDomain` 16, `insufficientResources`, seen on Derek888 with three recognisers and
+  three scoring readings), which left the preview at "Listening" and then closed it. Nothing shows
+  before the first scores. After the last scoring the shown language stays; a language change after
+  12 s shows only in the inserted text. A language whose recogniser gives up is no longer scored or
+  shown and the next scoring picks another; once settled, or with none left, or when no scoring
+  succeeds in those 12 s, or when the scoring audio can't be written, the live words go and the
+  dictation goes on. The inserted text and the pick are unchanged.
 - Language downstream: both hooks keep the dictation language for the rest of the pipeline (formatting,
   translation source, and the keyboard's `noteKeyboardDictation`), as Two-language does, so the
   language Automatic recorded for the keyboard never changes with the winner.
