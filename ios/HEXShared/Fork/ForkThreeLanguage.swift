@@ -208,6 +208,7 @@ nonisolated enum ForkThreeLanguage {
             return nil
         }
         let started = ContinuousClock.now
+        if lanes.contains(where: { $0.id == "en-US" }) { ForkThreeLanguageEnglishWords.prepare() }
         var outcomes = await readOutcomes(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels)
         let errors = zip(lanes, outcomes).compactMap { lane, outcome -> String? in
             guard case .failure(let error) = outcome else { return nil }

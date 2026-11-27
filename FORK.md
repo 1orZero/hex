@@ -219,11 +219,11 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   shorter form of itself (`prom` → `prompt`), while the Chinese reading is at most 0.85 sure of it
   and `en-US` at least 0.5 and as sure. A vocabulary word is written as the vocabulary spells it. It
   runs whenever three-language dictation does, with no setting of its own, and reads only the
-  readings already taken, so no recogniser is added. The typing model is mapped once per process and
-  read off the main actor; UIKit's dictionary isn't used, since its first lookup of a misspelling in
-  a process takes about 0.4 s on the main actor (iOS 27.2 simulator). Without the English model or
-  a Latin word in the winner, or when English wins, the text is the winner's as before and the
-  typing model isn't read.
+  readings already taken, so no recogniser is added. The typing model is mapped once per process,
+  as the readings start, and read off the main actor; UIKit's dictionary isn't used, since its first
+  lookup of a misspelling in a process takes about 0.4 s on the main actor (iOS 27.2 simulator).
+  Without the English model or a Latin word in the winner, or when English wins, the text is the
+  winner's as before; without the English model the typing model isn't read either.
 - Live words (the keyboard's preview while it records): live results carry no confidence, so after
   1 s of audio, and every 1.5 s after that (up to 12 s of audio), the recording so far is read again
   the way the dictation is (`ForkThreeLanguage.readAll`), one language at a time, and scored.

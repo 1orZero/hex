@@ -211,6 +211,14 @@ nonisolated enum ForkThreeLanguageEnglishWords {
 #if canImport(UIKit)
 @available(iOS 26.0, *)
 extension ForkThreeLanguageEnglishWords {
+    /// Maps the typing model and reads its first pages while the readings run, so the first
+    /// dictation after the iPhone starts doesn't wait for them (about 5 ms on the simulator).
+    static func prepare() {
+        Task {
+            _ = await MainActor.run(body: { TypingDecoderModel.bundled("en") })?.index(of: "english")
+        }
+    }
+
     /// `repair` against the English words of Hex's own typing model (`en.hextm`), mapped once per
     /// process on the main actor and read off it. Not UIKit's dictionary: its first lookup of a
     /// misspelling in a process takes about 0.4 s on the main actor (iOS 27.2 simulator). Without an
