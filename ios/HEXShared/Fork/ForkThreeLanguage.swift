@@ -184,7 +184,8 @@ nonisolated enum ForkThreeLanguage {
         var cantonese = false
         var failed: [String] = []
         /// Readings skipped because their model isn't installed (English only, see `required`).
-        var missing: [String] = []
+        /// Optional so records written before it existed still decode.
+        var missing: [String]?
         var seconds: Double?
         var at = Date()
         var process = Bundle.main.bundleURL.pathExtension == "appex" ? "keyboard" : "app"

@@ -277,5 +277,12 @@ final class ForkThreeLanguageTests: XCTestCase {
             at: Date(timeIntervalSince1970: 1_795_736_287)
         )
         XCTAssertEqual(try decoder.decode(ForkThreeLanguage.Record.self, from: encoder.encode(picked)), picked)
+
+        let older = Data("""
+        [{"at":"2026-11-27T02:34:15Z","cantonese":false,"detail":"not-installed=en-US","event":"skipped","failed":[],"process":"keyboard","scores":{}}]
+        """.utf8)
+        let kept = try decoder.decode([ForkThreeLanguage.Record].self, from: older)
+        XCTAssertEqual(kept.map(\.detail), ["not-installed=en-US"])
+        XCTAssertNil(kept.first?.missing)
     }
 }
