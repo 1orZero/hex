@@ -70,7 +70,9 @@ them, not features.
 | `src/parakeet.rs` | `crate::fork::jev_key::submitted(submitted_at);` after `fork::dropline::job(…)` in the submit path; `process_job_text`: `let profiles = crate::fork::jev_key::profiles(profiles(), job.timings.total_started);` in place of `let profiles = profiles();` (2 lines) | The clip's submission keeps its dictation's choice under `submitted_at`, and processing applies it to that job's profiles. |
 | `src/dictation/processor.rs` | `#[cfg(target_os = "macos")] #[path = "../fork/jev_key/profiles.rs"] mod fork_jev_key;` at the end of the file (4 lines) | `processor`'s child, so it puts `jev` into or takes it out of the profiles' steps. |
 | `src/rune_hud.rs` | `DotUniforms::new`: upstream's `ears: [pose.done, pose.fail, pose.shift, 0.0],` gets `#[cfg(not(target_os = "macos"))]`, and a macOS `ears` passes `crate::fork::jev_key::hud_border()` as `ears.w` (8 lines) | The HUD's border strength; `ears.w` was unused. |
-| `src/rune_hud.wgsl` | `const SYSTEM_PURPLE` after `SYSTEM_RED`; after the rim's `composite`, `if (u.ears.w > 0.0) { composite(…SYSTEM_PURPLE…) }` (4 lines) | Draws the 2 pt purple border just inside the plate's edge. With `ears.w` 0 (every other OS, and the goldens) nothing is drawn. |
+| `src/rune_hud.rs` | `Painter::pipeline`: `concat!(include_str!("rune_hud.wgsl"), include_str!("fork/jev_hud.wgsl"))` in place of `include_str!("rune_hud.wgsl")` (4 lines, every OS) | Appends the fork's `jev_border` to the HUD shader. Every OS compiles it, because `rune_hud.wgsl` calls it; with `ears.w` 0 it draws nothing. |
+| `src/rune_hud.rs` | `HudCompositor::render`: `#[cfg(target_os = "macos")] crate::fork::jev_key::hud_dark(f.rt.env.system_dark);` right before the macOS `paint(…)` (2 lines) | The system appearance Rune reports to the HUD's overlay, so the border's look follows it frame by frame. |
+| `src/rune_hud.wgsl` | after the rim's `composite`: `jev_border(&result, distance, aa, island_shape);` (1 line) | Draws the Jev border (`src/fork/jev_hud.wgsl`). With `ears.w` 0 (every other OS, and the goldens) nothing is drawn. |
 | `src/rune_ui.rs` | `poll`: `#[cfg(target_os = "macos")] let changed = changed \| fork_output::poll(ui, tx);` right before `changed \| settings::advance_capture(…)` (2 lines) | Follows the Jev key's recorder. |
 | `scripts/file-size-exceptions.txt`, `scripts/folder-shape-exceptions.txt` | `src/dictation.rs 1503` and `src/meeting.rs 1501` added, `src/meeting/transcript.rs` raised from upstream's ceiling to 1943; `src/rune_ui 62` added (4 lines) | Upstream's code-shape check (`scripts/code-shape.py`, and the `code_shape_tests::repo_satisfies_code_shape` test) fails files over 1,500 non-test lines and folders over 60 files. The hooks above push these three files past their limits, and `src/rune_ui/fork_dropline.rs` and `src/rune_ui/fork_output.rs` push `src/rune_ui` past 60. On a conflict, take upstream's files and set these entries to the counts `python3 scripts/code-shape.py --check` reports. |
 
@@ -99,7 +101,8 @@ anomalyco/hex#1734, so the fork no longer carries it in `crates/capture/build.rs
   `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
 - `src/rune_ui/fork_output.rs`: the Output switches (see "Output switches").
 - `src/fork/jev.rs`: where `jev` goes in a mode's steps, shared by 使用 Jev and the Jev key.
-- `src/fork/jev_key.rs`, `src/fork/jev_key/`, and `src/rune_ui/fork_output/jev_key.rs`: the Jev key (see "Jev key").
+- `src/fork/jev_key.rs`, `src/fork/jev_key/`, `src/fork/jev_hud.wgsl`, and `src/rune_ui/fork_output/jev_key.rs`: the Jev key
+  and its HUD border (see "Jev key").
 - `src/fork/history_continued.rs`: continued dictations in History (see "Continued dictations in History").
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
@@ -456,10 +459,14 @@ dictation only (`src/fork/jev_key.rs`), as Derek Voice Local's 整理模型 key 
 - `hex.config.ts` must register `jev` (`personal-commands.json`): otherwise the key does nothing and no
   border shows. Each dictation reads the key, the registration, and Global's steps on a thread of its
   own, so the listener never waits on a file.
-- While the dictation runs Jev, the HUD draws a 2 pt purple border (`#BF5AF2`, macOS's dark-mode system
-  purple, beside the HUD's pearl, agent blue, and coral) just inside its plate, from the start of the
-  recording through processing, until the next capture starts or this one is cancelled. Labs' notch
-  indicator (the ears) draws no border.
+- While the dictation runs Jev, the HUD draws a white border just inside its plate with a soft white glow
+  outside it (`src/fork/jev_hud.wgsl`), from the start of the recording through processing, until the
+  next capture starts or this one is cancelled. The plate is dark in either appearance, so the border is
+  white in both, and it follows the system appearance Rune reports to the HUD's overlay, frame by frame:
+  dark draws a 1.5 pt ring at 90% with a 30% glow fading over about 12 pt (σ 4 pt); light draws a 1 pt
+  ring at 60% with a 16% glow fading over about 9 pt (σ 3 pt), as Derek picked. Neither moves, so
+  reduced motion changes nothing. In the notch island only the ring shows, and Labs' notch indicator
+  (the ears) draws no border.
 - The choice reaches processing through the clip's `submitted_at`, the job's `timings.total_started`; at
   most 16 submitted choices wait for their jobs.
 

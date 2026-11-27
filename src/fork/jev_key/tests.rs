@@ -308,3 +308,11 @@ fn a_key_hex_uses_while_dictating_is_refused() {
         Some(Refusal::NeedsKey)
     );
 }
+
+#[test]
+fn the_hud_border_takes_the_appearance_and_shows_only_with_jev() {
+    assert_eq!(border_look(false, true), 0.0);
+    assert_eq!(border_look(false, false), 0.0);
+    assert_eq!(border_look(true, true), 1.0, "jev_hud.wgsl's dark border");
+    assert_eq!(border_look(true, false), 2.0, "jev_hud.wgsl's light border");
+}

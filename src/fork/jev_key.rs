@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
@@ -384,9 +385,28 @@ pub fn profiles(profiles: Profiles, submitted: Instant) -> Profiles {
     }
 }
 
-/// The HUD's border strength, 0 or 1: the dictation it shows runs Jev.
+/// The system appearance the HUD last drew in, as Rune reports it to the
+/// overlay: dark until the first frame says otherwise.
+static HUD_DARK: AtomicBool = AtomicBool::new(true);
+
+/// Follows the appearance each HUD frame draws in, so the border's look
+/// changes with the next frame when the appearance does.
+pub fn hud_dark(dark: bool) {
+    HUD_DARK.store(dark, Ordering::Relaxed);
+}
+
+/// The HUD's border for `src/fork/jev_hud.wgsl`, shown while the dictation it
+/// shows runs Jev: 0 none, 1 the dark appearance's, 2 the light one's.
 pub fn hud_border() -> f32 {
-    if state().border() { 1.0 } else { 0.0 }
+    border_look(state().border(), HUD_DARK.load(Ordering::Relaxed))
+}
+
+fn border_look(border: bool, dark: bool) -> f32 {
+    match (border, dark) {
+        (false, _) => 0.0,
+        (true, true) => 1.0,
+        (true, false) => 2.0,
+    }
 }
 
 #[cfg(test)]
