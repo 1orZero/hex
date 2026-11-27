@@ -98,7 +98,7 @@ pub fn refusal(settings: &AppSettings, binding: &HotkeyBinding) -> Option<Refusa
     let Some(key) = binding.key.as_ref().filter(|key| !key.is_mouse()) else {
         return Some(Refusal::NeedsKey);
     };
-    if key.code == ESCAPE_KEY_CODE && binding.modifiers.is_empty() {
+    if key.code == ESCAPE_KEY_CODE {
         return Some(Refusal::Escape);
     }
     let dictation = [HotkeySlot::Dictation, HotkeySlot::SecondDictation]
@@ -330,7 +330,15 @@ fn resolve() -> Option<Resolved> {
     if !registered {
         return None;
     }
-    let key = binding().runtime();
+    let binding = binding();
+    let settings = crate::app_settings::path().and_then(|path| AppSettings::load_from(&path));
+    if let Ok(settings) = settings
+        && refusal(&settings, &binding).is_some()
+    {
+        tracing::info!("fork Jev key: a Hex shortcut uses the key, so it stays off");
+        return None;
+    }
+    let key = binding.runtime();
     key.key_code.map(|_| Resolved {
         initial: crate::dictation::config::dictation_profiles().fork_global_has_jev(),
         key,

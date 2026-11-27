@@ -202,7 +202,12 @@ fn the_profiles_put_jev_in_or_take_it_out_of_every_mode() {
 
 #[test]
 fn the_key_is_saved_and_read_back() {
-    let folder = std::env::temp_dir().join(format!("qa-hex-jev-key-{}", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let folder =
+        std::env::temp_dir().join(format!("qa-hex-jev-key-{}-{nanos}", std::process::id()));
     let path = folder.join("fork").join("jev-key.json");
     assert_eq!(load_setting(&path), None, "nothing saved yet");
     let k = HotkeyBinding {
@@ -253,6 +258,14 @@ fn a_key_hex_uses_while_dictating_is_refused() {
     assert_eq!(
         refusal(&settings, &letter(ESCAPE_KEY_CODE, "Esc", none)),
         Some(Refusal::Escape)
+    );
+    assert_eq!(
+        refusal(
+            &settings,
+            &letter(ESCAPE_KEY_CODE, "Esc", HotkeyModifiers::option())
+        ),
+        Some(Refusal::Escape),
+        "⌥Esc would keep Escape from cancelling an Option dictation"
     );
     assert_eq!(
         refusal(

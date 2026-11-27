@@ -136,7 +136,7 @@ fn keys_button(ui: &Ui, p: Paint, capture: Capture, binding: &HotkeyBinding) -> 
         .label(s::face_label(face))
         .center_y()
         .padding(2.0)
-        .mr(-3.0)
+        .mr(-4.0)
         .radius(p.k.radius.md)
         .focusable(!listening)
         .focus_ring(2.0, 0.0, c.border_focus)
@@ -281,7 +281,8 @@ pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
                 return true;
             }
             let visible = ui.window.as_ref().is_none_or(rune::AppHandle::is_visible);
-            if !visible || now.duration_since(since) >= LISTEN_FOR {
+            let shown = ui.pane == super::super::Pane::Output && visible;
+            if !shown || now.duration_since(since) >= LISTEN_FOR {
                 stop(false);
                 return true;
             }

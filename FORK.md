@@ -434,10 +434,12 @@ dictation only (`src/fork/jev_key.rs`), as Derek Voice Local's 整理模型 key 
 - The key is J until Output's 轉換選項 records another in 錄音中切換 Jev, with General's recorder face. It
   is saved as `{"binding": …}` in `fork/jev-key.json` in the data folder's owner-only `fork` folder, not in
   `settings.json`, and a missing or unreadable file reads as J. Recording suspends Hex's shortcuts; Esc
-  stops it, and so do 10 seconds without a key, hiding the window, or another recorder. The recorder
-  refuses modifiers pressed and released without a key (請按一個按鍵) and a key any Hex shortcut uses, alone
-  or with a dictation shortcut's modifiers held (Hex 的快捷鍵已使用這個鍵): with Option held to dictate and
-  ⌥T bound to another dictation row, T is refused. A new key takes effect from the next dictation.
+  stops it, and so do 10 seconds without a key, leaving Output, hiding the window, or another recorder.
+  The recorder refuses modifiers pressed and released without a key (請按一個按鍵), Escape with modifiers
+  (Esc 用來取消聽寫), and a key any Hex shortcut uses, alone or with a dictation shortcut's modifiers held
+  (Hex 的快捷鍵已使用這個鍵): with Option held to dictate and ⌥T bound to another dictation row, T is
+  refused. Each dictation checks the saved key against the shortcuts again, so a key a shortcut took
+  later stays off. A new key takes effect from the next dictation.
 - Each dictation starts from Output's 使用 Jev: on while Global's steps contain `jev`. Every press flips it,
   as often as wanted; holding the key flips once. Only when the choice at the end differs from 使用 Jev
   does it change anything: that job's profiles get `jev` placed as 使用 Jev places it (after
