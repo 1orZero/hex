@@ -7,9 +7,10 @@ import Speech
 /// language is English, Cantonese, or Mandarin, and the `SpeechTranscriber` models `required`
 /// names are installed, one recording is read in `en-US` (when its model is installed too),
 /// `zh-HK`, and `zh-TW` at once. The reading
-/// with the most confidence-weighted seconds is inserted exactly as Apple Speech wrote it,
-/// never merged with the others: a speaker keeps one language for a whole dictation, and the
-/// Chinese models already write the English words mixed into it. Shared by the app
+/// with the most confidence-weighted seconds is inserted, never merged with the others: a speaker
+/// keeps one language for a whole dictation, and the Chinese models already write the English words
+/// mixed into it, only some misspelled, which `ForkThreeLanguageEnglishWords` respells from the
+/// `en-US` reading. Shared by the app
 /// (`AppleSpeechTranscriber`) and in-keyboard dictation (`KeyboardSpeech`).
 @available(iOS 26.0, *)
 nonisolated enum ForkThreeLanguage {
@@ -207,6 +208,7 @@ nonisolated enum ForkThreeLanguage {
             return nil
         }
         let started = ContinuousClock.now
+        if lanes.contains(where: { $0.id == "en-US" }) { ForkThreeLanguageEnglishWords.prepare() }
         var outcomes = await readOutcomes(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels)
         let errors = zip(lanes, outcomes).compactMap { lane, outcome -> String? in
             guard case .failure(let error) = outcome else { return nil }
@@ -235,12 +237,13 @@ nonisolated enum ForkThreeLanguage {
             reading ?? Lane(locale: lane.id, text: "", words: [])
         }
         let chosen = pick(heard)
+        let english = await ForkThreeLanguageEnglishWords.repair(chosen, among: heard, vocabulary: vocabulary)
         let scores = heard.map { "\($0.locale)=\(String(format: "%.2f", $0.score))" }.joined(separator: " ")
         let failed = zip(lanes, readings).filter { $0.1 == nil }.map { $0.0.id }.joined(separator: ",")
         let cantonese = heard.first { $0.locale == "zh-HK" }.map { writesCantonese($0.text) } ?? false
         let missing = locales.filter { id in !lanes.contains { $0.id == id } }
         log.notice(
-            "three-language picked=\(chosen?.locale ?? "none", privacy: .public) \(scores, privacy: .public) cantonese=\(cantonese, privacy: .public) failed=\(failed, privacy: .public) missing=\(missing.joined(separator: ","), privacy: .public) seconds=\(String(format: "%.2f", seconds), privacy: .public)"
+            "three-language picked=\(chosen?.locale ?? "none", privacy: .public) \(scores, privacy: .public) cantonese=\(cantonese, privacy: .public) failed=\(failed, privacy: .public) missing=\(missing.joined(separator: ","), privacy: .public) english=\(english.replaced, privacy: .public) seconds=\(String(format: "%.2f", seconds), privacy: .public)"
         )
         Record.append(Record(
             event: "picked",
@@ -250,9 +253,10 @@ nonisolated enum ForkThreeLanguage {
             failed: failed.isEmpty ? [] : failed.components(separatedBy: ","),
             missing: missing,
             seconds: (seconds * 100).rounded() / 100,
-            errors: errors.isEmpty ? nil : errors
+            errors: errors.isEmpty ? nil : errors,
+            english: english.replaced
         ))
-        return chosen?.text ?? ""
+        return english.text
     }
 
     /// Readings run at once: an iPhone refuses analyses past about two at a time
@@ -313,6 +317,9 @@ nonisolated enum ForkThreeLanguage {
         /// Why readings failed the first time (`NSError` domain and code), retried or not.
         /// Optional so records written before it existed still decode.
         var errors: [String]?
+        /// English words respelled from the en-US reading (`ForkThreeLanguageEnglishWords`), never
+        /// which. Optional so records written before it existed still decode.
+        var english: Int?
         var at = Date()
         var process = Bundle.main.bundleURL.pathExtension == "appex" ? "keyboard" : "app"
 
