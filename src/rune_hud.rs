@@ -1226,6 +1226,8 @@ impl Compositor<Hud> for HudCompositor {
             hud.last_drawn = Some(now);
         }
         #[cfg(target_os = "macos")]
+        crate::fork::jev_key::hud_dark(f.rt.env.system_dark);
+        #[cfg(target_os = "macos")]
         paint(painter(&mut self.gpu, f), f, &drawn, layout, target);
         #[cfg(not(target_os = "macos"))]
         self.draw(f, &drawn, layout, target);
@@ -1276,7 +1278,10 @@ impl Painter {
     ) -> Painter {
         let immediates = device.features().contains(wgpu::Features::IMMEDIATES)
             && device.limits().max_immediate_size >= DOT_UNIFORM_BYTES;
-        let source = include_str!("rune_hud.wgsl");
+        let source = concat!(
+            include_str!("rune_hud.wgsl"),
+            include_str!("fork/jev_hud.wgsl")
+        );
         assert!(source.contains(DOT_UNIFORM_BINDING));
         let source = if immediates {
             source.replace(DOT_UNIFORM_BINDING, "var<immediate> u: DotUniforms;")
