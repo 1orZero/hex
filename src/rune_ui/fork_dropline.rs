@@ -52,6 +52,9 @@ mod macos {
     use crate::transcription::models as transcription_models;
 
     const TITLE: &str = "自訂辨識服務";
+    /// Starts the pane error a failed General switch shows, so the next
+    /// switch that works clears it and no one else's.
+    const SWITCH_ERROR: &str = "無法切換 Dropline：";
 
     type Outcome = Arc<Mutex<Option<Result<(), String>>>>;
 
@@ -148,8 +151,17 @@ mod macos {
                     return;
                 }
                 match dropline::select(!on) {
-                    Ok(()) => ui.fork_dropline.error = None,
-                    Err(error) => ui.error = Some(error),
+                    Ok(()) => {
+                        ui.fork_dropline.error = None;
+                        if ui
+                            .error
+                            .as_deref()
+                            .is_some_and(|error| error.starts_with(SWITCH_ERROR))
+                        {
+                            ui.error = None;
+                        }
+                    }
+                    Err(error) => ui.error = Some(format!("{SWITCH_ERROR}{error}")),
                 }
             },
         ))

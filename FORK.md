@@ -148,10 +148,11 @@ heard no speech, so the dictation inserts nothing and does not fall back.
   reads 使用中.
 - General's 使用 Dropline 辨識 switch, under the Speech model row, shows once the provider is set up. It
   flips the provider's `selected`, the same state the picker changes, so there is nothing to keep in step:
-  on is the picker's 使用 (Dropline, falling back to the local model), off goes straight to the local model
-  the picker names as 失敗時改用, and choosing a local model in the picker or the menu bar turns it off and
-  makes that model the fallback. `hex settings` has no key for it, because the registry reads and writes only
-  `settings.json` and the selection lives in `fork/dropline-private.json`.
+  on is the picker's 使用 (Dropline, falling back to the local model), off goes straight to that local
+  model (which the picker then shows as In use instead of 失敗時改用), and choosing a local model in the
+  picker or the menu bar turns it off and makes that model the fallback. `hex settings` has no key for it,
+  because the registry reads and writes only `settings.json` and the selection lives in
+  `fork/dropline-private.json`.
 - The bearer lives in the Keychain (service `anomaly.hex.fork.dropline-private`, account = the data
   folder); the endpoint and selection in `fork/dropline-private.json` in the data folder. Opus comes from
   macOS's encoder.
