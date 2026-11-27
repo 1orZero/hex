@@ -3047,3 +3047,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "../fork/jev_key/profiles.rs"]
+mod fork_jev_key;

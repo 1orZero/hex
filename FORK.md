@@ -14,8 +14,8 @@ line), and the purpose, so whoever resolves a release merge knows what to keep. 
 the Dropline private API provider (see "Dropline private API"), the iPhone vocabulary link (see
 "Vocabulary"), screen text (see "Screen text"), Traditional Chinese in Annotate and meetings (see
 "Traditional Chinese in Annotate and meetings"), meetings through Dropline (see "Meetings through
-Dropline"), the Output pane's switches (see "Output switches"), and continued dictations in History (see
-"Continued dictations in History"). Every hook in a file all three OSes build runs only on macOS (behind
+Dropline"), the Output pane's switches (see "Output switches"), continued dictations in History (see
+"Continued dictations in History"), and the Jev key (see "Jev key"). Every hook in a file all three OSes build runs only on macOS (behind
 `#[cfg(target_os = "macos")]`, or after `build.rs`'s macOS check), so Linux and Windows build upstream's
 code unchanged. The `clean_summary` cut in `src/meeting/notes.rs` and the
 `keep_across` hook in `src/meeting/transcript.rs` are upstream fixes carried before a release has
@@ -64,6 +64,14 @@ them, not features.
 | `src/dictation/modes/output.rs` | `record_history`: `match history.record(draft)` becomes `match recorded`, with `#[cfg(target_os = "macos")] let recorded = crate::history::fork_continued::record(history, draft, &input.text);` and `#[cfg(not(target_os = "macos"))] let recorded = history.record(draft);` before it (5 lines) | A dictation whose paste joined the previous dictation's paste is added to that dictation's entry instead of becoming a new one. The other OSes keep upstream's call. |
 | `src/paste/macos.rs` | `Paster::insert_text`: `crate::history::fork_continued::paste(text, self.continuation.join(revision, joinable, text).is_some());` after `let joinable = …;` (4 lines) | Tells History whether each paste continues the one before it, with the same check the join right after it makes (`Continuation::join` changes nothing). |
 | `src/history.rs` | `#[cfg(target_os = "macos")] #[path = "fork/history_continued.rs"] pub(crate) mod fork_continued;` at the end of the file (4 lines) | The module sits in `src/fork/` but is `history`'s child, so it changes the store's entries, recordings, and rollup the way `record` does. |
+| `src/suppression.rs` | `event_callback`: `if crate::fork::jev_key::take(input) { return ptr::null_mut(); }` right before `send_input` (3 lines); `physical_event_callback`: `if crate::fork::jev_key::claims(code, flags) { return event; }` right before the `is_chord_evidence` check (3 lines) | The session tap keeps the Jev key's press, repeats, and release from the app in front and from the shortcut machines; the HID tap sends no chord evidence for it. Either would discard a held Option dictation. |
+| `src/recognition.rs` | `fork_jev_key::follow(&hotkeys, programmatic.is_some());` right after `input_monitor.set_tap_policy(…)`; `#[path = "fork/jev_key/listener.rs"] mod fork_jev_key;` at the end of the file (4 lines) | After each listener pass, tells `fork::jev_key` what records. The module sits in `src/fork/jev_key/` but is `recognition`'s child, so it reads the shortcut machines. |
+| `src/recognition/capture_actions.rs` | `handle_hotkey_action`, `Discard`/`Cancel`/`CancelShortcut`: `crate::fork::jev_key::cancelled();` after `context.cancel();` (1 line) | A cancelled dictation keeps no Jev choice and no border. |
+| `src/parakeet.rs` | `crate::fork::jev_key::submitted(submitted_at);` after `fork::dropline::job(…)` in the submit path; `process_job_text`: `let profiles = crate::fork::jev_key::profiles(profiles(), job.timings.total_started);` in place of `let profiles = profiles();` (2 lines) | The clip's submission keeps its dictation's choice under `submitted_at`, and processing applies it to that job's profiles. |
+| `src/dictation/processor.rs` | `#[cfg(target_os = "macos")] #[path = "../fork/jev_key/profiles.rs"] mod fork_jev_key;` at the end of the file (4 lines) | `processor`'s child, so it puts `jev` into or takes it out of the profiles' steps. |
+| `src/rune_hud.rs` | `DotUniforms::new`: upstream's `ears: [pose.done, pose.fail, pose.shift, 0.0],` gets `#[cfg(not(target_os = "macos"))]`, and a macOS `ears` passes `crate::fork::jev_key::hud_border()` as `ears.w` (8 lines) | The HUD's border strength; `ears.w` was unused. |
+| `src/rune_hud.wgsl` | `const SYSTEM_PURPLE` after `SYSTEM_RED`; after the rim's `composite`, `if (u.ears.w > 0.0) { composite(…SYSTEM_PURPLE…) }` (4 lines) | Draws the 2 pt purple border just inside the plate's edge. With `ears.w` 0 (every other OS, and the goldens) nothing is drawn. |
+| `src/rune_ui.rs` | `poll`: `#[cfg(target_os = "macos")] let changed = changed \| fork_output::poll(ui, tx);` right before `changed \| settings::advance_capture(…)` (2 lines) | Follows the Jev key's recorder. |
 | `scripts/file-size-exceptions.txt`, `scripts/folder-shape-exceptions.txt` | `src/dictation.rs 1503` and `src/meeting.rs 1501` added, `src/meeting/transcript.rs` raised from upstream's ceiling to 1943; `src/rune_ui 62` added (4 lines) | Upstream's code-shape check (`scripts/code-shape.py`, and the `code_shape_tests::repo_satisfies_code_shape` test) fails files over 1,500 non-test lines and folders over 60 files. The hooks above push these three files past their limits, and `src/rune_ui/fork_dropline.rs` and `src/rune_ui/fork_output.rs` push `src/rune_ui` past 60. On a conflict, take upstream's files and set these entries to the counts `python3 scripts/code-shape.py --check` reports. |
 
 The window hooks draw nothing in scenes and tests (`Ui::live` is false), so the goldens are unchanged.
@@ -90,6 +98,8 @@ anomalyco/hex#1734, so the fork no longer carries it in `crates/capture/build.rs
 - `src/fork/screen_text.rs`, `src/fork/screen_text.swift`, `src/fork/screen_text/transformation_tests.rs`, and
   `tests/fixtures/fork/qa-screen-text.png`: screen text (see "Screen text").
 - `src/rune_ui/fork_output.rs`: the Output switches (see "Output switches").
+- `src/fork/jev.rs`: where `jev` goes in a mode's steps, shared by 使用 Jev and the Jev key.
+- `src/fork/jev_key.rs`, `src/fork/jev_key/`, and `src/rune_ui/fork_output/jev_key.rs`: the Jev key (see "Jev key").
 - `src/fork/history_continued.rs`: continued dictations in History (see "Continued dictations in History").
 - `src/fork/traditional.rs`, `src/fork/annotate.rs`, and `src/meeting/fork_tests.rs`: Traditional Chinese in
   Annotate and meetings.
@@ -415,6 +425,43 @@ Every dictation, holding two switches:
 
 Both hooks are macOS-only, so Linux and Windows build the Output pane unchanged and the goldens (rendered
 on Linux) don't change.
+
+## Jev key
+
+On the Mac, a key pressed while a dictation records turns Derek's `jev` transformation on or off for that
+dictation only (`src/fork/jev_key.rs`), as Derek Voice Local's 整理模型 key does for its cleanup model.
+
+- The key is J until Output's 轉換選項 records another in 錄音中切換 Jev, with General's recorder face. It
+  is saved as `{"binding": …}` in `fork/jev-key.json` in the data folder's owner-only `fork` folder, not in
+  `settings.json`, and a missing or unreadable file reads as J. Recording suspends Hex's shortcuts; Esc
+  stops it, and so do 10 seconds without a key, leaving Output, hiding the window, or another recorder.
+  The recorder refuses modifiers pressed and released without a key (請按一個按鍵), Escape with modifiers
+  (Esc 用來取消聽寫), and a key any Hex shortcut uses, alone or with a dictation shortcut's modifiers held
+  (Hex 的快捷鍵已使用這個鍵): with Option held to dictate and ⌥T bound to another dictation row, T is
+  refused. Each dictation checks the saved key against the shortcuts again, so a key a shortcut took
+  later stays off. A new key takes effect from the next dictation.
+- Each dictation starts from Output's 使用 Jev: on while Global's steps contain `jev`. Every press flips it,
+  as often as wanted; holding the key flips once. Only when the choice at the end differs from 使用 Jev
+  does it change anything: that job's profiles get `jev` placed as 使用 Jev places it (after
+  `traditional-chinese`, else before `cjk-spacing`, else last) in every mode, or taken out of every
+  mode. Nothing is saved, and meetings, Annotate, and the local API never see the choice.
+- The key belongs to Hex only while a shortcut dictation owns its press: a Hold press held past the hold
+  threshold (when Hold takes Escape), or a hands-free capture (double-tap lock, Toggle after its release,
+  Caps Lock, `hex dictation start`). Earlier, Option-J may still be the app's ∆ and is left alone, so it
+  still discards the capture as a chord. Hex takes the press, its repeats, and its release before the app
+  in front and the shortcut machines see them, because a held modifier-only shortcut plus any other key
+  is a chord that throws the dictation away; the HID tap reports no chord for it either. In a Hold
+  dictation the key matches with the shortcut's modifiers held (⌥J while holding Option) or alone.
+  Dictate without processing and programmatic dictations don't take the key.
+- `hex.config.ts` must register `jev` (`personal-commands.json`): otherwise the key does nothing and no
+  border shows. Each dictation reads the key, the registration, and Global's steps on a thread of its
+  own, so the listener never waits on a file.
+- While the dictation runs Jev, the HUD draws a 2 pt purple border (`#BF5AF2`, macOS's dark-mode system
+  purple, beside the HUD's pearl, agent blue, and coral) just inside its plate, from the start of the
+  recording through processing, until the next capture starts or this one is cancelled. Labs' notch
+  indicator (the ears) draws no border.
+- The choice reaches processing through the clip's `submitted_at`, the job's `timings.total_started`; at
+  most 16 submitted choices wait for their jobs.
 
 ## Continued dictations in History
 

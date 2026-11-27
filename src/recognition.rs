@@ -1050,6 +1050,7 @@ pub fn listen(
             hotkeys.takes_escape(CaptureInstant::now()),
             hotkeys.recording_cancel(),
         ));
+        fork_jev_key::follow(&hotkeys, programmatic.is_some());
         if received_worker_event {
             emit_engine_state(
                 &mut events,
@@ -2225,3 +2226,6 @@ mod tests {
         assert!(input.try_recv_event().is_none(), "the old loss is stale");
     }
 }
+
+#[path = "fork/jev_key/listener.rs"]
+mod fork_jev_key;
