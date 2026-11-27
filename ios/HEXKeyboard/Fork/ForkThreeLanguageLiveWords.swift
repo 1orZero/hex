@@ -113,7 +113,7 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         let before = leader.shown
         let shown = leader.update(lanes.filter { !dropped.contains($0.locale) }, at: seconds)
         if before != nil, shown != before { switches += 1 }
-        if let shown, shown != readerID { startReader(shown) }
+        if let shown, shown != readerID, !dropped.contains(shown) { startReader(shown) }
         guard nextScore < Self.longestScored else {
             settle()
             return
