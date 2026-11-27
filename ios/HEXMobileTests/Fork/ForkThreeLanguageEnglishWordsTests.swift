@@ -30,7 +30,7 @@ final class ForkThreeLanguageEnglishWordsTests: XCTestCase {
 
     private let dictionary: Set<String> = [
         "client", "branch", "merge", "prom", "prompt", "feature", "featured", "the", "fund",
-        "pair", "copy", "plant", "github", "release",
+        "pair", "copy", "plant", "github", "release", "office", "off", "ice",
     ]
 
     private func word(_ text: String, _ start: Double, _ end: Double, _ confidence: Double) -> TwoLanguageTimedWord {
@@ -115,6 +115,12 @@ final class ForkThreeLanguageEnglishWordsTests: XCTestCase {
         let chinese = lane("zh-TW", [word("才", 1.5, 1.8, 0.95), word("會", 1.8, 1.98, 0.94), word("elease", 1.98, 2.67, 0.57)])
         let english = lane("en-US", [word(" Hui", 1.92, 2.22, 0.86), word(" release.", 2.22, 2.67, 0.88)])
         XCTAssertEqual(repair(chinese, [english, chinese]), .init(text: "才會release", replaced: 1))
+    }
+
+    func testNeverSplitsARealWord() {
+        let chinese = lane("zh-TW", [word("去 ", 0.0, 0.4, 0.99), word("office", 0.4, 1.2, 0.6)])
+        let english = lane("en-US", [word("off", 0.4, 0.8, 0.9), word(" ice", 0.8, 1.2, 0.9)])
+        XCTAssertEqual(repair(chinese, [english, chinese]), .init(text: chinese.text, replaced: 0))
     }
 
     func testKeepsDigitsAndClosingQuotes() {

@@ -117,7 +117,9 @@ nonisolated enum ForkThreeLanguageEnglishWords {
                     && confidence >= voteEnglishConfidence
             } ?? false
             let fix: Bool
-            if known(core), run.count == 1 {
+            if known(core) {
+                // A real word is never split: "without" isn't "with out".
+                guard run.count == 1 else { continue }
                 let (written, spoken) = (normalized(core), normalized(proposal))
                 fix = written.count >= minimumLetters && (spoken.hasPrefix(written) || written.hasPrefix(spoken))
                     && confidence >= minimumEnglishConfidence && confidence >= word.confidence
@@ -211,8 +213,8 @@ nonisolated enum ForkThreeLanguageEnglishWords {
 extension ForkThreeLanguageEnglishWords {
     /// `repair` against the English words of Hex's own typing model (`en.hextm`), mapped once per
     /// process on the main actor and read off it. Not UIKit's dictionary: its first lookup of a
-    /// misspelling in a process takes about 0.4 s on the main actor. Without an en-US reading or a
-    /// Latin word in the chosen one, the model isn't read.
+    /// misspelling in a process takes about 0.4 s on the main actor (iOS 27.2 simulator). Without an
+    /// en-US reading or a Latin word in the chosen one, the model isn't read.
     static func repair(
         _ chosen: ForkThreeLanguage.Lane?,
         among lanes: [ForkThreeLanguage.Lane],
