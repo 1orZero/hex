@@ -25,6 +25,12 @@ nonisolated enum ForkThreeLanguage {
     /// every Cantonese clip measured and none in any Mandarin clip.
     static let cantoneseCharacters: Set<Character> = Set("嘅咗喺唔佢哋冇嘢啲咁嚟睇畀噉乜咪喇囉")
 
+    /// How far a Chinese reading may lead the English one and still lose to it, when the
+    /// Chinese reading is mostly English words (`latinShare` above `englishShare`): the
+    /// Chinese models write short English sentences in Latin letters too, and score them close.
+    static let englishMargin: TimeInterval = 0.5
+    static let englishShare = 0.5
+
     /// One language's reading of the whole recording.
     struct Lane: Equatable, Sendable {
         let locale: String
@@ -80,17 +86,53 @@ nonisolated enum ForkThreeLanguage {
 
     /// The reading to insert: the highest score among readings with text, ties to the first.
     /// A Mandarin winner gives way to a close Cantonese reading that writes Cantonese-only
-    /// characters. Nil when no reading has text.
+    /// characters, and a Chinese winner to a close English reading when it is mostly English
+    /// words itself. Nil when no reading has text.
     static func pick(_ lanes: [Lane]) -> Lane? {
         let heard = lanes.filter { !$0.text.isEmpty }
-        guard let best = heard.max(by: { $0.score < $1.score }) else { return nil }
-        if best.locale == "zh-TW",
+        guard var chosen = heard.max(by: { $0.score < $1.score }) else { return nil }
+        if chosen.locale == "zh-TW",
            let cantonese = heard.first(where: { $0.locale == "zh-HK" }),
-           best.score - cantonese.score < cantoneseMargin,
+           chosen.score - cantonese.score < cantoneseMargin,
            writesCantonese(cantonese.text) {
-            return cantonese
+            chosen = cantonese
         }
-        return best
+        if chosen.locale != "en-US",
+           let english = heard.first(where: { $0.locale == "en-US" }),
+           chosen.score - english.score < englishMargin,
+           latinShare(chosen.text) > englishShare {
+            return english
+        }
+        return chosen
+    }
+
+    /// The share of `text`'s words written in Latin letters: each run of Latin letters counts
+    /// as one word and every other character but spaces and punctuation (a Han character, a
+    /// digit) as one more, so "這個 Feature下禮拜" is 1 of 6, not 7 of 12 letters.
+    static func latinShare(_ text: String) -> Double {
+        var latin = 0
+        var other = 0
+        var inLatin = false
+        for character in text {
+            if let scalar = character.unicodeScalars.first, isLatinLetter(scalar) {
+                if !inLatin { latin += 1 }
+                inLatin = true
+                continue
+            }
+            inLatin = false
+            if character.isWhitespace || character.isPunctuation { continue }
+            other += 1
+        }
+        let total = latin + other
+        return total == 0 ? 0 : Double(latin) / Double(total)
+    }
+
+    private static func isLatinLetter(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x41...0x5A, 0x61...0x7A: true
+        case 0xC0...0x24F: scalar.value != 0xD7 && scalar.value != 0xF7
+        default: false
+        }
     }
 
     static func writesCantonese(_ text: String) -> Bool {

@@ -133,6 +133,59 @@ final class ForkThreeLanguageTests: XCTestCase {
         XCTAssertEqual(picked?.locale, "en-US")
     }
 
+    func testAChineseReadingWrittenInEnglishGivesWayToACloseEnglishReading() {
+        let english = "Can you send it now?"
+        let picked = ForkThreeLanguage.pick([
+            lane("en-US", english, score: 2.0),
+            lane("zh-HK", "Can you send it now", score: 2.45),
+            lane("zh-TW", "Can you sent it now", score: 2.3),
+        ])
+        XCTAssertEqual(picked?.locale, "en-US")
+        XCTAssertEqual(picked?.text, english)
+    }
+
+    func testAChineseReadingWithEnglishWordsKeepsItsLead() {
+        let picked = ForkThreeLanguage.pick([
+            lane("en-US", "Jacob feature Lily demo", score: 2.8),
+            lane("zh-HK", "這個 feature 下禮拜 demo", score: 2.9),
+            lane("zh-TW", "這個 feature 下禮拜要 demo", score: 3.0),
+        ])
+        XCTAssertEqual(picked?.locale, "zh-TW")
+    }
+
+    func testEnglishWinsOnlyWithinTheMarginAndOverHalfLatin() {
+        let beyondMargin = ForkThreeLanguage.pick([
+            lane("en-US", "Send it now", score: 2.0),
+            lane("zh-TW", "Send it now", score: 2.5),
+        ])
+        XCTAssertEqual(beyondMargin?.locale, "zh-TW")
+
+        let halfLatin = ForkThreeLanguage.pick([
+            lane("en-US", "OK go", score: 2.0),
+            lane("zh-TW", "OK 好", score: 2.2),
+        ])
+        XCTAssertEqual(halfLatin?.locale, "zh-TW")
+    }
+
+    func testCantoneseHandoffThenKeepsCantoneseOverEnglish() {
+        let picked = ForkThreeLanguage.pick([
+            lane("en-US", "Send me the file", score: 2.6),
+            lane("zh-HK", "send 咗個 file 畀我", score: 2.8),
+            lane("zh-TW", "send 了個 file 給我", score: 3.0),
+        ])
+        XCTAssertEqual(picked?.locale, "zh-HK")
+    }
+
+    func testLatinShareCountsEachEnglishWordOnce() {
+        XCTAssertEqual(ForkThreeLanguage.latinShare("這個 Feature下禮拜"), 1.0 / 6, accuracy: 0.0001)
+        XCTAssertEqual(ForkThreeLanguage.latinShare("I need to send the report."), 1)
+        XCTAssertEqual(ForkThreeLanguage.latinShare("我 need 嘅 report"), 0.5)
+        XCTAssertEqual(ForkThreeLanguage.latinShare("3 點 meeting"), 1.0 / 3, accuracy: 0.0001)
+        XCTAssertEqual(ForkThreeLanguage.latinShare("Café，好"), 0.5)
+        XCTAssertEqual(ForkThreeLanguage.latinShare("，。 "), 0)
+        XCTAssertEqual(ForkThreeLanguage.latinShare(""), 0)
+    }
+
     func testTiesKeepTheFirstReading() {
         let picked = ForkThreeLanguage.pick([
             lane("zh-HK", "早晨", score: 1.0),
