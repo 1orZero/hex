@@ -282,7 +282,7 @@ fn dot_scope_fragment(in: Varyings) -> @location(0) vec4f {
         composite(&result, u.shadow.rgb, u.shadow.a * (0.5 - 0.5 * tanh(shadow_distance / 6.5)));
         composite(&result, u.plate.rgb, u.plate.a * shape);
         composite(&result, u.rim.rgb, u.rim.a * coverage(abs(distance) - 0.3, aa));
-        jev_border(&result, distance, aa, island_shape);
+        jev_border(&result, point, distance, aa, island_shape);
     }
 
     if (!dots_only && u.glow > 0.01) {
