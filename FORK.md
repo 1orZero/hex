@@ -25,7 +25,7 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let source = ForkDroplineLiveWords.source(sampleRate: sampleRate) { attach(source); return }` as its first line (1 line) | While Dropline is selected, the keyboard's live words are Dropline's drafts (`ForkDroplineLiveTranscriber`) and Apple's speech recognition doesn't start. |
 | `ios/HEXKeyboard/KeyboardParakeet.swift` | `warmUp(memoryWarned:)`: `if ForkDroplineSettings().isSelected { return }` after `recordKeyboardLimit` (1 line) | The keyboard doesn't load its speech model while Dropline is selected. |
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `begin(in:microphone:pressedAt:armed:)`: `ForkDroplineRecognition.prepare()` after `let jobID = UUID().uuidString` | Opens the Dropline session as the keyboard starts recording (best effort). |
-| `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links, since upstream's handler ignores hosts other than `keyboard`, and folds in the Mac's vocabulary each time Hex becomes active. |
+| `ios/HEXMobile/HEXMobileApp.swift` | `.forkVocabularyLinks()` on `ContentView`, before its `.onOpenURL` (1 line) | Adds a second URL handler for vocabulary links, since upstream's handler ignores hosts other than `keyboard`, folds in the Mac's vocabulary, and readies three-language dictation's models each time Hex becomes active. |
 | `ios/HEXMobile/CustomVocabularyEditor.swift` | `.onReceive(… .forkVocabularyChanged)` after upstream's `.onReceive(… .hexWordsListsDidChange)`, which follows the editor's `.onAppear` (3 lines) | Reloads the editor's cached list after a link or the Mac's vocabulary changes it; otherwise the editor's next add or remove writes its stale list back. |
 | `ios/HEXKeyboard/KeyboardViewController.swift` | `viewWillAppear(_:)`: `ForkMacVocabulary.apply()` after `super.viewWillAppear(animated)` (1 line) | Folds in the Mac's vocabulary as the keyboard comes on screen, before the keys and dictation read the list, so the iPhone gets it without opening Hex. |
 | `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let threeLanguage = await ForkThreeLanguage.transcribe(…) { … }` before the `// Labs › Two-language dictation` comment (4 lines) | The app's Apple Speech dictation reads the recording in English, Cantonese, and Mandarin when three-language dictation applies, else runs upstream's Two-language and single-language paths unchanged. |
@@ -183,8 +183,7 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   as `zh-HK` and still gets the same three readings), and all three `SpeechTranscriber` models are
   installed and not set aside.
   Otherwise, including any missing model, dictation takes upstream's Two-language path, then its
-  single-language path, as before. Hex downloads only the dictation language's model: pick `zh-HK` and
-  `zh-TW` once each as the dictation language (or install them elsewhere) to get all three.
+  single-language path, as before, which in `zh-HK` writes Mandarin speech as Cantonese.
 - Choice: each reading's score is its words' confidence times their duration, summed, in seconds. The
   highest score among readings with text wins; ties go to the dictation language. A Mandarin winner
   leading the Cantonese reading by less than 0.3 s gives way to it when the Cantonese reading writes a
@@ -194,13 +193,23 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
 - Language downstream: both hooks keep the dictation language for the rest of the pipeline (formatting,
   translation source, and the keyboard's `noteKeyboardDictation`), as Two-language does, so the
   language Automatic recorded for the keyboard never changes with the winner.
-- Models: after each three-language dictation, the three locales are kept in Apple's reserved
-  locales, releasing the oldest other languages when at `AssetInventory.maximumReservedLocales`.
-  Upstream reserves only the dictation language and releases it when that language changes, so the
-  other two would otherwise lose their reservations. With a limit under three nothing changes.
+- Models: upstream downloads and reserves only the dictation language's model and releases it when
+  that language changes, so iOS may reclaim the other two. Each time Hex opens or becomes active with
+  the lab on and a dictation language among the three, `ForkThreeLanguage.prepareModels()` (called
+  from `forkVocabularyLinks()` in `ios/HEXMobile/Fork/VocabularyLink.swift`, one run at a time)
+  keeps all three reserved and downloads any that isn't installed. After each three-language
+  dictation the three are reserved again. Reserving releases the oldest other languages when at
+  `AssetInventory.maximumReservedLocales`; with a limit under three nothing changes. The keyboard
+  never downloads.
 - Log: `anomaly.hex.mobile` category `fork-three-language` records each dictation's pick, the
   three scores, whether the Cantonese reading wrote Cantonese-only characters, failed readings, and the
-  seconds the readings took. Never what was said.
+  seconds the readings took; a dictation that doesn't use three languages logs `skipped=` with the
+  reason (`lab-off`, `dictation-module`, `language=…`, or `not-installed=…`), and
+  `prepareModels` logs what it downloaded. The same decisions, the newest 50, go to the App Group's
+  `Library/fork-three-language.json` (event, detail, scores, process, time), since an iPhone's past
+  system log can't be read without root on the Mac:
+  `xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier
+  group.io.veraze.hex.mobile --source Library/fork-three-language.json`. Never what was said.
 - Unverified on an iPhone: the 0.3 s margin and the scores come from 16 synthetic clips read on a Mac
   (DER-165), and the time and memory of three readings at once, in the keyboard especially, haven't
   been measured.

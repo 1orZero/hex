@@ -95,17 +95,36 @@ enum VocabularyLinkAlert {
 }
 
 extension View {
-    /// Hex fork: handles `hex-dictation://vocabulary/add` links and folds in the Mac's vocabulary
-    /// as Hex opens and each time it comes back (FORK.md).
+    /// Hex fork: handles `hex-dictation://vocabulary/add` links, folds in the Mac's vocabulary,
+    /// and readies three-language dictation's models as Hex opens and each time it comes back
+    /// (FORK.md).
     func forkVocabularyLinks() -> some View {
         onOpenURL { url in
             guard let link = VocabularyLink(url: url) else { return }
             VocabularyLinkAlert.present(link.apply(to: CustomVocabularySettings()))
         }
-        .task { applyMacVocabulary() }
+        .task {
+            applyMacVocabulary()
+            prepareThreeLanguageModels()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             applyMacVocabulary()
+            prepareThreeLanguageModels()
         }
+    }
+}
+
+@MainActor
+private var threeLanguagePreparation: Task<Void, Never>?
+
+/// One `ForkThreeLanguage.prepareModels()` at a time: a download can outlast Hex leaving and
+/// coming back.
+@MainActor
+private func prepareThreeLanguageModels() {
+    guard #available(iOS 26.0, *), threeLanguagePreparation == nil else { return }
+    threeLanguagePreparation = Task {
+        await ForkThreeLanguage.prepareModels()
+        threeLanguagePreparation = nil
     }
 }
 
