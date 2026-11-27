@@ -41,9 +41,10 @@ whoever resolves a tag merge knows what to keep.
   vocabulary link.
 - `ios/HEXShared/Fork/ForkMacVocabulary.swift` and `ios/HEXMobileTests/Fork/ForkMacVocabularyTests.swift`:
   the Mac's vocabulary on the iPhone.
-- `ios/HEXShared/Fork/ForkThreeLanguage.swift`, `ios/HEXKeyboard/Fork/ForkThreeLanguageLiveWords.swift`,
-  `ios/HEXMobileTests/Fork/ForkThreeLanguageTests.swift`, and `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`:
-  three-language dictation.
+- `ios/HEXShared/Fork/ForkThreeLanguage.swift`, `ios/HEXShared/Fork/ForkThreeLanguageEnglishWords.swift`,
+  `ios/HEXKeyboard/Fork/ForkThreeLanguageLiveWords.swift`, `ios/HEXMobileTests/Fork/ForkThreeLanguageTests.swift`,
+  `ios/HEXMobileTests/Fork/ForkThreeLanguageEnglishWordsTests.swift`, `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`,
+  and `ios/HEXMobileTests/Fork/qa-three-language-english.json`: three-language dictation.
 
 ## Dropline private API
 
@@ -196,12 +197,33 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   letters (`ForkThreeLanguage.latinShare`: each run of Latin letters is one word, every other
   character but spaces and punctuation one more), since the Chinese models write a short English
   sentence in English too and score it close. The winner's text is inserted as Apple wrote
-  it, Cantonese colloquial characters included; readings are never merged. No text in any reading
+  it, Cantonese colloquial characters included, apart from the English words below; readings are
+  never merged. No text in any reading
   throws the usual no-speech error. The readings run two at a time (`ForkThreeLanguage.maximumReadings`):
   Derek888 refuses a third ("Maximum number of recognizers reached"). A reading that still fails
   beside the others (`insufficientResources`) is read again alone, once, 0.3 s later; every
   reading still failing falls through to the paths above. A cancelled reading asks Apple to end its
   analysis (`cancelAndFinishNow`) and counts as failed, never as a reading that heard nothing.
+- English words: when a Chinese reading wins and the `en-US` reading has words,
+  `ForkThreeLanguageEnglishWords` respells the winner's Latin-letter words the way the `en-US` reading
+  wrote the same stretch of audio (`Clian` → `client`, `branchmerge` → `branch merge`, `prom` →
+  `prompt`). Of the up to three `en-US` words over a Latin word, only the consecutive ones spelled
+  most like it are used, so a Chinese character `en-US` heard as English next to it (`會` as "Hui")
+  isn't added. Chinese characters, digits, punctuation, and words with digits are never replaced. A
+  word stays when the Chinese reading is at least 0.9 sure of it, it is an acronym of up to five
+  capitals or a vocabulary word, the other Chinese reading wrote it the same way, or an `en-US` word
+  is a stop word, shorter than three letters, or not among the English words of Hex's own typing
+  model (`ios/HEXKeyboard/TypingModel/en.hextm`). A
+  misspelling needs a spelling similarity of 0.55 and `en-US` at least 0.5 sure and at most 0.15 less
+  sure than the Chinese reading. A real word of three letters or more gives way only to a longer or
+  shorter form of itself (`prom` → `prompt`), while the Chinese reading is at most 0.85 sure of it
+  and `en-US` at least 0.5 and as sure. A vocabulary word is written as the vocabulary spells it. It
+  runs whenever three-language dictation does, with no setting of its own, and reads only the
+  readings already taken, so no recogniser is added. The typing model is mapped once per process and
+  read off the main actor; UIKit's dictionary isn't used, since its first lookup of a misspelling in
+  a process takes about 0.4 s on the main actor. Without the English model or a Latin word in
+  the winner, or when English wins, the text is the winner's as before and the typing model isn't
+  read.
 - Live words (the keyboard's preview while it records): live results carry no confidence, so after
   1 s of audio, and every 1.5 s after that (up to 12 s of audio), the recording so far is read again
   the way the dictation is (`ForkThreeLanguage.readAll`), one language at a time, and scored.
@@ -233,17 +255,19 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   never downloads.
 - Log: `anomaly.hex.mobile` category `fork-three-language` records each dictation's pick, the
   three scores, whether the Cantonese reading wrote Cantonese-only characters, failed readings, and the
-  seconds the readings took, and readings left out for a missing English model (`missing=`); a dictation that doesn't use three languages logs `skipped=` with the
+  seconds the readings took, how many English words were respelled (`english=`), and readings left out for a missing English model (`missing=`); a dictation that doesn't use three languages logs `skipped=` with the
   reason (`lab-off`, `dictation-module`, `language=…`, or `not-installed=…`), and
   `prepareModels` logs what it starts downloading (`downloading=…`) and how each download ended. The same decisions, the newest 50, go to the App Group's
   `Library/fork-three-language.json` (event, detail, scores, process, time, and each first-time
-  reading failure's `NSError` domain and code in `errors`), since an iPhone's past
+  reading failure's `NSError` domain and code in `errors`, and the count of respelled English words in
+  `english`), since an iPhone's past
   system log can't be read without root on the Mac:
   `xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier
   group.io.veraze.hex.mobile --source Library/fork-three-language.json`. Never what was said.
 - Unverified on an iPhone: the 0.3 s margin and the scores come from 16 synthetic clips read on a Mac
-  (DER-165), and the time and memory of three readings at once, in the keyboard especially, haven't
-  been measured.
+  (DER-165), the English words' thresholds from 262 synthetic qa- clips read on a Mac (HEX-32; 60 of them are
+  the test fixture), and
+  the time and memory of three readings at once, in the keyboard especially, haven't been measured.
 
 ## Merging an App Store tag
 
