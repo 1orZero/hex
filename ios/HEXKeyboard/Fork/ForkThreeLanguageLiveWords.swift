@@ -20,8 +20,11 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
     /// Audio before the first scores, and between later ones.
     static let firstScore: Double = 1
     static let scoreInterval: Double = 1.5
-    /// Past this much audio the shown reading stays as it is.
-    static let longestScored: Double = 60
+    /// Past this much audio the shown reading stays as it is and only its recogniser keeps
+    /// running: Apple caps the analyses running at once per device and each scoring reads the
+    /// whole recording again, while the dictation's own readings need those analyses free when
+    /// the recording stops.
+    static let longestScored: Double = 12
 
     /// The live source for `language`, or nil when three-language dictation doesn't apply and
     /// the keyboard's own live words run as before.
@@ -97,7 +100,10 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         let lanes = planned.filter { running[$0.id] != nil }
         let at = audioSeconds
         nextScore = at + Self.scoreInterval
-        guard writeScratch() else { return }
+        guard writeScratch() else {
+            fail("scoring audio not written")
+            return
+        }
         let url = scratch
         scoring = Task { [weak self] in
             let readings = await ForkThreeLanguage.readAll(url, lanes: lanes, vocabulary: [], lingeringModels: false)
@@ -113,7 +119,25 @@ final class ForkThreeLanguageLiveWords: LiveTranscriptSource {
         let shown = leader.update(lanes.filter { running[$0.locale] != nil }, at: seconds)
         if before != nil, shown != before { switches += 1 }
         publish()
-        if scoring == nil, audioSeconds >= nextScore, audioSeconds < Self.longestScored { score() }
+        guard nextScore < Self.longestScored else {
+            settle()
+            return
+        }
+        if scoring == nil, audioSeconds >= nextScore { score() }
+    }
+
+    /// The last scoring is in: the other languages' recognisers stop.
+    private func settle() {
+        guard let shown = leader.shown, running[shown] != nil else {
+            fail("no running reading scored in \(Int(Self.longestScored)) s")
+            return
+        }
+        for (id, reader) in running where id != shown {
+            reader.stop()
+            running[id] = nil
+            transcripts[id] = nil
+        }
+        KeyboardProbeLog.shared.write("three-language live: settled on \(shown) after \(scores) scores")
     }
 
     private func writeScratch() -> Bool {

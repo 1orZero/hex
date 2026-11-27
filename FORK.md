@@ -193,11 +193,19 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   leading the Cantonese reading by less than 0.3 s gives way to it when the Cantonese reading writes a
   Cantonese-only character (嘅, 咗, 喺, 佢, 哋, 啲, …). The winner's text is inserted as Apple wrote
   it, Cantonese colloquial characters included; readings are never merged. No text in any reading
-  throws the usual no-speech error. Every reading failing falls through to the paths above.
+  throws the usual no-speech error. A reading that fails beside the others (Apple caps the analyses
+  running at once per device, `insufficientResources`) is read again alone, once, 0.3 s later; every
+  reading still failing falls through to the paths above. A cancelled reading asks Apple to end its
+  analysis (`cancelAndFinishNow`) and counts as failed, never as a reading that heard nothing.
 - Live words (the keyboard's preview while it records): each running language gets its own
   `AppleLiveTranscriber`. Live results carry no confidence, so after 1 s of audio, and every 1.5 s after
-  that (up to 60 s), the recording so far is read again the way the dictation is
-  (`ForkThreeLanguage.readAll`) and scored. `ForkThreeLanguage.LiveLeader` shows `pick`'s first choice and
+  that (up to 12 s of audio), the recording so far is read again the way the dictation is
+  (`ForkThreeLanguage.readAll`) and scored. After the last scoring only the shown language's
+  recogniser keeps running, so a long recording runs one analysis, as without three languages, and
+  the dictation's own readings find Apple's analyses free when it stops; a language change after
+  12 s shows only in the inserted text. When no scoring succeeds in those 12 s, or the shown
+  language's recogniser has given up by then, or the scoring audio can't be written, the live words go
+  and the dictation goes on. `ForkThreeLanguage.LiveLeader` shows `pick`'s first choice and
   moves to another only after `pick` chooses it at two scorings in a row (0.6 s of audio apart at least),
   so the words follow the language the dictation will be inserted in without flipping. Nothing shows
   before the first scores. A language whose recogniser gives up is dropped; with none left, the live
@@ -220,7 +228,8 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   seconds the readings took, and readings left out for a missing English model (`missing=`); a dictation that doesn't use three languages logs `skipped=` with the
   reason (`lab-off`, `dictation-module`, `language=…`, or `not-installed=…`), and
   `prepareModels` logs what it starts downloading (`downloading=…`) and how each download ended. The same decisions, the newest 50, go to the App Group's
-  `Library/fork-three-language.json` (event, detail, scores, process, time), since an iPhone's past
+  `Library/fork-three-language.json` (event, detail, scores, process, time, and each first-time
+  reading failure's `NSError` domain and code in `errors`), since an iPhone's past
   system log can't be read without root on the Mac:
   `xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier
   group.io.veraze.hex.mobile --source Library/fork-three-language.json`. Never what was said.

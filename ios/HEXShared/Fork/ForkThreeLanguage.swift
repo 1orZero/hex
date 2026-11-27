@@ -165,12 +165,28 @@ nonisolated enum ForkThreeLanguage {
             return nil
         }
         let started = ContinuousClock.now
-        let readings = await readAll(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels)
+        var outcomes = await readOutcomes(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels)
+        let errors = zip(lanes, outcomes).compactMap { lane, outcome -> String? in
+            guard case .failure(let error) = outcome else { return nil }
+            let ns = error as NSError
+            return "\(lane.id) \(ns.domain) \(ns.code)"
+        }
+        // Apple caps the analyses running at once per device (`insufficientResources`), and the
+        // live words' analyzers may still be finishing: a reading refused beside the others is
+        // read again alone.
+        if !errors.isEmpty {
+            try? await Task.sleep(for: .milliseconds(300))
+            for index in outcomes.indices {
+                guard case .failure = outcomes[index] else { continue }
+                outcomes[index] = await readOutcome(audioURL, lane: lanes[index], vocabulary: vocabulary, lingeringModels: lingeringModels)
+            }
+        }
+        let readings = outcomes.map { try? $0.get() }
         let seconds = (ContinuousClock.now - started) / .seconds(1)
 
         guard readings.contains(where: { $0 != nil }) else {
             log.error("three-language: every reading failed")
-            Record.append(Record(event: "failed", detail: "every reading", seconds: seconds))
+            Record.append(Record(event: "failed", detail: "every reading", seconds: seconds, errors: errors))
             return nil
         }
         let heard = zip(lanes, readings).map { lane, reading in
@@ -191,7 +207,8 @@ nonisolated enum ForkThreeLanguage {
             cantonese: cantonese,
             failed: failed.isEmpty ? [] : failed.components(separatedBy: ","),
             missing: missing,
-            seconds: (seconds * 100).rounded() / 100
+            seconds: (seconds * 100).rounded() / 100,
+            errors: errors.isEmpty ? nil : errors
         ))
         return chosen?.text ?? ""
     }
@@ -203,17 +220,26 @@ nonisolated enum ForkThreeLanguage {
         vocabulary: [String],
         lingeringModels: Bool
     ) async -> [Lane?] {
-        await withTaskGroup(of: (Int, Lane?).self) { group in
+        await readOutcomes(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels).map { try? $0.get() }
+    }
+
+    private static func readOutcomes(
+        _ audioURL: URL,
+        lanes: [UsableLocale],
+        vocabulary: [String],
+        lingeringModels: Bool
+    ) async -> [Result<Lane, any Error>] {
+        await withTaskGroup(of: (Int, Result<Lane, any Error>).self) { group in
             for (index, lane) in lanes.enumerated() {
                 group.addTask {
-                    (index, await read(audioURL, lane: lane, vocabulary: vocabulary, lingeringModels: lingeringModels))
+                    (index, await readOutcome(audioURL, lane: lane, vocabulary: vocabulary, lingeringModels: lingeringModels))
                 }
             }
-            var readings = [Lane?](repeating: nil, count: lanes.count)
-            for await (index, reading) in group {
-                readings[index] = reading
+            var outcomes = [Result<Lane, any Error>](repeating: .failure(CancellationError()), count: lanes.count)
+            for await (index, outcome) in group {
+                outcomes[index] = outcome
             }
-            return readings
+            return outcomes
         }
     }
 
@@ -232,6 +258,9 @@ nonisolated enum ForkThreeLanguage {
         /// Optional so records written before it existed still decode.
         var missing: [String]?
         var seconds: Double?
+        /// Why readings failed the first time (`NSError` domain and code), retried or not.
+        /// Optional so records written before it existed still decode.
+        var errors: [String]?
         var at = Date()
         var process = Bundle.main.bundleURL.pathExtension == "appex" ? "keyboard" : "app"
 
@@ -350,12 +379,14 @@ nonisolated enum ForkThreeLanguage {
         return (ids.compactMap { id in resolved[id].map { UsableLocale(id: id, locale: $0) } }, "")
     }
 
-    private static func read(
+    /// One lane's reading. Cancelling it asks Apple to end the analysis (`cancelAndFinishNow`)
+    /// and counts as a failure, never as a reading that heard nothing.
+    private static func readOutcome(
         _ audioURL: URL,
         lane: UsableLocale,
         vocabulary: [String],
         lingeringModels: Bool
-    ) async -> Lane? {
+    ) async -> Result<Lane, any Error> {
         let transcriber = transcriber(for: lane.locale)
         let analyzer = SpeechAnalyzer(
             modules: [transcriber],
@@ -364,30 +395,35 @@ nonisolated enum ForkThreeLanguage {
                 modelRetention: lingeringModels ? .lingering : .whileInUse
             )
         )
-        defer { withExtendedLifetime(analyzer) {} }
         do {
-            let file = try AVAudioFile(forReading: audioURL)
-            try await analyzer.prepareToAnalyze(in: nil)
-            if !vocabulary.isEmpty {
-                let context = AnalysisContext()
-                context.contextualStrings[.general] = vocabulary
-                try? await analyzer.setContext(context)
+            return try await withTaskCancellationHandler {
+                let file = try AVAudioFile(forReading: audioURL)
+                try await analyzer.prepareToAnalyze(in: nil)
+                if !vocabulary.isEmpty {
+                    let context = AnalysisContext()
+                    context.contextualStrings[.general] = vocabulary
+                    try? await analyzer.setContext(context)
+                }
+                try await analyzer.start(inputAudioFile: file, finishAfterFile: true)
+                var text = ""
+                var words: [TwoLanguageTimedWord] = []
+                for try await result in transcriber.results where result.isFinal {
+                    text += String(result.text.characters)
+                    words += AppleSpeechTwoLanguage.words(in: result.text)
+                }
+                try Task.checkCancellation()
+                return .success(Lane(
+                    locale: lane.id,
+                    text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                    words: words
+                ))
+            } onCancel: {
+                Task { await analyzer.cancelAndFinishNow() }
             }
-            try await analyzer.start(inputAudioFile: file, finishAfterFile: true)
-            var text = ""
-            var words: [TwoLanguageTimedWord] = []
-            for try await result in transcriber.results where result.isFinal {
-                text += String(result.text.characters)
-                words += AppleSpeechTwoLanguage.words(in: result.text)
-            }
-            return Lane(
-                locale: lane.id,
-                text: text.trimmingCharacters(in: .whitespacesAndNewlines),
-                words: words
-            )
         } catch {
-            log.error("three-language: \(lane.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            let ns = error as NSError
+            log.error("three-language: \(lane.id, privacy: .public) failed: \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .public)")
+            return .failure(error)
         }
     }
 
