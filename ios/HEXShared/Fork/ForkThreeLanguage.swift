@@ -97,6 +97,42 @@ nonisolated enum ForkThreeLanguage {
         text.contains { cantoneseCharacters.contains($0) }
     }
 
+    /// Which reading the keyboard's live words show while it records
+    /// (`ForkThreeLanguageLiveWords`, which scores the audio so far every so often): `pick`'s
+    /// first choice, then another only once `pick` has kept choosing it for `delay` seconds of
+    /// audio, so the words follow the language the dictation will be inserted in without
+    /// flipping while two scores are close.
+    struct LiveLeader: Sendable {
+        static let delay: TimeInterval = 0.6
+
+        private(set) var shown: String?
+        private var challenger: String?
+        private var challengerSince: TimeInterval = 0
+
+        /// The reading to show after an update at `now` (seconds, any clock).
+        mutating func update(_ lanes: [Lane], at now: TimeInterval) -> String? {
+            guard let best = ForkThreeLanguage.pick(lanes)?.locale else { return shown }
+            guard let current = shown, lanes.contains(where: { $0.locale == current && !$0.text.isEmpty }) else {
+                shown = best
+                challenger = nil
+                return shown
+            }
+            guard best != current else {
+                challenger = nil
+                return shown
+            }
+            if challenger != best {
+                challenger = best
+                challengerSince = now
+            }
+            if now - challengerSince >= Self.delay {
+                shown = best
+                challenger = nil
+            }
+            return shown
+        }
+    }
+
     /// Which reservations to release and make so all of `wanted` stay reserved, releasing
     /// the oldest other languages first. Nil when Apple's limit can't hold all of them.
     static func reservationChanges(
@@ -129,20 +165,8 @@ nonisolated enum ForkThreeLanguage {
             return nil
         }
         let started = ContinuousClock.now
-        let readings = await withTaskGroup(of: (Int, Lane?).self) { group in
-            for (index, lane) in lanes.enumerated() {
-                group.addTask {
-                    (index, await read(audioURL, lane: lane, vocabulary: vocabulary, lingeringModels: lingeringModels))
-                }
-            }
-            var readings = [Lane?](repeating: nil, count: lanes.count)
-            for await (index, reading) in group {
-                readings[index] = reading
-            }
-            return readings
-        }
+        let readings = await readAll(audioURL, lanes: lanes, vocabulary: vocabulary, lingeringModels: lingeringModels)
         let seconds = (ContinuousClock.now - started) / .seconds(1)
-        Task { await keepReserved(lanes.map(\.locale)) }
 
         guard readings.contains(where: { $0 != nil }) else {
             log.error("three-language: every reading failed")
@@ -170,6 +194,27 @@ nonisolated enum ForkThreeLanguage {
             seconds: (seconds * 100).rounded() / 100
         ))
         return chosen?.text ?? ""
+    }
+
+    /// Reads `audioURL` in every lane at once, in `lanes`' order; nil where a reading failed.
+    static func readAll(
+        _ audioURL: URL,
+        lanes: [UsableLocale],
+        vocabulary: [String],
+        lingeringModels: Bool
+    ) async -> [Lane?] {
+        await withTaskGroup(of: (Int, Lane?).self) { group in
+            for (index, lane) in lanes.enumerated() {
+                group.addTask {
+                    (index, await read(audioURL, lane: lane, vocabulary: vocabulary, lingeringModels: lingeringModels))
+                }
+            }
+            var readings = [Lane?](repeating: nil, count: lanes.count)
+            for await (index, reading) in group {
+                readings[index] = reading
+            }
+            return readings
+        }
     }
 
     /// One three-language decision, kept in the App Group's `Library/fork-three-language.json`
@@ -263,12 +308,12 @@ nonisolated enum ForkThreeLanguage {
 
     private static let log = Logger(subsystem: "anomaly.hex.mobile", category: "fork-three-language")
 
-    private struct UsableLocale: Sendable {
+    struct UsableLocale: Sendable {
         let id: String
         let locale: Locale
     }
 
-    private static func usableLocales(for language: SpeechLanguage) async -> (lanes: [UsableLocale]?, skipped: String) {
+    static func usableLocales(for language: SpeechLanguage) async -> (lanes: [UsableLocale]?, skipped: String) {
         let enabled = TwoLanguageDictationSettings().isEnabled
         guard enabled, language.module == .speech else {
             let reason = skipReason(enabled: enabled, speechModule: language.module == .speech, primary: language.identifier, installed: [:])
@@ -287,10 +332,17 @@ nonisolated enum ForkThreeLanguage {
             if locale.identifier(.bcp47) == primary?.identifier(.bcp47) {
                 primaryID = id
             }
+        }
+        let primaryKey = primaryID ?? primary?.identifier(.bcp47)
+        // A model reads as installed only to a process that reserved it, and the app and the
+        // keyboard reserve apart: reserving first finds a model already on the iPhone.
+        if lead(for: primaryKey) != nil {
+            await keepReserved(locales.compactMap { resolved[$0] })
+        }
+        for (id, locale) in resolved {
             let ready = await isInstalled(locale)
             installed[id] = ready && !settings.speechModuleFailed(id)
         }
-        let primaryKey = primaryID ?? primary?.identifier(.bcp47)
         guard let ids = plan(enabled: enabled, primary: primaryKey, installed: installed) else {
             let reason = skipReason(enabled: enabled, speechModule: true, primary: primaryKey, installed: installed)
             return (nil, reason ?? "")
