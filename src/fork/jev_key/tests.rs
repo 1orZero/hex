@@ -111,6 +111,36 @@ fn a_release_after_the_dictation_ends_still_belongs_to_hex() {
 }
 
 #[test]
+fn a_dictation_started_in_the_pass_that_ended_the_last_one_is_new() {
+    let mut state = recording(holding_option(true), false);
+    assert!(state.take(key(J, true, OPTION_KEY_MASK)));
+    assert!(state.take(key(J, false, OPTION_KEY_MASK)));
+    let first = Instant::now();
+    state.follow(holding_option(false));
+    state.submitted(first);
+    let generation = state
+        .follow(holding_option(false))
+        .expect("the next dictation starts its own choice");
+    state.resolve(
+        generation,
+        Some(Resolved {
+            initial: false,
+            key: j(),
+        }),
+    );
+    assert!(
+        !state.border(),
+        "it starts from 使用 Jev, not the last choice"
+    );
+    state.follow(holding_option(true));
+    assert!(state.take(key(J, true, OPTION_KEY_MASK)));
+    let second = first + std::time::Duration::from_millis(1);
+    state.submitted(second);
+    assert_eq!(state.choice(first), Some(true));
+    assert_eq!(state.choice(second), Some(true), "its own choice is kept");
+}
+
+#[test]
 fn the_dictation_starts_from_outputs_switch_and_shows_it() {
     let state = recording(holding_option(true), true);
     assert!(

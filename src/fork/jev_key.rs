@@ -253,6 +253,9 @@ impl State {
         if !std::mem::take(&mut self.unsubmitted) {
             return;
         }
+        // The capture is over even when the listener saw the next one start
+        // in the same pass, so the next follow starts a new dictation.
+        self.capturing = false;
         let Some(resolved) = self.resolved else {
             return;
         };
@@ -266,6 +269,7 @@ impl State {
     }
 
     fn cancelled(&mut self) {
+        self.capturing = false;
         self.on = false;
         self.unsubmitted = false;
     }
