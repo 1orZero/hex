@@ -42,12 +42,31 @@ nonisolated enum ForkThreeLanguage {
     /// Cantonese reading, and leads with it; when every reading fails, dictation still falls
     /// back to the Cantonese the person picked.
     static func plan(enabled: Bool, primary: String?, installed: [String: Bool]) -> [String]? {
-        guard enabled, let primary else { return nil }
-        let isCantonese = Locale(identifier: primary).language.languageCode?.identifier == "yue"
-        let lead = isCantonese ? "zh-HK" : primary
-        guard locales.contains(lead) else { return nil }
+        guard enabled, let lead = lead(for: primary) else { return nil }
         guard locales.allSatisfy({ installed[$0] == true }) else { return nil }
         return [lead] + locales.filter { $0 != lead }
+    }
+
+    /// Which of the three readings a dictation language leads with, or nil for another language.
+    static func lead(for primary: String?) -> String? {
+        guard let primary else { return nil }
+        let isCantonese = Locale(identifier: primary).language.languageCode?.identifier == "yue"
+        let lead = isCantonese ? "zh-HK" : primary
+        return locales.contains(lead) ? lead : nil
+    }
+
+    /// Why three-language dictation doesn't run, for the log and `Record`: nil when it runs.
+    static func skipReason(
+        enabled: Bool,
+        speechModule: Bool,
+        primary: String?,
+        installed: [String: Bool]
+    ) -> String? {
+        guard enabled else { return "lab-off" }
+        guard speechModule else { return "dictation-module" }
+        guard lead(for: primary) != nil else { return "language=\(primary ?? "none")" }
+        let missing = locales.filter { installed[$0] != true }
+        return missing.isEmpty ? nil : "not-installed=\(missing.joined(separator: ","))"
     }
 
     /// The reading to insert: the highest score among readings with text, ties to the first.
@@ -94,7 +113,12 @@ nonisolated enum ForkThreeLanguage {
         vocabulary: [String],
         lingeringModels: Bool
     ) async -> String? {
-        guard let lanes = await usableLocales(for: language) else { return nil }
+        let usable = await usableLocales(for: language)
+        guard let lanes = usable.lanes else {
+            log.notice("three-language skipped=\(usable.skipped, privacy: .public)")
+            Record.append(Record(event: "skipped", detail: usable.skipped))
+            return nil
+        }
         let started = ContinuousClock.now
         let readings = await withTaskGroup(of: (Int, Lane?).self) { group in
             for (index, lane) in lanes.enumerated() {
@@ -113,6 +137,7 @@ nonisolated enum ForkThreeLanguage {
 
         guard readings.contains(where: { $0 != nil }) else {
             log.error("three-language: every reading failed")
+            Record.append(Record(event: "failed", detail: "every reading", seconds: seconds))
             return nil
         }
         let heard = zip(lanes, readings).map { lane, reading in
@@ -125,7 +150,93 @@ nonisolated enum ForkThreeLanguage {
         log.notice(
             "three-language picked=\(chosen?.locale ?? "none", privacy: .public) \(scores, privacy: .public) cantonese=\(cantonese, privacy: .public) failed=\(failed, privacy: .public) seconds=\(String(format: "%.2f", seconds), privacy: .public)"
         )
+        Record.append(Record(
+            event: "picked",
+            detail: chosen?.locale ?? "none",
+            scores: Dictionary(uniqueKeysWithValues: heard.map { ($0.locale, ($0.score * 100).rounded() / 100) }),
+            cantonese: cantonese,
+            failed: failed.isEmpty ? [] : failed.components(separatedBy: ","),
+            seconds: (seconds * 100).rounded() / 100
+        ))
         return chosen?.text ?? ""
+    }
+
+    /// One three-language decision, kept in the App Group's `Library/fork-three-language.json`
+    /// (the newest `Record.limit`) so it can be read off the iPhone after the fact; iOS keeps
+    /// the system log only for a live stream. Never the transcript.
+    struct Record: Codable, Equatable, Sendable {
+        /// `picked`, `skipped`, `failed`, or `prepared`.
+        var event: String
+        /// The chosen language, why dictation skipped three languages, or what `prepareModels` did.
+        var detail: String
+        var scores: [String: Double] = [:]
+        var cantonese = false
+        var failed: [String] = []
+        var seconds: Double?
+        var at = Date()
+        var process = Bundle.main.bundleURL.pathExtension == "appex" ? "keyboard" : "app"
+
+        static let limit = 50
+
+        static func appending(_ record: Record, to records: [Record]) -> [Record] {
+            Array((records + [record]).suffix(limit))
+        }
+
+        static var url: URL? {
+            FileManager.default
+                .containerURL(forSecurityApplicationGroupIdentifier: KeyboardBridge.appGroup)?
+                .appendingPathComponent("Library/fork-three-language.json")
+        }
+
+        static func append(_ record: Record) {
+            guard let url else { return }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            let existing = (try? Data(contentsOf: url)).flatMap { try? decoder.decode([Record].self, from: $0) } ?? []
+            guard let data = try? encoder.encode(appending(record, to: existing)) else { return }
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// While Hex is open with the lab on and an English, Cantonese, or Mandarin dictation
+    /// language, keeps all three models reserved and downloads any that aren't installed, so
+    /// three-language dictation doesn't quietly fall back to the dictation language alone. Hex
+    /// downloads only the dictation language's model, and iOS may reclaim a model no
+    /// reservation holds.
+    static func prepareModels() async {
+        guard TwoLanguageDictationSettings().isEnabled,
+              lead(for: LanguageSettings().effectiveDictationLanguage) != nil else { return }
+        var resolved: [(id: String, locale: Locale)] = []
+        var outcomes: [String] = []
+        for id in locales {
+            guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: id)) else {
+                outcomes.append("\(id)=unsupported")
+                continue
+            }
+            resolved.append((id, locale))
+        }
+        await keepReserved(resolved.map(\.locale))
+        for (id, locale) in resolved {
+            guard !(await isInstalled(locale)) else { continue }
+            do {
+                if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber(for: locale)]) {
+                    try await request.downloadAndInstall()
+                }
+                let ready = await isInstalled(locale)
+                outcomes.append("\(id)=\(ready ? "installed" : "not-installed")")
+            } catch {
+                outcomes.append("\(id)=error")
+                log.error("three-language: \(id, privacy: .public) model failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        guard !outcomes.isEmpty else { return }
+        let detail = outcomes.joined(separator: " ")
+        log.notice("three-language prepared \(detail, privacy: .public)")
+        Record.append(Record(event: "prepared", detail: detail))
     }
 
     private static let log = Logger(subsystem: "anomaly.hex.mobile", category: "fork-three-language")
@@ -135,9 +246,12 @@ nonisolated enum ForkThreeLanguage {
         let locale: Locale
     }
 
-    private static func usableLocales(for language: SpeechLanguage) async -> [UsableLocale]? {
+    private static func usableLocales(for language: SpeechLanguage) async -> (lanes: [UsableLocale]?, skipped: String) {
         let enabled = TwoLanguageDictationSettings().isEnabled
-        guard enabled, language.module == .speech else { return nil }
+        guard enabled, language.module == .speech else {
+            let reason = skipReason(enabled: enabled, speechModule: language.module == .speech, primary: language.identifier, installed: [:])
+            return (nil, reason ?? "")
+        }
         let primary = await SpeechTranscriber.supportedLocale(equivalentTo: language.locale)
         let settings = LanguageSettings()
         var resolved: [String: Locale] = [:]
@@ -154,8 +268,12 @@ nonisolated enum ForkThreeLanguage {
             let ready = await isInstalled(locale)
             installed[id] = ready && !settings.speechModuleFailed(id)
         }
-        guard let ids = plan(enabled: enabled, primary: primaryID ?? primary?.identifier(.bcp47), installed: installed) else { return nil }
-        return ids.compactMap { id in resolved[id].map { UsableLocale(id: id, locale: $0) } }
+        let primaryKey = primaryID ?? primary?.identifier(.bcp47)
+        guard let ids = plan(enabled: enabled, primary: primaryKey, installed: installed) else {
+            let reason = skipReason(enabled: enabled, speechModule: true, primary: primaryKey, installed: installed)
+            return (nil, reason ?? "")
+        }
+        return (ids.compactMap { id in resolved[id].map { UsableLocale(id: id, locale: $0) } }, "")
     }
 
     private static func read(

@@ -203,4 +203,59 @@ final class ForkThreeLanguageTests: XCTestCase {
 
         XCTAssertNil(ForkThreeLanguage.reservationChanges(reserved: ["zh-HK"], wanted: wanted, limit: 2))
     }
+
+    /// The reason a skipped dictation logs and records, so a quiet fallback to the dictation
+    /// language alone can be told apart on the iPhone.
+    func testSkipReasonNamesWhyThreeLanguagesDontRun() {
+        let all = ["en-US": true, "zh-HK": true, "zh-TW": true]
+        XCTAssertNil(ForkThreeLanguage.skipReason(enabled: true, speechModule: true, primary: "zh-HK", installed: all))
+        XCTAssertNil(ForkThreeLanguage.skipReason(enabled: true, speechModule: true, primary: "yue-CN", installed: all))
+        XCTAssertEqual(
+            ForkThreeLanguage.skipReason(enabled: false, speechModule: true, primary: "zh-HK", installed: all),
+            "lab-off"
+        )
+        XCTAssertEqual(
+            ForkThreeLanguage.skipReason(enabled: true, speechModule: false, primary: "zh-HK", installed: all),
+            "dictation-module"
+        )
+        XCTAssertEqual(
+            ForkThreeLanguage.skipReason(enabled: true, speechModule: true, primary: "ja-JP", installed: all),
+            "language=ja-JP"
+        )
+        XCTAssertEqual(
+            ForkThreeLanguage.skipReason(
+                enabled: true,
+                speechModule: true,
+                primary: "zh-HK",
+                installed: ["en-US": false, "zh-HK": true]
+            ),
+            "not-installed=en-US,zh-TW"
+        )
+    }
+
+    func testRecordsKeepTheNewestFifty() throws {
+        var records: [ForkThreeLanguage.Record] = []
+        for index in 0..<60 {
+            records = ForkThreeLanguage.Record.appending(
+                ForkThreeLanguage.Record(event: "skipped", detail: "\(index)"),
+                to: records
+            )
+        }
+        XCTAssertEqual(records.count, 50)
+        XCTAssertEqual(records.first?.detail, "10")
+        XCTAssertEqual(records.last?.detail, "59")
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let picked = ForkThreeLanguage.Record(
+            event: "picked",
+            detail: "zh-TW",
+            scores: ["en-US": 0.4, "zh-HK": 3.1, "zh-TW": 3.6],
+            seconds: 1.2,
+            at: Date(timeIntervalSince1970: 1_795_736_287)
+        )
+        XCTAssertEqual(try decoder.decode(ForkThreeLanguage.Record.self, from: encoder.encode(picked)), picked)
+    }
 }
