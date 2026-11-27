@@ -8,13 +8,13 @@
 - **每字時間**：Annotate 轉錄結果中每個字的開始與結束時間，用來把旁白對到每張截圖（keyframe）。
 - **fork 內建繁體轉換**：fork 的 `src/fork/dropline/text.rs` 中 `traditional`，用 Apple Foundation 離線轉換字形，不改寫用詞，保留程式識別名與粵語「吓」。套用在 Dropline 成功回傳的文字、Annotate 的本機轉錄，以及會議的逐字稿、標題與摘要。
 - **s2tw 對照表**：Derek 的 `traditional-chinese` transformer 用的本機轉換（`~/dotfiles/hex/.config/hex/s2twp.ts`），由 OpenCC s2tw 字典加 Big5 字形與粵語詞產生，不做台灣詞彙替換。
-- **辨識偏置**：轉錄時把字典交給模型。Qwen3-ASR／Whisper 一律套用；Parakeet 要開 Labs › Vocabulary biasing。
+- **辨識偏置**：轉錄時把字典交給模型。Qwen3-ASR／Whisper 一律套用；Parakeet 要 `vocabulary_boost` 不是 `off`。
 - **transformations**：使用者在 `hex.config.ts` 定義、依聽寫模式執行的文字轉換，例如 Derek 的 `traditional-chinese → jev → cjk-spacing`。目前只在一般聽寫執行。
 - **音軌**：Hex 一場會議錄兩條音軌，`system.wav`（Them）與 `microphone.wav`（You），各自轉錄，最後依時間軸合併。
 - **私人 API**：Dropline 官方 App 的 OAuth token 由 Derek Voice Worker 保管；裝置向 `/v1/dropline-private/token` 拿短效 access token，再呼叫 `/client/dictate`。Hex fork 只用這條路線。
 - **公開 API**：用使用者自己的 Dropline 金鑰呼叫 `POST /v1/dictate`。Derek Voice 的會議固定用這條。
 - **Dropline 記憶**：Dropline 帳號記住送過的內容。清除端點 `DELETE /client/memory` 一次清掉整個帳號的記憶；Derek Voice 在每場會議處理完後經 Worker `POST /v1/dropline-private/memory/clear` 清除。Hex 目前沒有清除。
-- **sounds like**：字典項目的其他拼法。只在 Parakeet 系列模型、Labs › Vocabulary biasing 開啟時於辨識層生效；Qwen3-ASR、Whisper 與 Dropline 都不使用。
+- **sounds like**：字典項目的其他拼法。`vocabulary_boost` 不是 `off` 時生效：Parakeet 系列模型在辨識層使用；Qwen3-ASR、Whisper 在整段辨識後把這些拼法換成詞（Hex 3.5.0 起）。Dropline 不使用。
 - **螢幕 OCR helper**：Derek 的外部程式 `io.veraze.hex-screen-ocr`（LaunchAgent），聽寫開始時擷取最前方視窗並用 Vision OCR，結果寫到 `~/.local/share/hex-lab/screen.json`，供 `Jev` 讀取。fork 的螢幕文字取代它；`Jev` 改讀 `screenLines` 後，用 `switch.sh off` 停用。
 - **螢幕文字**：fork 在聽寫錄音時，在 Hex 主行程用 Vision 讀前景視窗得到的文字行，由上到下、同一列由左到右，以 `screenLines` 交給這次聽寫的 transformations。只在有模式用 script transformation、而且已經有螢幕錄製權限時讀取。沒有讀取、讀取失敗，或 transformation 等了 500 ms 還沒讀完時，沒有這個欄位；視窗沒有文字時是空陣列。
 - **螢幕詞**：從螢幕文字挑出、像名稱的詞。Derek 的 `Jev` 最多取 30 個，用在辨識後的校正。
