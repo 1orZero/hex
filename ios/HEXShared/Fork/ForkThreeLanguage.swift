@@ -333,14 +333,16 @@ nonisolated enum ForkThreeLanguage {
                 primaryID = id
             }
         }
+        let primaryKey = primaryID ?? primary?.identifier(.bcp47)
         // A model reads as installed only to a process that reserved it, and the app and the
         // keyboard reserve apart: reserving first finds a model already on the iPhone.
-        await keepReserved(locales.compactMap { resolved[$0] })
+        if lead(for: primaryKey) != nil {
+            await keepReserved(locales.compactMap { resolved[$0] })
+        }
         for (id, locale) in resolved {
             let ready = await isInstalled(locale)
             installed[id] = ready && !settings.speechModuleFailed(id)
         }
-        let primaryKey = primaryID ?? primary?.identifier(.bcp47)
         guard let ids = plan(enabled: enabled, primary: primaryKey, installed: installed) else {
             let reason = skipReason(enabled: enabled, speechModule: true, primary: primaryKey, installed: installed)
             return (nil, reason ?? "")
