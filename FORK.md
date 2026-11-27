@@ -193,8 +193,9 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   leading the Cantonese reading by less than 0.3 s gives way to it when the Cantonese reading writes a
   Cantonese-only character (嘅, 咗, 喺, 佢, 哋, 啲, …). The winner's text is inserted as Apple wrote
   it, Cantonese colloquial characters included; readings are never merged. No text in any reading
-  throws the usual no-speech error. A reading that fails beside the others (Apple caps the analyses
-  running at once per device, `insufficientResources`) is read again alone, once, 0.3 s later; every
+  throws the usual no-speech error. The readings run two at a time (`ForkThreeLanguage.maximumReadings`):
+  Derek888 refuses a third ("Maximum number of recognizers reached"). A reading that still fails
+  beside the others (`insufficientResources`) is read again alone, once, 0.3 s later; every
   reading still failing falls through to the paths above. A cancelled reading asks Apple to end its
   analysis (`cancelAndFinishNow`) and counts as failed, never as a reading that heard nothing.
 - Live words (the keyboard's preview while it records): live results carry no confidence, so after
