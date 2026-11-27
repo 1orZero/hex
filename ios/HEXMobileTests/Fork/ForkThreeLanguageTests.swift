@@ -229,8 +229,28 @@ final class ForkThreeLanguageTests: XCTestCase {
                 primary: "zh-HK",
                 installed: ["en-US": false, "zh-HK": true]
             ),
-            "not-installed=en-US,zh-TW"
+            "not-installed=zh-TW"
         )
+        XCTAssertEqual(
+            ForkThreeLanguage.skipReason(
+                enabled: true,
+                speechModule: true,
+                primary: "en-US",
+                installed: ["en-US": false, "zh-HK": true, "zh-TW": true]
+            ),
+            "not-installed=en-US"
+        )
+    }
+
+    /// Derek's iPhone had both Chinese models and not English's: Cantonese and Mandarin are
+    /// still told apart, and English is read only once its model is installed.
+    func testAChineseDictationRunsWithoutTheEnglishModel() {
+        let noEnglish = ["en-US": false, "zh-HK": true, "zh-TW": true]
+        XCTAssertEqual(ForkThreeLanguage.plan(enabled: true, primary: "zh-HK", installed: noEnglish), ["zh-HK", "zh-TW"])
+        XCTAssertEqual(ForkThreeLanguage.plan(enabled: true, primary: "yue-CN", installed: noEnglish), ["zh-HK", "zh-TW"])
+        XCTAssertEqual(ForkThreeLanguage.plan(enabled: true, primary: "zh-TW", installed: noEnglish), ["zh-TW", "zh-HK"])
+        XCTAssertNil(ForkThreeLanguage.skipReason(enabled: true, speechModule: true, primary: "zh-HK", installed: noEnglish))
+        XCTAssertNil(ForkThreeLanguage.plan(enabled: true, primary: "en-US", installed: noEnglish))
     }
 
     func testRecordsKeepTheNewestFifty() throws {
@@ -257,5 +277,12 @@ final class ForkThreeLanguageTests: XCTestCase {
             at: Date(timeIntervalSince1970: 1_795_736_287)
         )
         XCTAssertEqual(try decoder.decode(ForkThreeLanguage.Record.self, from: encoder.encode(picked)), picked)
+
+        let older = Data("""
+        [{"at":"2026-11-27T02:34:15Z","cantonese":false,"detail":"not-installed=en-US","event":"skipped","failed":[],"process":"keyboard","scores":{}}]
+        """.utf8)
+        let kept = try decoder.decode([ForkThreeLanguage.Record].self, from: older)
+        XCTAssertEqual(kept.map(\.detail), ["not-installed=en-US"])
+        XCTAssertNil(kept.first?.missing)
     }
 }

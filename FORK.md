@@ -180,9 +180,11 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
 
 - When: Labs › Two-language dictation is on, the dictation language resolves to one of the three on
   `SpeechTranscriber` or is Cantonese in any region (Settings' "Cantonese" is `yue-CN`, which counts
-  as `zh-HK` and still gets the same three readings), and all three `SpeechTranscriber` models are
-  installed and not set aside.
-  Otherwise, including any missing model, dictation takes upstream's Two-language path, then its
+  as `zh-HK` and still gets the same three readings), and the `zh-HK` and `zh-TW` `SpeechTranscriber`
+  models (plus `en-US`'s when English is the dictation language) are installed and not set aside.
+  The `en-US` reading joins only while its model is installed; without it a Chinese dictation still
+  tells Cantonese from Mandarin, and the Chinese models write the English words.
+  Otherwise, including a missing Chinese model, dictation takes upstream's Two-language path, then its
   single-language path, as before, which in `zh-HK` writes Mandarin speech as Cantonese.
 - Choice: each reading's score is its words' confidence times their duration, summed, in seconds. The
   highest score among readings with text wins; ties go to the dictation language. A Mandarin winner
@@ -203,9 +205,9 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
   never downloads.
 - Log: `anomaly.hex.mobile` category `fork-three-language` records each dictation's pick, the
   three scores, whether the Cantonese reading wrote Cantonese-only characters, failed readings, and the
-  seconds the readings took; a dictation that doesn't use three languages logs `skipped=` with the
+  seconds the readings took, and readings left out for a missing English model (`missing=`); a dictation that doesn't use three languages logs `skipped=` with the
   reason (`lab-off`, `dictation-module`, `language=…`, or `not-installed=…`), and
-  `prepareModels` logs what it downloaded. The same decisions, the newest 50, go to the App Group's
+  `prepareModels` logs what it starts downloading (`downloading=…`) and how each download ended. The same decisions, the newest 50, go to the App Group's
   `Library/fork-three-language.json` (event, detail, scores, process, time), since an iPhone's past
   system log can't be read without root on the Mac:
   `xcrun devicectl device copy from --domain-type appGroupDataContainer --domain-identifier
