@@ -31,10 +31,11 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let threeLanguage = await ForkThreeLanguage.transcribe(…) { … }` before the `// Labs › Two-language dictation` comment (4 lines) | The app's Apple Speech dictation reads the recording in English, Cantonese, and Mandarin when three-language dictation applies, else runs upstream's Two-language and single-language paths unchanged. |
 | `ios/HEXKeyboard/KeyboardSpeech.swift` | `transcribe(_:hints:)`: the same `if let threeLanguage = …` block before the `// Labs › Two-language dictation` comment, returning the dictation language with the text (4 lines) | The same for the keyboard's own Apple Speech dictation. |
 | `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let three = await ForkThreeLanguageLiveWords.source(for: picked, sampleRate: rate), !self.stopped { self.attach(three); return }` after `guard let self, !self.stopped else { return }` in the lookup task (1 line) | While three-language dictation applies, the keyboard's live words come from `ForkThreeLanguageLiveWords` instead of one recogniser in the dictation language. |
-| `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { return senseVoice }` before the `if let threeLanguage` block (1 line) | While Labs › SenseVoice（中文） applies, SenseVoice-Small writes the app's Apple Speech dictation; nil (lab off, no model, another language, or a failure) falls through to three-language dictation and upstream's paths unchanged. |
-| `ios/HEXKeyboard/KeyboardSpeech.swift` | `transcribe(_:hints:)`: `if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: language.identifier) { return (senseVoice, language) }` before the `if let threeLanguage` block (1 line) | The same for the keyboard's own Apple Speech dictation. |
-| `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let senseVoice = ForkSenseVoiceLiveWords.source(language: picked?.identifier, sampleRate: rate) { self.attach(senseVoice); return }` before the three-language line (1 line; synchronous, so nothing can stop the capture between the `stopped` check and `attach`) | While SenseVoice writes the dictation and its model has loaded, the keyboard's live words come from SenseVoice and no Apple recogniser starts. |
+| `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { preparedModule = nil; preparedAnalyzer = nil; return senseVoice }` before the `if let threeLanguage` block (1 line) | While Labs › SenseVoice（中文） applies, SenseVoice-Small writes the app's Apple Speech dictation and the analyzer `prepare` left goes, so Apple holds nothing beside it; nil (lab off, no model, another language, or a failure) falls through to three-language dictation and upstream's paths unchanged. |
+| `ios/HEXKeyboard/KeyboardSpeech.swift` | `transcribe(_:hints:)`: `if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: picked.identifier) { return (senseVoice, picked) }` after `log.write("speech locale=…")`, before Apple's model is checked or installed (1 line) | The same for the keyboard's own Apple Speech dictation, which then never checks, downloads, or builds Apple's model; nil runs upstream's install and paths unchanged. |
+| `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let self, !self.stopped, ForkSenseVoiceLiveWords.take(language: picked?.identifier, sampleRate: rate, attach: self.attach, giveUp: self.giveUp) { return }` after `let picked = await AppleSpeechLanguages.resolve(settings: settings)`, before the model's status check (1 line; synchronous, so nothing can stop the capture between the `stopped` check and `attach`) | While SenseVoice's model has loaded and it writes the dictation, the keyboard's live words come from SenseVoice, or there are none, and no Apple recogniser starts or model is checked. |
 | `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkSenseVoice.prewarm()` after `ForkDroplineRecognition.prepare()` (1 line) | Loads SenseVoice in the app as a recording starts, when it will read the dictation. |
+| `ios/HEXMobile/AppleSpeechTranscriber.swift` | `prepare(progressHandler:)`: `try await analyzer.prepareToAnalyze(in: nil)` becomes `try await ForkSenseVoice.prepareToAnalyze(analyzer, language: language.identifier)` (1 line) | Where SenseVoice reads the app's dictations, the app loads SenseVoice instead of Apple's model as it prepares; elsewhere Apple's model loads as before. |
 | `ios/HEXKeyboard/KeyboardViewController.swift` | `scheduleLaunchWork()`: `if let self, self.isShown, self.hasFullAccess { ForkKeyboardSenseVoice.shared.warmUp(memoryWarned: self.memoryWarned) }` after `self?.autoStartDictationIfPending()` in the `autoStart` work item, before Parakeet's `warmUp` (1 line) | The keyboard loads SenseVoice after its first frame and launch work, as it loads Parakeet, or lets it go where Parakeet takes the keyboard. |
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `handleMemoryWarning()`: `ForkKeyboardSenseVoice.shared.handleMemoryWarning()` after `KeyboardParakeet.shared.handleMemoryWarning()` (1 line) | A memory warning lets the keyboard's SenseVoice go, and none loads for 5 minutes. |
 | `ios/HEXKeyboard/KeyboardParakeet.swift` | `var holdsModel: Bool { loaded != nil || loadTask != nil }` after `private var lastNote = ""` (1 line) | SenseVoice doesn't load in a keyboard process that holds or is loading Parakeet, which stays loaded when its plan changes. |
@@ -299,9 +300,9 @@ English apart itself, so three-language dictation's readings don't run unless it
   English (short Cantonese with English words often reads as English gibberish, and three-language dictation
   writes English as it does without the lab), or under one letter or digit a second in a recording of 3 s or
   more (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to three-language dictation, then
-  upstream's paths, on the same recording. A dictation never waits for the model. The app loads it as a
-  recording starts and once the download finishes, unless Dropline is selected, and a dictation it couldn't
-  read yet starts the load too; it then stays loaded while the app runs, so Keep mic warm's dictations,
+  upstream's paths, on the same recording. A dictation never waits for the model. The app loads it as Hex
+  prepares its Apple Speech engine (in place of Apple's model, below), as a recording starts, and once the
+  download finishes, unless Dropline is selected, and a dictation it couldn't read yet starts the load too; it then stays loaded while the app runs, so Keep mic warm's dictations,
   the keyboard's included, are read in the app. The first load of a new build compiles the encoder for the
   Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom vocabulary doesn't steer
   SenseVoice (it takes no hints); Word replacements, learned fixes, and vocabulary spellings still apply
@@ -346,7 +347,7 @@ English apart itself, so three-language dictation's readings don't run unless it
   today), App or Keyboard (the process that read it, so Keep mic warm's keyboard dictations show as App),
   and SenseVoice, or Apple with the fallback's reason: Not enough memory, Model loading, Model not loaded,
   Load failed, Recording too long, Heard as English, Too few words, No words heard, or Error. Never what
-  was said. Other records (`skipped`, `live`, `loaded`, `load-failed`, `released`, `keyboard`, downloads)
+  was said. Other records (`skipped`, `live`, `loaded`, `load-failed`, `released`, `apple`, `keyboard`, downloads)
   aren't listed. The log is read as the card appears and as Hex returns to the foreground. A log over 64 KB,
   or one that doesn't decode, shows "No dictations yet", as an empty one does; the next dictation keeps the
   newest 50 records of a bigger log and starts an undecodable one over (`Record.append`).
@@ -356,10 +357,33 @@ English apart itself, so three-language dictation's readings don't run unless it
   SenseVoice reads one thing at a time. Only once the model has loaded in this keyboard (before that, the
   keyboard's other live words run, three-language and then upstream's, logged as `live` `not-loaded`), and
   where the keyboard has room for a 15 s read and Core ML lists a Neural Engine: on a Mac's CPU (as in the
-  simulator) a round took up to 1.05 s, against under 0.1 s on its Neural Engine. The first settled
-  stretch's language is kept. A load or read error, or a memory warning that lets the model go, ends the
+  simulator) a round took up to 1.05 s, against under 0.1 s on its Neural Engine. With the model loaded
+  but no room for that read, the dictation has no live words (`live` `memory`), not Apple's. The first
+  settled stretch's language is kept. A load or read error, or a memory warning that lets the model go, ends the
   live words for that dictation; a later dictation in a keyboard whose load failed uses the keyboard's
   other live words.
+- Apple beside it (`ForkSenseVoiceApple`): while SenseVoice writes a dictation, Apple's speech recognition
+  doesn't run for it. Where SenseVoice reads the app's dictations (`readsAppDictations`: the lab on, the
+  model downloaded, a language it covers, Dropline not selected, no failed load), the app's Apple Speech
+  engine makes its analyzer as it prepares (`AppleSpeechTranscriber.prepare`) but doesn't prepare it
+  (`apple` `not-prepared`) and loads SenseVoice instead, and the analyzer goes once SenseVoice writes a
+  dictation. The keyboard's dictation reaches SenseVoice before Apple's model is checked, installed, or
+  built (`KeyboardSpeech`), and while SenseVoice's model has loaded in the keyboard its live words are
+  SenseVoice's or none (`ForkSenseVoiceLiveWords.take`). A dictation that falls back (any `fallback`) runs
+  Apple's path in full, and Apple's model loads as it reads. On a Mac (macOS 27.2, 5 runs each in a fresh
+  process, so Apple's speech service starts without the model), preparing took 22 ms and held 6 MB in that
+  service; without it a single-language reading of 4–16 s of audio took 22–27 ms longer (0.12–0.30 s
+  against 0.10–0.28 s) and three-language dictation's readings 13–17 ms longer (0.21–0.63 s against
+  0.19–0.62 s), since both load the model as they read (70–99 MB in the service for one language,
+  165–218 MB for three). Unmeasured: an iPhone, and a model the system has dropped from memory since it
+  was last read. Where SenseVoice can't write the app's dictations, Apple's model is prepared as before; a
+  keyboard that never loads SenseVoice (a limit under 149 MB) runs Apple's live words and final text as
+  before, its dictations falling back as `not-loaded`. Asset upkeep stays: the dictation language's
+  reservation and download as Hex prepares, three-language dictation's as Hex becomes active
+  (`prepareModels`), and the keyboard's lookups of Apple's languages (its language switch, the
+  dictation's language). No model loads for them, and a fallback can't read without its models. A lab
+  turned off while Hex runs leaves Apple's model to load with the next dictation; the next launch
+  prepares it as before.
 - Spelling: Simplified output goes through Apple's ICU `Hans-Hant` transform (Taiwan forms), then a
   Cantonese reading takes Hong Kong forms (係, 裏, 着, 啓, 衞), and 松/面 become 鬆/麵 by context
   (`ForkSenseVoiceText`). No OpenCC.
@@ -375,8 +399,9 @@ English apart itself, so three-language dictation's readings don't run unless it
 - Log: `anomaly.hex.mobile` category `fork-sensevoice`, and the newest 50 records in the App Group's
   `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `loading` (the app),
   `not-loaded` (the keyboard), `load-failed`, `empty`, `english`, `sparse`, `error …`), `skipped`, `live`
-  (rounds, skipped rounds, the longest round, or `not-loaded`), `loaded` and `load-failed` (the load's
-  seconds), `released` (`memory warning`, `parakeet`, `off`, or `not on the Neural Engine`), `keyboard`
+  (rounds, skipped rounds, the longest round, `not-loaded`, or `memory`), `loaded` and `load-failed` (the
+  load's seconds), `released` (`memory warning`, `parakeet`, `off`, or `not on the Neural Engine`), `apple`
+  (`not-prepared`: the app prepared its Apple Speech engine without Apple's model), `keyboard`
   (why the keyboard didn't load it as it opened, once in a row per reason: `too-small` with the limit,
   `shortOfMemory` with what was free, `noNeuralEngine`), `downloaded`, and `download-failed`, with the
   process and, where they apply, the detected language, audio and wall seconds, and peak footprint. Never
@@ -394,9 +419,3 @@ the fork never touched. Against the last merged tag, only the fork's changes can
 
 The script applies the fork's changes (this branch against its last tag, as one commit) to the new tag
 in `~/.hex-fork/ios-src` and commits the result with two parents, this branch and the tag. On a
-conflict it stops with exit 23 and leaves the work there: `HEAD` is the new tag, and the conflict
-markers put upstream's lines under `HEAD` and the fork's under "Fork changes on ios-stable at <sha>".
-Resolve each file by taking upstream's version and re-applying only the hooks listed under "Upstream
-files the fork changes", `git add` it, then run `fork/daily.sh --continue-ios`, which commits the
-merge, builds, pushes, and installs. Don't run `git commit` there. When the right resolution isn't
-clear, run `git -C ~/.hex-fork/ios-src cherry-pick --abort` and report the conflict.

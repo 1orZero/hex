@@ -8,9 +8,9 @@ import os
 /// a Mac's CPU, as in the simulator, against 0.1 s on its Neural Engine), the model isn't loaded in
 /// this keyboard (logged as `live` `not-loaded`; the keyboard loads it as it opens,
 /// `ForkKeyboardSenseVoice`), the keyboard lacks room for a 15 s read
-/// (`ForkSenseVoiceBudget.allowsRead`), or the capture's rate can't be converted, and the
-/// keyboard's own live words run as before. A model a memory warning lets go mid-dictation ends
-/// its live words rather than loading again.
+/// (`ForkSenseVoiceBudget.allowsRead`), or the capture's rate can't be converted. Without a
+/// loaded model the keyboard's own live words run as before; with one, none do (`take`). A model
+/// a memory warning lets go mid-dictation ends its live words rather than loading again.
 @MainActor
 enum ForkSenseVoiceLiveWords {
     static func source(language: String?, sampleRate: Double) -> ForkSenseVoiceLiveTranscriber? {
