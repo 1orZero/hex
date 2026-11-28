@@ -3,7 +3,8 @@ import SwiftUI
 
 /// Labs › SenseVoice（中文） (fork), after the Dictation card: the switch, the model's download
 /// with its progress, started by turning the switch on, and once it's on the iPhone, whether the
-/// keyboard runs it (`ForkSenseVoiceKeyboardLine`) and Remove model.
+/// keyboard runs it (`ForkSenseVoiceKeyboardLine`), the recent dictations' engines
+/// (`ForkSenseVoiceRecentDictations`), and Remove model.
 struct ForkSenseVoiceSettingsCard: View {
     @State private var download = ForkSenseVoiceDownload.shared
     @State private var isEnabled = ForkSenseVoice.isEnabled
@@ -23,7 +24,11 @@ struct ForkSenseVoiceSettingsCard: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
             } else if isInstalled {
-                if isEnabled { ForkSenseVoiceKeyboardLine() }
+                if isEnabled {
+                    ForkSenseVoiceKeyboardLine()
+                    SettingsDivider()
+                    ForkSenseVoiceRecentDictations()
+                }
 
                 SettingsDivider()
 
