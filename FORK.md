@@ -328,10 +328,11 @@ English apart itself, so three-language dictation's readings don't run unless it
   Nothing else about the warm session changes: picking a duration stores it in the App Group and starts the session
   at once; while it is warm the keyboard's Dictate only sends start and stop, the app records, and SenseVoice reads
   the dictation in the app (`process` `app` in the log, App in Recent dictations) when the app dictates with Apple
-  Speech and Dropline isn't selected. Each dictation's start and finish restart the timer. When it runs out the
-  session ends and the keyboard's Dictate dictates in the keyboard again (Apple's speech recognition where SenseVoice
-  can't load, `fallback not-loaded`), without opening Hex; picking a duration again, Open Hex in a keyboard line, or
-  the Warm Hex Keyboard shortcut warms it again. A pick stays: `keyboardDictatesItself` only picks the default
+  Speech and Dropline isn't selected. Each dictation's start and finish restart the timer, and it doesn't run out
+  while a dictation records or transcribes. When it runs out the session ends and the keyboard's Dictate dictates in
+  the keyboard again (Apple's speech recognition where SenseVoice can't load, `fallback not-loaded`), without
+  opening Hex; picking a duration again, Open Hex in a keyboard line, or the Warm Hex Keyboard shortcut warms it
+  again. A pick stays: `keyboardDictatesItself` only picks the default
   while nothing is stored, and `reviewWarmDurationForKeyboardDictation` runs once per install, at Hex's first launch
   on iOS 26, before anything can be picked.
 - Memory (`ForkSenseVoiceBudget`), in `KeyboardParakeetBudget`'s terms: SenseVoice keeps 60 MB of
