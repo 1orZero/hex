@@ -809,6 +809,7 @@ final class DictationController {
         )
         let sharesHeard = typingJournalSettings.isEnabled
         ForkDroplineRecognition.prepare()
+        ForkSenseVoice.prewarm()
 
         // A failed re-preparation left the previously loaded model ready; starting a dictation
         // with it dismisses that stale failure so finishing returns to `.ready`.

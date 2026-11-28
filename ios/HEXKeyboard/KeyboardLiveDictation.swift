@@ -119,6 +119,7 @@ final class KeyboardLiveDictation {
                 installed = await AssetInventory.status(forModules: [AppleSpeechModule(picked).module]) == .installed
             }
             guard let self, !self.stopped else { return }
+            if let senseVoice = await ForkSenseVoiceLiveWords.source(language: picked?.identifier, sampleRate: rate), !self.stopped { self.attach(senseVoice); return }
             if let three = await ForkThreeLanguageLiveWords.source(for: picked, sampleRate: rate), !self.stopped { self.attach(three); return }
             guard let picked, installed else {
                 if let replay = LiveTranscriptReplay.load(log: { KeyboardProbeLog.shared.write($0) }) {
