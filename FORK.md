@@ -327,9 +327,10 @@ English apart itself, so three-language dictation's readings don't run unless it
   rise, above SenseVoice's 13 MB of logits and 1 MB of input for a 15 s piece) + 24 (Parakeet's margin) =
   149 MB. That leaves 40 MB above the recording, more than the 32 MB the keyboard's next dictation needs to
   start (`KeyboardLocalDictation.startHeadroomNeeded`), the room "Not enough memory to dictate here"
-  checks. A load needs 60 + 32 = 92 MB free; a read needs 16 + 32 MB and 0.5 MB a second of audio
-  (FluidAudio's converter holds the recording, as for Parakeet) free, since a first read keeps its logits.
-  The app passes these by far. Unmeasured on an iPhone: SenseVoice's footprint there, and whether
+  checks. A load needs 60 + 32 = 92 MB free, so SenseVoice's whole footprint, logits included, still
+  leaves those 32 MB. A read needs what a Parakeet transcription needs, 24 MB and 0.5 MB a second of audio
+  (`KeyboardParakeetBudget.transcribeHeadroom`; FluidAudio's converter holds the recording for both):
+  up to 32 s of audio at the recording footprint of a 149 MB keyboard. The app passes these by far. Unmeasured on an iPhone: SenseVoice's footprint there, and whether
   Parakeet's 42 MB is all of its share of the 91 MB.
 - Labs card: once the model is on the iPhone and the lab is on, a line under the switch says whether the
   keyboard runs it, in Parakeet's Settings › Dictation words (`KeyboardParakeetStatus`) with SenseVoice's
@@ -359,7 +360,7 @@ English apart itself, so three-language dictation's readings don't run unless it
   on an iPhone), which made whole stretches read as "The." or nothing. The two agree within 2e-4 where the
   model is stable.
 - Model: turning the switch on downloads the fp16 files (about 450 MB) into
-  `SpeechModels/sensevoice-small-coreml` in the App Group, with progress; a failed or stalled download turns
+  `SpeechModels/sensevoice-small` in the App Group, with progress; a failed or stalled download turns
   the switch off and resumes next time; a finished one loads the model in the app. Remove model deletes the
   folder.
 - Log: `anomaly.hex.mobile` category `fork-sensevoice`, and the newest 50 records in the App Group's

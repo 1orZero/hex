@@ -31,11 +31,16 @@ final class ForkSenseVoiceKeyboardTests: XCTestCase {
         XCTAssertTrue(ForkSenseVoiceBudget.allowsLoad(footprint: 20 * megabyte, available: 0), "no limit, as in the simulator")
     }
 
-    /// Its rise, the recording at 0.5 MB a second, and 32 MB left after it.
-    func testAReadNeedsItsRiseTheRecordingAndTheNextStart() {
-        XCTAssertEqual(ForkSenseVoiceBudget.readHeadroom(audioSeconds: 10), 53 * megabyte)
-        XCTAssertTrue(ForkSenseVoiceBudget.allowsRead(footprint: 110 * megabyte, available: 67 * megabyte, audioSeconds: 15))
-        XCTAssertFalse(ForkSenseVoiceBudget.allowsRead(footprint: 110 * megabyte, available: 67 * megabyte, audioSeconds: 60))
+    /// What a Parakeet transcription needs: 24 MB and the recording at 0.5 MB a second. A keyboard
+    /// at the minimum limit has that at the recording footprint for a 15 s piece and more.
+    func testAReadNeedsWhatAParakeetTranscriptionNeeds() {
+        XCTAssertTrue(ForkSenseVoiceBudget.allowsRead(footprint: 109 * megabyte, available: 40 * megabyte, audioSeconds: 32))
+        XCTAssertFalse(ForkSenseVoiceBudget.allowsRead(footprint: 109 * megabyte, available: 40 * megabyte, audioSeconds: 33))
+        XCTAssertTrue(ForkSenseVoiceBudget.allowsRead(
+            footprint: ForkSenseVoiceBudget.recordingFootprint,
+            available: ForkSenseVoiceBudget.requiredLimit - ForkSenseVoiceBudget.recordingFootprint,
+            audioSeconds: ForkSenseVoiceSegments.longestPiece
+        ))
         XCTAssertFalse(ForkSenseVoiceBudget.allowsRead(footprint: 60 * megabyte, available: 80 * megabyte, audioSeconds: 5), "a 140 MB keyboard")
         XCTAssertTrue(ForkSenseVoiceBudget.allowsRead(footprint: 60 * megabyte, available: 0, audioSeconds: 120))
     }

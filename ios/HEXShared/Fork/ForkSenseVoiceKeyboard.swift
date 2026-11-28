@@ -12,8 +12,10 @@ import Foundation
 ///   149 MB (`requiredLimit`). That leaves 40 MB above the recording, more than the 32 MB the
 ///   keyboard's next dictation needs to start (`startHeadroom`).
 /// - It loads with as much left as SenseVoice keeps once it has read, and the start headroom after
-///   that (`loadHeadroom`, 92 MB); each read needs its rise, the recording in memory, and the start
-///   headroom left, since a first read keeps its logits (`readHeadroom`). Short of either, the
+///   that (`loadHeadroom`, 92 MB). Each read needs what a Parakeet transcription needs
+///   (`KeyboardParakeetBudget.transcribeHeadroom`: 24 MB and 0.5 MB a second, since FluidAudio's
+///   converter holds the recording for both), which a 149 MB keyboard has at the recording footprint
+///   for up to 32 s of audio; the logits a read keeps are in the 60 MB already. Short of either, the
 ///   dictation goes to three-language dictation and Apple's speech recognition.
 nonisolated enum ForkSenseVoiceBudget {
     static let megabyte = KeyboardParakeetBudget.megabyte
@@ -33,13 +35,6 @@ nonisolated enum ForkSenseVoiceBudget {
     }
     static var loadHeadroom: Int { residentFootprint + startHeadroom }
 
-    /// A read of `audioSeconds`: FluidAudio's converter holds the recording as Parakeet's does
-    /// (`KeyboardParakeetBudget.audioCostPerSecond`).
-    static func readHeadroom(audioSeconds: Double) -> Int {
-        KeyboardParakeetBudget.transcriptionRise + startHeadroom
-            + Int(max(0, audioSeconds) * Double(KeyboardParakeetBudget.audioCostPerSecond))
-    }
-
     /// Whether a process with `footprint` and `available` (bytes) may load SenseVoice.
     /// `available` 0 is a process iOS sets no limit for (the simulator): it may.
     static func allowsLoad(footprint: Int, available: Int) -> Bool {
@@ -50,7 +45,8 @@ nonisolated enum ForkSenseVoiceBudget {
     /// Whether SenseVoice may read `audioSeconds` of audio now.
     static func allowsRead(footprint: Int, available: Int, audioSeconds: Double) -> Bool {
         guard available > 0 else { return true }
-        return footprint + available >= requiredLimit && available >= readHeadroom(audioSeconds: audioSeconds)
+        return footprint + available >= requiredLimit
+            && available >= KeyboardParakeetBudget.transcribeHeadroom(audioSeconds: audioSeconds)
     }
 
     /// This process's physical footprint, the number iOS holds against its limit.
@@ -120,7 +116,8 @@ nonisolated struct ForkSenseVoiceKeyboardStatus {
 }
 
 /// What the keyboard does with SenseVoice each time it opens (`ForkKeyboardSenseVoice.warmUp`), in
-/// `KeyboardParakeet.warmUp`'s order: Parakeet first, so the keyboard never holds both models.
+/// `KeyboardParakeet.warmUp`'s order. Parakeet's claim on the keyboard is checked before anything
+/// of SenseVoice's, so the keyboard never holds both models.
 nonisolated enum ForkSenseVoiceKeyboard {
     enum Decision: Equatable {
         /// Nothing to do: Dropline is selected (a model already loaded stays, for its fallback), a load
