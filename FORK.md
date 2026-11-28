@@ -54,7 +54,7 @@ whoever resolves a tag merge knows what to keep.
   `ios/HEXMobileTests/Fork/ForkThreeLanguageEnglishWordsTests.swift`, `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`,
   and `ios/HEXMobileTests/Fork/qa-three-language-english.json`: three-language dictation.
 - `ios/HEXShared/Fork/ForkSenseVoice*.swift`, `ios/HEXKeyboard/Fork/ForkKeyboardSenseVoice.swift`,
-  `ios/HEXMobile/Fork/ForkSenseVoiceSettingsCard.swift`, and `ios/HEXMobileTests/Fork/ForkSenseVoice*Tests.swift`:
+  `ios/HEXMobile/Fork/ForkSenseVoice*.swift`, and `ios/HEXMobileTests/Fork/ForkSenseVoice*Tests.swift`:
   SenseVoice（中文）.
 
 ## Dropline private API
@@ -341,6 +341,14 @@ English apart itself, so three-language dictation's readings don't run unless it
   a load that failed. Where Parakeet takes the keyboard: "The keyboard uses Hex's speech model for this
   language instead of SenseVoice." Before the keyboard has measured its limit: "Downloaded. The keyboard
   gets it ready the next time it opens."
+- Recent dictations (`ForkSenseVoiceRecentDictations`): under that line, the newest 10 `transcribed` and
+  `fallback` records in the log (below), newest first. Each row has its time (HH:mm, with the date before
+  today), App or Keyboard (the process that read it, so Keep mic warm's keyboard dictations show as App),
+  and SenseVoice, or Apple with the fallback's reason: Not enough memory, Model loading, Model not loaded,
+  Load failed, Recording too long, Heard as English, Too few words, No words heard, or Error. Never what
+  was said. Other records (`skipped`, `live`, `loaded`, `released`, `keyboard`, downloads) aren't listed.
+  The log is read as the card appears and as Hex returns to the foreground, at most 64 KB of it; a bigger
+  or unreadable log shows "No dictations yet", as an empty one does, and the next dictation writes it anew.
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled
   stretch is read; a tail of 8 s settles at a pause, and one of 13 s at its quietest point anyway, so a
   round's cost doesn't grow with the recording. A round due while the last one reads is skipped, so
