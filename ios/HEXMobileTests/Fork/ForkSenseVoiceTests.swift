@@ -205,9 +205,29 @@ final class ForkSenseVoiceTests: XCTestCase {
     }
 
     func testAReadNeedsRoomForItsLargestPieceAndTheRecording() {
-        XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 0))
-        XCTAssertFalse(ForkSenseVoice.fits(audio: 60, available: 40 * 1_048_576))
-        XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 64 * 1_048_576))
+        XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 0, loaded: true))
+        XCTAssertFalse(ForkSenseVoice.fits(audio: 60, available: 40 * 1_048_576, loaded: true))
+        XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 64 * 1_048_576, loaded: true))
+    }
+
+    /// A keyboard of 177 MB (an iPhone 17 Pro's) at 50 MB has 127 MB free: SenseVoice's 60 MB and
+    /// a recording's 24 MB still leave the 32 MB its next dictation needs to start. At 80 MB (a
+    /// keyboard that has dictated a while, or holds Parakeet) it doesn't load.
+    func testSenseVoiceLoadsOnlyWhereTheKeyboardKeepsRoomForItsNextDictation() {
+        let megabyte = 1_048_576
+        XCTAssertTrue(ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: 127 * megabyte, loaded: false))
+        XCTAssertFalse(ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: 97 * megabyte, loaded: false))
+        XCTAssertTrue(ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: 0, loaded: false))
+        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 97 * megabyte, model: .notLoaded), "memory")
+        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 127 * megabyte, model: .notLoaded), "loading")
+        XCTAssertNil(ForkSenseVoice.fallbackReason(audio: 5, available: 64 * megabyte, model: .loaded))
+    }
+
+    func testAShortKeyboardLetsTheEngineGoAfterARead() {
+        let megabyte = 1_048_576
+        XCTAssertTrue(ForkSenseVoice.releases(available: 40 * megabyte))
+        XCTAssertFalse(ForkSenseVoice.releases(available: 64 * megabyte))
+        XCTAssertFalse(ForkSenseVoice.releases(available: 0), "no limit, as in the simulator and on a Mac")
     }
 
     func testADictationGoesToApplesPathUntilTheModelHasLoaded() {

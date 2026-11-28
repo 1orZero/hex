@@ -48,28 +48,50 @@ nonisolated enum ForkSenseVoice {
         return nil
     }
 
-    /// Whether reading `audio` seconds fits in `available` bytes (0: no limit, as in the
-    /// simulator): the samples, the largest piece's padded encoder input, and its fp16 logits,
-    /// 2 bytes for each of the 25,055 tokens in every frame, plus a margin.
-    static func fits(audio: TimeInterval, available: Int) -> Bool {
+    private static let megabyte = 1_048_576
+    /// SenseVoice's share of a process's footprint while it's loaded, measured on a Mac: 28 MB
+    /// from the first load, which Core ML keeps even after the engine goes, and 20 MB of logits
+    /// for the 128- and 256-frame buckets a dictation reads into (`ForkSenseVoiceEngine`); 48–59 MB
+    /// in all after 2 to 120 reads of 1–15 s. The Neural Engine's copy of the model (537 MB) is
+    /// outside the footprint iOS limits, as Parakeet's is (`KeyboardParakeetBudget`).
+    static let residentFootprint = 60 * megabyte
+    /// Left free beside SenseVoice for the keyboard's next dictation to start
+    /// (`KeyboardLocalDictation.startHeadroomNeeded`).
+    static let keepFree = 32 * megabyte
+    /// What a recording adds while it runs (its capture, recording screen, and live words), with
+    /// margin, kept too when SenseVoice loads as one starts.
+    static let recordingRise = 24 * megabyte
+
+    /// Whether SenseVoice has room to read `audio` seconds in a process with `available` bytes
+    /// left (0: no limit, as in the simulator) and still leave `keepFree`: the samples, the
+    /// largest piece's padded encoder input, and either its fp16 logits (2 bytes for each of the
+    /// 25,055 tokens in every frame) when the model is `loaded`, or its whole resident footprint
+    /// and a recording's rise when it isn't.
+    static func fits(audio: TimeInterval, available: Int, loaded: Bool) -> Bool {
         guard available > 0 else { return true }
         let piece = min(audio, ForkSenseVoiceSegments.longestPiece)
         let bucket = SenseVoiceConfig.pickBucket(forFrames: Int((piece / 0.06).rounded(.up)))
         let logits = (bucket + SenseVoiceConfig.numQueryTokens) * ForkSenseVoiceEngine.vocabularySize * 2
         let input = bucket * SenseVoiceConfig.featureDim * 4 * 2 + Int(audio * Double(ForkSenseVoiceEngine.sampleRate)) * 4 * 2
-        return available >= logits + input + 24 * 1_048_576
+        return available >= input + (loaded ? logits : residentFootprint + recordingRise) + keepFree
+    }
+
+    /// Whether a process should let the engine go after a read: one with less than its next
+    /// dictation's start and recording need left (`keepFree`, `recordingRise`), as a keyboard
+    /// whose footprint grew. Not where iOS sets no limit (0).
+    static func releases(available: Int) -> Bool {
+        available > 0 && available < keepFree + recordingRise
     }
 
     /// Why a dictation SenseVoice would read goes to the caller's engine, or nil when SenseVoice
-    /// reads it: too long, short of memory, or a model that hasn't loaded in this process yet (a
-    /// dictation never waits for it) or failed to.
+    /// reads it: too long, a model that failed to load in this process, no room (`fits`), or a
+    /// model that hasn't loaded yet (a dictation never waits for it).
     static func fallbackReason(audio: TimeInterval, available: Int, model: ForkSenseVoiceLoader.State) -> String? {
         guard audio <= longestAudio else { return "too-long" }
-        guard fits(audio: audio, available: available) else { return "memory" }
         switch model {
-        case .loaded: return nil
-        case .notLoaded: return "loading"
         case .failed: return "load-failed"
+        case .loaded: return fits(audio: audio, available: available, loaded: true) ? nil : "memory"
+        case .notLoaded: return fits(audio: audio, available: available, loaded: false) ? "loading" : "memory"
         }
     }
 
@@ -111,12 +133,14 @@ nonisolated enum ForkSenseVoice {
             if let reason = fallbackReason(audio: length, available: Int(os_proc_available_memory()), model: ForkSenseVoiceLoader.state) {
                 if reason == "loading" { ForkSenseVoiceLoader.load() }
                 note(Record(event: "fallback", detail: reason, audio: length, memory: peak.megabytes))
+                if reason == "memory" { await releaseIfShort() }
                 return nil
             }
             let samples = try AudioConverter(sampleRate: Double(ForkSenseVoiceEngine.sampleRate)).resampleAudioFile(url)
             let engine = try await ForkSenseVoiceLoader.shared.engine()
             let reading = try await engine.readWhole(samples, dictationLanguage: dictationLanguage)
             let seconds = (ContinuousClock.now - started) / .seconds(1)
+            await releaseIfShort()
             if let reason = textReason(reading.text, language: reading.language, audio: length) {
                 note(Record(event: "fallback", detail: reason, language: reading.language, audio: length, seconds: seconds, memory: peak.megabytes))
                 return nil
@@ -126,8 +150,18 @@ nonisolated enum ForkSenseVoice {
         } catch {
             let ns = error as NSError
             note(Record(event: "fallback", detail: "error \(ns.domain) \(ns.code)", audio: audio, memory: peak.megabytes))
+            await releaseIfShort()
             return nil
         }
+    }
+
+    /// Lets the engine go where the process is short of room for its next dictation (`releases`),
+    /// after a read or a dictation it had no room for, which gives back its logits; a later
+    /// dictation loads it again if there's room by then.
+    private static func releaseIfShort() async {
+        let available = Int(os_proc_available_memory())
+        guard releases(available: available), await ForkSenseVoiceLoader.shared.release() else { return }
+        note(Record(event: "released", detail: "available \(available / megabyte) MB"))
     }
 
     /// Starts loading the model as a dictation starts or the download finishes, when SenseVoice
@@ -137,7 +171,7 @@ nonisolated enum ForkSenseVoice {
     static func prewarm() {
         guard isEnabled, !ForkDroplineSettings().isSelected,
               skipReason(enabled: true, installed: isInstalled, language: dictationLanguage) == nil,
-              fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory())) else { return }
+              fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory()), loaded: ForkSenseVoiceLoader.state == .loaded) else { return }
         ForkSenseVoiceLoader.load()
     }
 
@@ -152,7 +186,7 @@ nonisolated enum ForkSenseVoice {
     /// `Library/fork-sensevoice.json` to read off the iPhone later. Never the transcript.
     struct Record: Codable, Equatable, Sendable {
         /// `transcribed`, `fallback`, `skipped`, `live` (one keyboard dictation's live words),
-        /// `loaded` or `load-failed` (this process's model load), `downloaded`, or `download-failed`.
+        /// `loaded`, `load-failed`, or `released` (this process's model), `downloaded`, or `download-failed`.
         var event: String
         /// The engine, why the dictation fell back or skipped SenseVoice, `loading` for live words
         /// left to the keyboard's own while the model loads, or what the load or download did.
@@ -246,6 +280,8 @@ actor ForkSenseVoiceLoader {
     private var loaded: ForkSenseVoiceEngine?
     private var loading: Task<ForkSenseVoiceEngine, any Error>?
     private var failed: (any Error)?
+    /// A release asked for while a load was still running: the load's engine isn't kept.
+    private var releasesOnLoad = false
 
     /// This process's load, read without waiting for the loader.
     nonisolated static var state: State { current.withLock { $0 } }
@@ -254,6 +290,20 @@ actor ForkSenseVoiceLoader {
     /// Starts loading in the background unless the model is loaded, loading, or failed to load.
     nonisolated static func load() {
         Task.detached(priority: .userInitiated) { _ = try? await shared.engine() }
+    }
+
+    /// Lets the loaded engine go, its logits with it (Core ML keeps about 28 MB of the first
+    /// load), so the next use loads it again; one still loading isn't kept when it finishes.
+    /// False when none was loaded or loading.
+    func release() -> Bool {
+        if loaded != nil {
+            loaded = nil
+            Self.current.withLock { $0 = .notLoaded }
+            return true
+        }
+        guard loading != nil else { return false }
+        releasesOnLoad = true
+        return true
     }
 
     /// The engine, loading it first if needed. The load is logged once, `loaded` or
@@ -276,8 +326,13 @@ actor ForkSenseVoiceLoader {
         loading = task
         do {
             let engine = try await task.value
-            loaded = engine
+            guard loading == task else { return engine }
             loading = nil
+            if releasesOnLoad {
+                releasesOnLoad = false
+                return engine
+            }
+            loaded = engine
             Self.current.withLock { $0 = .loaded }
             return engine
         } catch {
