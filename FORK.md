@@ -290,17 +290,20 @@ English apart itself, so three-language dictation's readings don't run unless it
   as without the lab.
 - Final text: the whole recording is read again once it stops, in pieces of at most 15 s cut at the quietest
   300 ms (`ForkSenseVoiceSegments.pieces`). Pieces SenseVoice heard in another language than most of the
-  audio are read again in that one. Recordings over 120 s (checked before decoding), a process short of
-  memory (`ForkSenseVoice.fits`), a model not loaded in this process yet, a load or read error, no text
-  (text without a letter or digit counts as none), a recording SenseVoice hears as English (short Cantonese
-  with English words often reads as English gibberish, and three-language dictation writes English as it
-  does without the lab), or under one letter or digit a second in a recording of 3 s or more
-  (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to three-language dictation, then upstream's
-  paths, on the same recording. A dictation never waits for the model: it starts loading as a recording
-  starts and once the download finishes, unless Dropline is selected, and the first load of a new build
-  compiles the encoder for the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom
-  vocabulary doesn't steer SenseVoice (it takes no hints); Word replacements, learned fixes, and vocabulary
-  spellings still apply afterwards, as the Labs card says.
+  audio are read again in that one. Recordings over 120 s (checked before decoding), a process without room
+  beside what a keyboard needs next (`ForkSenseVoice.fits`: unless the model is loaded, its 60 MB resident
+  footprint and a recording's 24 MB; the read; and 32 MB left for the next dictation to start), a model not
+  loaded in this process yet, a load or read error, no text (text without a letter or digit counts as none),
+  a recording SenseVoice hears as English (short Cantonese with English words often reads as English
+  gibberish, and three-language dictation writes English as it does without the lab), or under one letter or
+  digit a second in a recording of 3 s or more (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to
+  three-language dictation, then upstream's paths, on the same recording. A process left with less than 56
+  MB after a read lets the engine go (`released`), which gives back its 20 MB of logits; Core ML keeps about
+  28 MB of the first load either way. A dictation never waits for the model: it starts loading as a
+  recording starts and once the download finishes, unless Dropline is selected, and the first load of a new
+  build compiles the encoder for the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads.
+  Custom vocabulary doesn't steer SenseVoice (it takes no hints); Word replacements, learned fixes, and
+  vocabulary spellings still apply afterwards, as the Labs card says.
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled
   stretch is read; a tail of 8 s settles at a pause, and one of 13 s at its quietest point anyway, so a
   round's cost doesn't grow with the recording. A round due while the last one reads is skipped, so
@@ -325,9 +328,9 @@ English apart itself, so three-language dictation's readings don't run unless it
 - Log: `anomaly.hex.mobile` category `fork-sensevoice`, and the newest 50 records in the App Group's
   `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `loading`, `load-failed`,
   `empty`, `english`, `sparse`, `error …`), `skipped`, `live` (rounds, skipped rounds, the longest round, or
-  `loading`), `loaded` and `load-failed` (the load's seconds), `downloaded`, and `download-failed`, with the
-  process and, where they apply, the detected language, audio and wall seconds, and peak footprint. Never
-  what was said.
+  `loading`), `loaded` and `load-failed` (the load's seconds), `released` (what was left), `downloaded`, and
+  `download-failed`, with the process and, where they apply, the detected language, audio and wall seconds,
+  and peak footprint. Never what was said.
 - Unverified on an iPhone: per-round time, the Neural Engine path, the keyboard's memory, and the first
   load's time were measured on a Mac and in the simulator only (DER-187).
 
