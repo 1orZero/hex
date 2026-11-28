@@ -133,6 +133,7 @@ nonisolated enum ForkSenseVoice {
             if let reason = fallbackReason(audio: length, available: Int(os_proc_available_memory()), model: ForkSenseVoiceLoader.state) {
                 if reason == "loading" { ForkSenseVoiceLoader.load() }
                 note(Record(event: "fallback", detail: reason, audio: length, memory: peak.megabytes))
+                if reason == "memory" { await releaseIfShort() }
                 return nil
             }
             let samples = try AudioConverter(sampleRate: Double(ForkSenseVoiceEngine.sampleRate)).resampleAudioFile(url)
@@ -155,7 +156,8 @@ nonisolated enum ForkSenseVoice {
     }
 
     /// Lets the engine go where the process is short of room for its next dictation (`releases`),
-    /// which gives back its logits; a later dictation loads it again if there's room by then.
+    /// after a read or a dictation it had no room for, which gives back its logits; a later
+    /// dictation loads it again if there's room by then.
     private static func releaseIfShort() async {
         let available = Int(os_proc_available_memory())
         guard releases(available: available), await ForkSenseVoiceLoader.shared.release() else { return }
