@@ -4,7 +4,8 @@ import SwiftUI
 /// (`ForkSenseVoice.Record`'s `transcribed` and `fallback`), newest first, each with its time, the
 /// app or the keyboard, and SenseVoice or Apple with why. Read as the card appears and as Hex
 /// comes back to the foreground. A log over `byteLimit` or one that doesn't decode reads as none;
-/// the next dictation writes it anew (`Record.append`).
+/// the next dictation keeps the newest 50 records of a bigger log and starts an undecodable one over
+/// (`Record.append`).
 struct ForkSenseVoiceRecentDictations: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var rows: [Row] = []
