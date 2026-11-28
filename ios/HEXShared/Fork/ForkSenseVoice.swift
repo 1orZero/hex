@@ -280,6 +280,8 @@ actor ForkSenseVoiceLoader {
     private var loaded: ForkSenseVoiceEngine?
     private var loading: Task<ForkSenseVoiceEngine, any Error>?
     private var failed: (any Error)?
+    /// A release asked for while a load was still running: the load's engine isn't kept.
+    private var releasesOnLoad = false
 
     /// This process's load, read without waiting for the loader.
     nonisolated static var state: State { current.withLock { $0 } }
@@ -291,11 +293,16 @@ actor ForkSenseVoiceLoader {
     }
 
     /// Lets the loaded engine go, its logits with it (Core ML keeps about 28 MB of the first
-    /// load), so the next use loads it again. False when none was loaded.
+    /// load), so the next use loads it again; one still loading isn't kept when it finishes.
+    /// False when none was loaded or loading.
     func release() -> Bool {
-        guard loaded != nil else { return false }
-        loaded = nil
-        Self.current.withLock { $0 = .notLoaded }
+        if loaded != nil {
+            loaded = nil
+            Self.current.withLock { $0 = .notLoaded }
+            return true
+        }
+        guard loading != nil else { return false }
+        releasesOnLoad = true
         return true
     }
 
@@ -319,8 +326,13 @@ actor ForkSenseVoiceLoader {
         loading = task
         do {
             let engine = try await task.value
-            loaded = engine
+            guard loading == task else { return engine }
             loading = nil
+            if releasesOnLoad {
+                releasesOnLoad = false
+                return engine
+            }
+            loaded = engine
             Self.current.withLock { $0 = .loaded }
             return engine
         } catch {

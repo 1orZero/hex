@@ -298,12 +298,13 @@ English apart itself, so three-language dictation's readings don't run unless it
   gibberish, and three-language dictation writes English as it does without the lab), or under one letter or
   digit a second in a recording of 3 s or more (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to
   three-language dictation, then upstream's paths, on the same recording. A process left with less than 56
-  MB after a read lets the engine go (`released`), which gives back its 20 MB of logits; Core ML keeps about
-  28 MB of the first load either way. A dictation never waits for the model: it starts loading as a
-  recording starts and once the download finishes, unless Dropline is selected, and the first load of a new
-  build compiles the encoder for the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads.
-  Custom vocabulary doesn't steer SenseVoice (it takes no hints); Word replacements, learned fixes, and
-  vocabulary spellings still apply afterwards, as the Labs card says.
+  MB after a read, or after a dictation it had no room to read, lets the engine go (`released`; one still
+  loading isn't kept), which gives back its 20 MB of logits; Core ML keeps about 28 MB of the first load
+  either way. A dictation never waits for the model: it starts loading as a recording starts and once the
+  download finishes, unless Dropline is selected, and the first load of a new build compiles the encoder for
+  the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom vocabulary doesn't steer
+  SenseVoice (it takes no hints); Word replacements, learned fixes, and vocabulary spellings still apply
+  afterwards, as the Labs card says.
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled
   stretch is read; a tail of 8 s settles at a pause, and one of 13 s at its quietest point anyway, so a
   round's cost doesn't grow with the recording. A round due while the last one reads is skipped, so

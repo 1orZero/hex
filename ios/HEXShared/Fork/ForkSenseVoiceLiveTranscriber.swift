@@ -16,7 +16,7 @@ enum ForkSenseVoiceLiveWords {
         guard ForkSenseVoice.isEnabled,
               ForkSenseVoice.skipReason(enabled: true, installed: ForkSenseVoice.isInstalled, language: language) == nil,
               ForkSenseVoiceLoader.state != .failed,
-              ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory()), loaded: true),
+              ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory()), loaded: ForkSenseVoiceLoader.state == .loaded),
               MLModel.availableComputeDevices.contains(where: { device in
                   if case .neuralEngine = device { return true }
                   return false
