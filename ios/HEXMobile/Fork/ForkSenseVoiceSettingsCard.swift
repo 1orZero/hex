@@ -2,7 +2,8 @@ import FluidAudio
 import SwiftUI
 
 /// Labs › SenseVoice（中文） (fork), after the Dictation card: the switch, the model's download
-/// with its progress, started by turning the switch on, and Remove model once it's on the iPhone.
+/// with its progress, started by turning the switch on, and once it's on the iPhone, whether the
+/// keyboard runs it (`ForkSenseVoiceKeyboardLine`) and Remove model.
 struct ForkSenseVoiceSettingsCard: View {
     @State private var download = ForkSenseVoiceDownload.shared
     @State private var isEnabled = ForkSenseVoice.isEnabled
@@ -22,6 +23,8 @@ struct ForkSenseVoiceSettingsCard: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
             } else if isInstalled {
+                if isEnabled { ForkSenseVoiceKeyboardLine() }
+
                 SettingsDivider()
 
                 Button(role: .destructive) {
@@ -64,6 +67,84 @@ struct ForkSenseVoiceSettingsCard: View {
     private func refresh() {
         isEnabled = ForkSenseVoice.isEnabled
         isInstalled = ForkSenseVoice.isInstalled
+    }
+}
+
+/// Under the switch once the model is on the iPhone: whether the keyboard runs SenseVoice, the limit
+/// the keyboard measured, and the limit SenseVoice needs (`ForkSenseVoiceBudget.requiredLimit`), in
+/// the words Settings › Dictation uses for Parakeet in the keyboard (`KeyboardParakeetStatus`). The
+/// keyboard's word, written as it opens (`ForkSenseVoiceKeyboardStatus`), is read every 2 s, as there.
+struct ForkSenseVoiceKeyboardLine: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 2)) { context in
+            let status = ForkSenseVoiceKeyboardStatus()
+            let lines = Self.lines(
+                parakeetTakes: KeyboardParakeetPlan.current().modelChoice != nil,
+                keyboardLimit: KeyboardParakeetSettings().keyboardLimit,
+                keyboardState: status.state,
+                reason: status.reason,
+                free: status.free,
+                now: context.date
+            )
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(lines, id: \.self) { Text(verbatim: $0) }
+            }
+            .font(.system(size: 13))
+            .foregroundStyle(HexTheme.textBase)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("fork-sensevoice-keyboard-status")
+        }
+    }
+
+    /// Parakeet's plan taking the keyboard comes first, then a limit under SenseVoice's, then the
+    /// limit and what the keyboard last said. Upstream's lines keep their words (and translations);
+    /// only the two without a counterpart there are new.
+    static func lines(
+        parakeetTakes: Bool,
+        keyboardLimit: Int?,
+        keyboardState: (state: KeyboardParakeetSettings.KeyboardState, at: Date)?,
+        reason: KeyboardParakeetSettings.UnavailableReason?,
+        free: Int?,
+        now: Date
+    ) -> [String] {
+        if parakeetTakes { return ["The keyboard uses Hex's speech model for this language instead of SenseVoice."] }
+        let state = stateLine(keyboardState, reason: reason, free: free, now: now)
+        guard let keyboardLimit, KeyboardParakeetStatus.megabytes(keyboardLimit) > 0 else { return [state] }
+        let has = KeyboardParakeetStatus.megabytes(keyboardLimit)
+        let needs = KeyboardParakeetStatus.megabytes(ForkSenseVoiceBudget.requiredLimit)
+        guard keyboardLimit >= ForkSenseVoiceBudget.requiredLimit else {
+            return [String(localized: "This iPhone's keyboard has \(has) MB; the model needs \(needs) MB, so it uses Apple's speech recognition.")]
+        }
+        return ["This iPhone's keyboard has \(has) MB; the model needs \(needs) MB.", state]
+    }
+
+    /// `KeyboardParakeetStatus.keyboardLine` with SenseVoice's load headroom.
+    private static func stateLine(
+        _ keyboardState: (state: KeyboardParakeetSettings.KeyboardState, at: Date)?,
+        reason: KeyboardParakeetSettings.UnavailableReason?,
+        free: Int?,
+        now: Date
+    ) -> String {
+        switch keyboardState {
+        case (.preparing, let at)? where now.timeIntervalSince(at) < 180:
+            return String(localized: "Getting ready in the keyboard. After a download or an update, this takes a little longer.")
+        case (.ready, _)?:
+            return String(localized: "Ready in the keyboard")
+        case (.unavailable, _)? where reason == .shortOfMemory:
+            let needs = ForkSenseVoiceBudget.loadHeadroom
+            guard let free, free < needs, KeyboardParakeetStatus.megabytes(free) > 0 else {
+                return KeyboardParakeetStatus.unavailableLine(.shortOfMemory)
+            }
+            return String(localized: "The keyboard had \(KeyboardParakeetStatus.megabytes(free)) MB free when it last opened; loading the model needs \(KeyboardParakeetStatus.megabytes(needs)) MB, so it used Apple's speech recognition. It tries again the next time it opens.")
+        case (.unavailable, _)? where reason != nil:
+            return KeyboardParakeetStatus.unavailableLine(reason)
+        default:
+            return KeyboardParakeetStatus.unavailableLine(nil)
+        }
     }
 }
 

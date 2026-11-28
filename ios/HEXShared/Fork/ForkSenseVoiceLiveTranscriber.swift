@@ -1,32 +1,34 @@
-import CoreML
 import Foundation
 import os
 
 /// Where the keyboard's live words come from while SenseVoice writes the dictation (the fork's
 /// hook in `KeyboardLiveDictation.resolve`): SenseVoice itself, so no Apple recogniser runs
 /// while recording. Nil where SenseVoice won't write this dictation (`ForkSenseVoice.skipReason`),
-/// it failed to load earlier in this keyboard, the keyboard lacks room for a round, there's no
-/// Neural Engine (a round took up to 1 s on a Mac's CPU, as in the simulator, against 0.1 s on its
-/// Neural Engine), the model hasn't loaded in this keyboard yet (logged as `live` `loading`; it
-/// loads as the dictation starts), or the capture's rate can't be converted, and the keyboard's own
-/// live words run as before.
+/// it failed to load earlier in this keyboard, there's no Neural Engine (a round took up to 1 s on
+/// a Mac's CPU, as in the simulator, against 0.1 s on its Neural Engine), the model isn't loaded in
+/// this keyboard (logged as `live` `not-loaded`; the keyboard loads it as it opens,
+/// `ForkKeyboardSenseVoice`), the keyboard lacks room for a 15 s read
+/// (`ForkSenseVoiceBudget.allowsRead`), or the capture's rate can't be converted, and the
+/// keyboard's own live words run as before. A model a memory warning lets go mid-dictation ends
+/// its live words rather than loading again.
 @MainActor
 enum ForkSenseVoiceLiveWords {
     static func source(language: String?, sampleRate: Double) -> ForkSenseVoiceLiveTranscriber? {
         guard ForkSenseVoice.isEnabled,
               ForkSenseVoice.skipReason(enabled: true, installed: ForkSenseVoice.isInstalled, language: language) == nil,
               ForkSenseVoiceLoader.state != .failed,
-              ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory()), loaded: ForkSenseVoiceLoader.state == .loaded),
-              MLModel.availableComputeDevices.contains(where: { device in
-                  if case .neuralEngine = device { return true }
-                  return false
-              }) else { return nil }
+              ForkSenseVoice.hasNeuralEngine else { return nil }
         guard ForkSenseVoiceLoader.state == .loaded else {
-            Task.detached(priority: .utility) { ForkSenseVoice.note(ForkSenseVoice.Record(event: "live", detail: "loading")) }
+            Task.detached(priority: .utility) { ForkSenseVoice.note(ForkSenseVoice.Record(event: "live", detail: "not-loaded")) }
             return nil
         }
+        guard ForkSenseVoiceBudget.allowsRead(
+            footprint: ForkSenseVoiceBudget.footprint(),
+            available: Int(os_proc_available_memory()),
+            audioSeconds: ForkSenseVoiceSegments.longestPiece
+        ) else { return nil }
         let source = ForkSenseVoiceLiveTranscriber(sampleRate: sampleRate, dictationLanguage: language) { round, tail in
-            let engine = try await ForkSenseVoiceLoader.shared.engine()
+            guard let engine = await ForkSenseVoiceLoader.shared.current() else { throw ForkSenseVoiceLoader.NotLoaded() }
             return try await ForkSenseVoiceLive.read(round, tail: tail, engine: engine)
         }
         return source.canRead ? source : nil

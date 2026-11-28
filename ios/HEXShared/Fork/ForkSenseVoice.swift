@@ -1,4 +1,5 @@
 import AVFAudio
+import CoreML
 import Darwin
 import FluidAudio
 import Foundation
@@ -11,7 +12,9 @@ import OSLog
 /// (`AppleSpeechTranscriber`) and in the keyboard (`KeyboardSpeech`). It tells Mandarin,
 /// Cantonese, and English apart itself, so Apple's three readings don't run. When it can't
 /// (too long, short of memory, the model not loaded yet, a load or read error, too little text)
-/// or hears English, Apple's own path transcribes the same recording. The keyboard's live words come from SenseVoice too
+/// or hears English, Apple's own path transcribes the same recording. The app loads the model as a
+/// dictation starts (`prewarm`); the keyboard loads it as it opens, as it loads Parakeet
+/// (`ForkKeyboardSenseVoice`). The keyboard's live words come from SenseVoice too
 /// (`ForkSenseVoiceLiveWords`).
 nonisolated enum ForkSenseVoice {
     static let enabledKey = "fork.senseVoice.enabled"
@@ -48,50 +51,31 @@ nonisolated enum ForkSenseVoice {
         return nil
     }
 
-    private static let megabyte = 1_048_576
-    /// SenseVoice's share of a process's footprint while it's loaded, measured on a Mac: 28 MB
-    /// from the first load, which Core ML keeps even after the engine goes, and 20 MB of logits
-    /// for the 128- and 256-frame buckets a dictation reads into (`ForkSenseVoiceEngine`); 48–59 MB
-    /// in all after 2 to 120 reads of 1–15 s. The Neural Engine's copy of the model (537 MB) is
-    /// outside the footprint iOS limits, as Parakeet's is (`KeyboardParakeetBudget`).
-    static let residentFootprint = 60 * megabyte
-    /// Left free beside SenseVoice for the keyboard's next dictation to start
-    /// (`KeyboardLocalDictation.startHeadroomNeeded`).
-    static let keepFree = 32 * megabyte
-    /// What a recording adds while it runs (its capture, recording screen, and live words), with
-    /// margin, kept too when SenseVoice loads as one starts.
-    static let recordingRise = 24 * megabyte
+    /// The keyboard's process, which loads the model only as it opens (`ForkKeyboardSenseVoice`).
+    static var isKeyboard: Bool { Bundle.main.bundleURL.pathExtension == "appex" }
 
-    /// Whether SenseVoice has room to read `audio` seconds in a process with `available` bytes
-    /// left (0: no limit, as in the simulator) and still leave `keepFree`: the samples, the
-    /// largest piece's padded encoder input, and either its fp16 logits (2 bytes for each of the
-    /// 25,055 tokens in every frame) when the model is `loaded`, or its whole resident footprint
-    /// and a recording's rise when it isn't.
-    static func fits(audio: TimeInterval, available: Int, loaded: Bool) -> Bool {
-        guard available > 0 else { return true }
-        let piece = min(audio, ForkSenseVoiceSegments.longestPiece)
-        let bucket = SenseVoiceConfig.pickBucket(forFrames: Int((piece / 0.06).rounded(.up)))
-        let logits = (bucket + SenseVoiceConfig.numQueryTokens) * ForkSenseVoiceEngine.vocabularySize * 2
-        let input = bucket * SenseVoiceConfig.featureDim * 4 * 2 + Int(audio * Double(ForkSenseVoiceEngine.sampleRate)) * 4 * 2
-        return available >= input + (loaded ? logits : residentFootprint + recordingRise) + keepFree
-    }
-
-    /// Whether a process should let the engine go after a read: one with less than its next
-    /// dictation's start and recording need left (`keepFree`, `recordingRise`), as a keyboard
-    /// whose footprint grew. Not where iOS sets no limit (0).
-    static func releases(available: Int) -> Bool {
-        available > 0 && available < keepFree + recordingRise
+    static var hasNeuralEngine: Bool {
+        MLModel.availableComputeDevices.contains { device in
+            if case .neuralEngine = device { return true }
+            return false
+        }
     }
 
     /// Why a dictation SenseVoice would read goes to the caller's engine, or nil when SenseVoice
-    /// reads it: too long, a model that failed to load in this process, no room (`fits`), or a
-    /// model that hasn't loaded yet (a dictation never waits for it).
-    static func fallbackReason(audio: TimeInterval, available: Int, model: ForkSenseVoiceLoader.State) -> String? {
+    /// reads it: too long, a model that failed to load in this process, no room
+    /// (`ForkSenseVoiceBudget.allowsRead`), or a model that hasn't loaded yet: a dictation never
+    /// waits for it. `loadsHere`: the process starts loading it then (`loading`, the app, where
+    /// `ForkSenseVoiceBudget.allowsLoad`); the keyboard loads only as it opens (`not-loaded`).
+    static func fallbackReason(audio: TimeInterval, footprint: Int, available: Int, model: ForkSenseVoiceLoader.State, loadsHere: Bool) -> String? {
         guard audio <= longestAudio else { return "too-long" }
         switch model {
-        case .failed: return "load-failed"
-        case .loaded: return fits(audio: audio, available: available, loaded: true) ? nil : "memory"
-        case .notLoaded: return fits(audio: audio, available: available, loaded: false) ? "loading" : "memory"
+        case .failed:
+            return "load-failed"
+        case .loaded:
+            return ForkSenseVoiceBudget.allowsRead(footprint: footprint, available: available, audioSeconds: audio) ? nil : "memory"
+        case .notLoaded:
+            guard loadsHere else { return "not-loaded" }
+            return ForkSenseVoiceBudget.allowsLoad(footprint: footprint, available: available) ? "loading" : "memory"
         }
     }
 
@@ -130,17 +114,26 @@ nonisolated enum ForkSenseVoice {
             let file = try AVAudioFile(forReading: url)
             let length = Double(file.length) / file.fileFormat.sampleRate
             audio = length
-            if let reason = fallbackReason(audio: length, available: Int(os_proc_available_memory()), model: ForkSenseVoiceLoader.state) {
+            let reason = fallbackReason(
+                audio: length,
+                footprint: ForkSenseVoiceBudget.footprint(),
+                available: Int(os_proc_available_memory()),
+                model: ForkSenseVoiceLoader.state,
+                loadsHere: !isKeyboard
+            )
+            if let reason {
                 if reason == "loading" { ForkSenseVoiceLoader.load() }
                 note(Record(event: "fallback", detail: reason, audio: length, memory: peak.megabytes))
-                if reason == "memory" { await releaseIfShort() }
+                return nil
+            }
+            // A memory warning may have let the keyboard's model go since; it isn't loaded again here.
+            guard let engine = await ForkSenseVoiceLoader.shared.current() else {
+                note(Record(event: "fallback", detail: "not-loaded", audio: length, memory: peak.megabytes))
                 return nil
             }
             let samples = try AudioConverter(sampleRate: Double(ForkSenseVoiceEngine.sampleRate)).resampleAudioFile(url)
-            let engine = try await ForkSenseVoiceLoader.shared.engine()
             let reading = try await engine.readWhole(samples, dictationLanguage: dictationLanguage)
             let seconds = (ContinuousClock.now - started) / .seconds(1)
-            await releaseIfShort()
             if let reason = textReason(reading.text, language: reading.language, audio: length) {
                 note(Record(event: "fallback", detail: reason, language: reading.language, audio: length, seconds: seconds, memory: peak.megabytes))
                 return nil
@@ -150,28 +143,18 @@ nonisolated enum ForkSenseVoice {
         } catch {
             let ns = error as NSError
             note(Record(event: "fallback", detail: "error \(ns.domain) \(ns.code)", audio: audio, memory: peak.megabytes))
-            await releaseIfShort()
             return nil
         }
     }
 
-    /// Lets the engine go where the process is short of room for its next dictation (`releases`),
-    /// after a read or a dictation it had no room for, which gives back its logits; a later
-    /// dictation loads it again if there's room by then.
-    private static func releaseIfShort() async {
-        let available = Int(os_proc_available_memory())
-        guard releases(available: available), await ForkSenseVoiceLoader.shared.release() else { return }
-        note(Record(event: "released", detail: "available \(available / megabyte) MB"))
-    }
-
-    /// Starts loading the model as a dictation starts or the download finishes, when SenseVoice
-    /// would read the dictation and the process has room for its longest piece. Not while Dropline
-    /// is selected: it writes the dictation first (as in `KeyboardParakeet.warmUp`), and a local
-    /// fallback starts the load itself (`transcribe`).
+    /// Starts loading the model in the app as a dictation starts or the download finishes, when
+    /// SenseVoice would read the dictation and the app has room (`ForkSenseVoiceBudget.allowsLoad`).
+    /// Not while Dropline is selected: it writes the dictation first (as in `KeyboardParakeet.warmUp`),
+    /// and a local fallback starts the load itself (`transcribe`).
     static func prewarm() {
         guard isEnabled, !ForkDroplineSettings().isSelected,
               skipReason(enabled: true, installed: isInstalled, language: dictationLanguage) == nil,
-              fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory()), loaded: ForkSenseVoiceLoader.state == .loaded) else { return }
+              ForkSenseVoiceBudget.allowsLoad(footprint: ForkSenseVoiceBudget.footprint(), available: Int(os_proc_available_memory())) else { return }
         ForkSenseVoiceLoader.load()
     }
 
@@ -186,10 +169,12 @@ nonisolated enum ForkSenseVoice {
     /// `Library/fork-sensevoice.json` to read off the iPhone later. Never the transcript.
     struct Record: Codable, Equatable, Sendable {
         /// `transcribed`, `fallback`, `skipped`, `live` (one keyboard dictation's live words),
-        /// `loaded`, `load-failed`, or `released` (this process's model), `downloaded`, or `download-failed`.
+        /// `loaded`, `load-failed`, or `released` (this process's model), `keyboard` (why the
+        /// keyboard didn't load it as it opened), `downloaded`, or `download-failed`.
         var event: String
-        /// The engine, why the dictation fell back or skipped SenseVoice, `loading` for live words
-        /// left to the keyboard's own while the model loads, or what the load or download did.
+        /// The engine, why the dictation fell back or skipped SenseVoice, `not-loaded` for live words
+        /// left to the keyboard's own while the model isn't loaded, why the keyboard didn't load or let
+        /// it go, or what the load or download did.
         var detail: String
         /// The language SenseVoice detected.
         var language: String?
@@ -201,7 +186,7 @@ nonisolated enum ForkSenseVoice {
         /// The process's highest footprint while SenseVoice ran, in MB.
         var memory: Double?
         var at = Date()
-        var process = Bundle.main.bundleURL.pathExtension == "appex" ? "keyboard" : "app"
+        var process = ForkSenseVoice.isKeyboard ? "keyboard" : "app"
 
         static let limit = 50
 
@@ -255,25 +240,21 @@ nonisolated enum ForkSenseVoice {
         func stop() { timer.cancel() }
 
         private func record() {
-            var info = task_vm_info_data_t()
-            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
-            let result = withUnsafeMutablePointer(to: &info) {
-                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-                }
-            }
-            guard result == KERN_SUCCESS else { return }
-            lock.withLock { peak = max(peak, Int(info.phys_footprint)) }
+            let footprint = ForkSenseVoiceBudget.footprint()
+            lock.withLock { peak = max(peak, footprint) }
         }
     }
 }
 
-/// Loads SenseVoice once per process (the app, or the keyboard), when a dictation starts or the
-/// download finishes. Dictations don't wait for it (`ForkSenseVoice.fallbackReason`): the first
-/// load of a new build compiles the encoder for the Neural Engine, 93–101 s on a Mac, against
-/// 0.1–0.2 s for later loads. A load that fails isn't tried again in that process.
+/// Loads SenseVoice once per process: the app's when a dictation starts or the download finishes,
+/// the keyboard's as it opens (`ForkKeyboardSenseVoice`). Dictations don't wait for it
+/// (`ForkSenseVoice.fallbackReason`): the first load of a new build compiles the encoder for the
+/// Neural Engine, 93–101 s on a Mac, against 0.1–0.2 s for later loads. A load that fails isn't
+/// tried again in that process.
 actor ForkSenseVoiceLoader {
     enum State: Sendable { case notLoaded, loaded, failed }
+    /// A read found no engine: a memory warning let the keyboard's go.
+    struct NotLoaded: Error {}
 
     static let shared = ForkSenseVoiceLoader()
 
@@ -292,9 +273,12 @@ actor ForkSenseVoiceLoader {
         Task.detached(priority: .userInitiated) { _ = try? await shared.engine() }
     }
 
+    /// The loaded engine, without loading it.
+    func current() -> ForkSenseVoiceEngine? { loaded }
+
     /// Lets the loaded engine go, its logits with it (Core ML keeps about 28 MB of the first
-    /// load), so the next use loads it again; one still loading isn't kept when it finishes.
-    /// False when none was loaded or loading.
+    /// load), so the next use loads it again; one still loading isn't kept when it finishes, and
+    /// a read under way keeps it until it ends. False when none was loaded or loading.
     func release() -> Bool {
         if loaded != nil {
             loaded = nil
