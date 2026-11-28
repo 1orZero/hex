@@ -48,7 +48,7 @@ final class ForkKeepMicWarmTests: XCTestCase {
         }
 
         let relaunched = makeController(KeepaliveAudio())
-        XCTAssertEqual(relaunched.warmDuration, .fifteenMinutes, "a relaunch's one-time review keeps a picked 15m")
+        XCTAssertEqual(relaunched.warmDuration, .fifteenMinutes, "the first launch used up the one-time review, so a relaunch keeps a picked 15m")
 
         controller.selectWarmDuration(.off)
         try await settle()
