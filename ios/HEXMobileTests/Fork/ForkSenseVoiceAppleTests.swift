@@ -21,12 +21,17 @@ final class ForkSenseVoiceAppleTests: XCTestCase {
         XCTAssertFalse(reads(.failed), "a failed load leaves every dictation to Apple")
     }
 
-    /// While SenseVoice's model is loaded in the keyboard, it writes the dictation, so its live words
-    /// are SenseVoice's or none; without it they are the keyboard's own, as Apple writes the dictation.
-    func testTheKeyboardsLiveWordsLeaveAppleOutOnlyWhileSenseVoiceIsLoaded() {
-        XCTAssertTrue(ForkSenseVoiceLiveWords.leavesAppleOut(applies: true, model: .loaded))
-        XCTAssertFalse(ForkSenseVoiceLiveWords.leavesAppleOut(applies: true, model: .notLoaded))
-        XCTAssertFalse(ForkSenseVoiceLiveWords.leavesAppleOut(applies: true, model: .failed))
-        XCTAssertFalse(ForkSenseVoiceLiveWords.leavesAppleOut(applies: false, model: .loaded), "lab off or another language")
+    /// While SenseVoice's model is loaded in the keyboard with room to read, it writes the dictation,
+    /// so its live words are SenseVoice's or none; otherwise Apple writes the dictation and the live
+    /// words are the keyboard's own.
+    func testTheKeyboardsLiveWordsLeaveAppleOutOnlyWhileSenseVoiceCanRead() {
+        func leaves(applies: Bool = true, _ model: ForkSenseVoiceLoader.State = .loaded, room: Bool = true) -> Bool {
+            ForkSenseVoiceLiveWords.leavesAppleOut(applies: applies, model: model, roomToRead: room)
+        }
+        XCTAssertTrue(leaves())
+        XCTAssertFalse(leaves(.notLoaded))
+        XCTAssertFalse(leaves(.failed))
+        XCTAssertFalse(leaves(applies: false), "lab off or another language")
+        XCTAssertFalse(leaves(room: false), "the dictation falls back as memory")
     }
 }

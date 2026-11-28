@@ -9,8 +9,9 @@ import os
 /// this keyboard (logged as `live` `not-loaded`; the keyboard loads it as it opens,
 /// `ForkKeyboardSenseVoice`), the keyboard lacks room for a 15 s read
 /// (`ForkSenseVoiceBudget.allowsRead`), or the capture's rate can't be converted. Without a
-/// loaded model the keyboard's own live words run as before; with one, none do (`take`). A model
-/// a memory warning lets go mid-dictation ends its live words rather than loading again.
+/// loaded model, the keyboard's own live words run as before; with one that can still read the
+/// dictation, `take` starts no others. When a memory warning lets the model go mid-dictation, its
+/// live words end and the model isn't loaded again.
 @MainActor
 enum ForkSenseVoiceLiveWords {
     static func source(language: String?, sampleRate: Double) -> ForkSenseVoiceLiveTranscriber? {
