@@ -131,9 +131,12 @@ nonisolated enum ForkSenseVoice {
     }
 
     /// Starts loading the model as a dictation starts or the download finishes, when SenseVoice
-    /// would read the dictation and the process has room for its longest piece.
+    /// would read the dictation and the process has room for its longest piece. Not while Dropline
+    /// is selected: it writes the dictation first (as in `KeyboardParakeet.warmUp`), and a local
+    /// fallback starts the load itself (`transcribe`).
     static func prewarm() {
-        guard isEnabled, skipReason(enabled: true, installed: isInstalled, language: dictationLanguage) == nil,
+        guard isEnabled, !ForkDroplineSettings().isSelected,
+              skipReason(enabled: true, installed: isInstalled, language: dictationLanguage) == nil,
               fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory())) else { return }
         ForkSenseVoiceLoader.load()
     }
