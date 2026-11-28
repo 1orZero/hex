@@ -64,6 +64,14 @@ final class ForkSenseVoiceTests: XCTestCase {
         XCTAssertEqual(ForkSenseVoiceSegments.pieces(count: 160_000, samples: tone(seconds: 10)), [0..<160_000])
     }
 
+    func testTheLastPieceIsNeverAFragment() throws {
+        let audio = tone(seconds: 16, silentAround: [15.5])
+        let pieces = ForkSenseVoiceSegments.pieces(count: audio.count, samples: audio)
+        XCTAssertEqual(pieces.count, 2)
+        let last = try XCTUnwrap(pieces.last)
+        XCTAssertGreaterThanOrEqual(Double(last.count) / 16_000, ForkSenseVoiceSegments.shortestPiece)
+    }
+
     func testALiveTailSettlesAtAPauseOnceLongEnoughAndIsCutAnywayPastForceAfter() throws {
         XCTAssertNil(ForkSenseVoiceSegments.liveCut(tone(seconds: 7, silentAround: [4])[...]))
         let cut = try XCTUnwrap(ForkSenseVoiceSegments.liveCut(tone(seconds: 9, silentAround: [5])[...]))
@@ -162,6 +170,9 @@ final class ForkSenseVoiceTests: XCTestCase {
         failing.enqueueFailure()
         feed(next, seconds: 2)
         await eventually("the failure") { failure != nil }
+        feed(next, seconds: 4)
+        await settle()
+        XCTAssertEqual(failing.calls, 1, "no round reads after a failure")
         next.stop()
     }
 

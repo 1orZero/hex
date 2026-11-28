@@ -5,22 +5,26 @@ import os
 /// Where the keyboard's live words come from while SenseVoice writes the dictation (the fork's
 /// hook in `KeyboardLiveDictation.resolve`): SenseVoice itself, so no Apple recogniser runs
 /// while recording. Nil where SenseVoice won't write this dictation (`ForkSenseVoice.skipReason`),
-/// it failed to load earlier in this keyboard, there's no Neural Engine (a round took up to 1 s on
-/// a Mac's CPU, as in the simulator, against 0.1 s on its Neural Engine), or the capture's rate
-/// can't be converted, and the keyboard's own live words run as before.
+/// it failed to load earlier in this keyboard, the keyboard lacks room for a round, there's no
+/// Neural Engine (a round took up to 1 s on a Mac's CPU, as in the simulator, against 0.1 s on its
+/// Neural Engine), or the capture's rate can't be converted, and the keyboard's own live words run
+/// as before.
 @MainActor
 enum ForkSenseVoiceLiveWords {
-    static func source(language: String?, sampleRate: Double) async -> ForkSenseVoiceLiveTranscriber? {
-        guard ForkSenseVoice.skipReason(enabled: ForkSenseVoice.isEnabled, installed: ForkSenseVoice.isInstalled, language: language) == nil,
+    static func source(language: String?, sampleRate: Double) -> ForkSenseVoiceLiveTranscriber? {
+        guard ForkSenseVoice.isEnabled,
+              ForkSenseVoice.skipReason(enabled: true, installed: ForkSenseVoice.isInstalled, language: language) == nil,
+              !ForkSenseVoiceLoader.hasFailed,
+              ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory())),
               MLModel.availableComputeDevices.contains(where: { device in
                   if case .neuralEngine = device { return true }
                   return false
-              }),
-              await !ForkSenseVoiceLoader.shared.hasFailed else { return nil }
-        return ForkSenseVoiceLiveTranscriber(sampleRate: sampleRate, dictationLanguage: language) { round, tail in
+              }) else { return nil }
+        let source = ForkSenseVoiceLiveTranscriber(sampleRate: sampleRate, dictationLanguage: language) { round, tail in
             let (engine, _) = try await ForkSenseVoiceLoader.shared.engine()
             return try await ForkSenseVoiceLive.read(round, tail: tail, engine: engine)
         }
+        return source.canRead ? source : nil
     }
 }
 
@@ -28,7 +32,7 @@ enum ForkSenseVoiceLiveWords {
 /// after its last settled stretch is read (`ForkSenseVoiceLive`), in the dictation's spelling.
 /// A round whose time comes while the last one is still reading is skipped, so SenseVoice reads
 /// one thing at a time. Past `ForkSenseVoice.longestAudio` no round starts and the last words
-/// stay; a load or read error ends the live words (`onFailure`). The inserted text is SenseVoice's
+/// stay; a load or read error ends the rounds and the live words (`onFailure`). The inserted text is SenseVoice's
 /// reading of the whole recording once it stops (`ForkSenseVoice.transcribe`).
 @MainActor
 final class ForkSenseVoiceLiveTranscriber: LiveTranscriptSource {
@@ -43,12 +47,14 @@ final class ForkSenseVoiceLiveTranscriber: LiveTranscriptSource {
 
     private let read: Read
     private let resampler: ForkDroplineResampler?
-    private let canRead: Bool
+    /// Whether the capture's rate converts to 16 kHz.
+    let canRead: Bool
     private var live: ForkSenseVoiceLive
     private var samples: [Float] = []
     private var nextRound = 1
     private var inFlight: Task<Void, Never>?
     private var stopped = false
+    private var failed = false
 
     private static let log = Logger(subsystem: "anomaly.hex.mobile", category: "fork-sensevoice")
     private static var rate: Double { Double(ForkSenseVoiceSegments.sampleRate) }
@@ -62,7 +68,7 @@ final class ForkSenseVoiceLiveTranscriber: LiveTranscriptSource {
     }
 
     func append(_ pcm: Data) {
-        guard !stopped, canRead, pcm.count >= 2, Double(samples.count) <= ForkSenseVoice.longestAudio * Self.rate else { return }
+        guard !stopped, !failed, canRead, pcm.count >= 2, Double(samples.count) <= ForkSenseVoice.longestAudio * Self.rate else { return }
         let chunk = resampler.map { $0.convert(pcm) } ?? Self.int16(pcm)
         samples.append(contentsOf: chunk.map { Float($0) / 32_768 })
         let due = Int(Double(samples.count) / (ForkSenseVoiceSegments.interval * Self.rate))
@@ -120,6 +126,7 @@ final class ForkSenseVoiceLiveTranscriber: LiveTranscriptSource {
             guard !(error is CancellationError) else { return }
             let ns = error as NSError
             Self.log.error("SenseVoice live: read failed (\(ns.domain, privacy: .public) \(ns.code))")
+            failed = true
             onFailure?("SenseVoice failed (\(ns.domain) \(ns.code))")
         }
     }

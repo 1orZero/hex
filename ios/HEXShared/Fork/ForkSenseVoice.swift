@@ -1,6 +1,8 @@
+import AVFAudio
 import Darwin
 import FluidAudio
 import Foundation
+import os
 import OSLog
 
 /// Labs › SenseVoice（中文） (fork): while it is on, its model is downloaded, and the dictation
@@ -53,8 +55,8 @@ nonisolated enum ForkSenseVoice {
         guard available > 0 else { return true }
         let piece = min(audio, ForkSenseVoiceSegments.longestPiece)
         let bucket = SenseVoiceConfig.pickBucket(forFrames: Int((piece / 0.06).rounded(.up)))
-        let logits = (bucket + SenseVoiceConfig.numQueryTokens) * 25_055 * 2
-        let input = bucket * SenseVoiceConfig.featureDim * 4 * 2 + Int(audio * 16_000) * 4 * 2
+        let logits = (bucket + SenseVoiceConfig.numQueryTokens) * ForkSenseVoiceEngine.vocabularySize * 2
+        let input = bucket * SenseVoiceConfig.featureDim * 4 * 2 + Int(audio * Double(ForkSenseVoiceEngine.sampleRate)) * 4 * 2
         return available >= logits + input + 24 * 1_048_576
     }
 
@@ -75,17 +77,19 @@ nonisolated enum ForkSenseVoice {
         defer { peak.stop() }
         var audio: TimeInterval?
         do {
+            let file = try AVAudioFile(forReading: url)
+            let length = Double(file.length) / file.fileFormat.sampleRate
+            audio = length
+            guard length <= longestAudio else {
+                note(Record(event: "fallback", detail: "too-long", audio: length))
+                return nil
+            }
+            guard fits(audio: length, available: Int(os_proc_available_memory())) else {
+                note(Record(event: "fallback", detail: "memory", audio: length, memory: peak.megabytes))
+                return nil
+            }
             let samples = try AudioConverter(sampleRate: Double(ForkSenseVoiceEngine.sampleRate)).resampleAudioFile(url)
-            audio = Double(samples.count) / Double(ForkSenseVoiceEngine.sampleRate)
-            guard let audio, audio <= longestAudio else {
-                note(Record(event: "fallback", detail: "too-long", audio: audio))
-                return nil
-            }
             let (engine, load) = try await ForkSenseVoiceLoader.shared.engine()
-            guard fits(audio: audio, available: Int(os_proc_available_memory())) else {
-                note(Record(event: "fallback", detail: "memory", audio: audio, load: load, memory: peak.megabytes))
-                return nil
-            }
             let reading = try await engine.readWhole(samples, dictationLanguage: dictationLanguage)
             let seconds = (ContinuousClock.now - started) / .seconds(1)
             guard !reading.text.isEmpty else {
@@ -101,9 +105,11 @@ nonisolated enum ForkSenseVoice {
         }
     }
 
-    /// Starts loading the model as a dictation starts, when SenseVoice would read it.
+    /// Starts loading the model as a dictation starts, when SenseVoice would read it and the
+    /// process has room for its longest piece.
     static func prewarm() {
-        guard skipReason(enabled: isEnabled, installed: isInstalled, language: dictationLanguage) == nil else { return }
+        guard isEnabled, skipReason(enabled: true, installed: isInstalled, language: dictationLanguage) == nil,
+              fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory())) else { return }
         Task.detached(priority: .userInitiated) { _ = try? await ForkSenseVoiceLoader.shared.engine() }
     }
 
@@ -210,7 +216,9 @@ actor ForkSenseVoiceLoader {
     private var loading: Task<ForkSenseVoiceEngine, any Error>?
     private var failed: (any Error)?
 
-    var hasFailed: Bool { failed != nil }
+    /// Whether a load failed in this process, read without waiting for the loader.
+    nonisolated static var hasFailed: Bool { failedOnce.withLock { $0 } }
+    private static let failedOnce = OSAllocatedUnfairLock(initialState: false)
 
     /// The engine, and the seconds this call waited for it to load (nil when it was loaded).
     func engine() async throws -> (ForkSenseVoiceEngine, TimeInterval?) {
@@ -229,6 +237,7 @@ actor ForkSenseVoiceLoader {
         } catch {
             failed = error
             loading = nil
+            Self.failedOnce.withLock { $0 = true }
             throw error
         }
     }

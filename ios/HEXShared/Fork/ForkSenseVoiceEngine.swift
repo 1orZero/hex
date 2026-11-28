@@ -66,8 +66,8 @@ actor ForkSenseVoiceEngine {
         for (range, reading) in zip(ranges, readings) where !reading.language.isEmpty {
             heard[reading.language, default: 0] += range.count
         }
-        let language = heard.max { $0.value < $1.value }?.key ?? ""
-        for index in readings.indices where !language.isEmpty && readings[index].language != language {
+        let language = heard.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key ?? ""
+        for index in readings.indices where !language.isEmpty && !readings[index].language.isEmpty && readings[index].language != language {
             readings[index] = try read(Array(samples[ranges[index]]), language: language)
         }
         let text = readings.reduce("") { text, reading in

@@ -30,14 +30,16 @@ nonisolated enum ForkSenseVoiceSegments {
     }
 
     /// The ranges to read a whole recording in: one when it is at most `longest` seconds, else
-    /// pieces cut at the quietest stretch between `shortestPiece` and `longest` seconds. Pieces
-    /// of at most 15 s read a little better than whole 30 s reads, which drop sentences, in qa- clips.
+    /// pieces cut at the quietest stretch between `shortestPiece` and `longest` seconds, leaving
+    /// the last piece at least `shortestPiece`. Pieces of at most 15 s read better than whole
+    /// 30 s reads, which drop sentences, in qa- clips.
     static func pieces(count: Int, samples: [Float], longest: TimeInterval = longestPiece) -> [Range<Int>] {
         var ranges: [Range<Int>] = []
         var start = 0
         while count - start > Int(longest * Double(sampleRate)) {
             let window = samples[start..<min(count, start + Int(longest * Double(sampleRate)))]
-            let offset = quietest(window, from: min(shortestPiece, longest / 2), to: longest)?.offset ?? Int(longest * Double(sampleRate))
+            let to = min(longest, Double(count - start) / Double(sampleRate) - shortestPiece)
+            let offset = quietest(window, from: min(shortestPiece, longest / 2), to: to)?.offset ?? Int(to * Double(sampleRate))
             ranges.append(start..<(start + offset))
             start += offset
         }
