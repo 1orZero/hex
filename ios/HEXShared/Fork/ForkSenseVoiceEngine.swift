@@ -76,11 +76,12 @@ actor ForkSenseVoiceEngine {
         return Reading(text: text, language: language)
     }
 
-    /// The language tag SenseVoice writes first, and the text with every `<|…|>` tag removed.
+    /// The language tag SenseVoice writes first, and the text with every `<|…|>` tag removed,
+    /// or "" when no letter or digit is left: a misread clip sometimes comes back as a lone ".".
     static func reading(from raw: String) -> Reading {
         let language = raw.firstMatch(of: /<\|([a-z]+)\|>/).map { String($0.1) } ?? ""
         let text = raw.replacing(/<\|[^|]*\|>/, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return Reading(text: text, language: language == "nospeech" ? "" : language)
+        return Reading(text: text.contains { $0.isLetter || $0.isNumber } ? text : "", language: language == "nospeech" ? "" : language)
     }
 
     /// The CTC logits and how many of their frames hold audio, the 4 query frames first.

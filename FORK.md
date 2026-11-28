@@ -290,7 +290,7 @@ It tells Mandarin, Cantonese, and English apart itself, so three-language dictat
 - Final text: the whole recording is read again once it stops, in pieces of at most 15 s cut at the
   quietest 300 ms (`ForkSenseVoiceSegments.pieces`). Pieces SenseVoice heard in another language than most of
   the audio are read again in that one. Recordings over 120 s (checked before decoding), a process short
-  of memory (`ForkSenseVoice.fits`, checked before the model loads), a load or read error, or no text fall back to three-language dictation, then
+  of memory (`ForkSenseVoice.fits`, checked before the model loads), a load or read error, or no text (only punctuation counts as none) fall back to three-language dictation, then
   upstream's paths, on the same recording. Custom vocabulary doesn't steer SenseVoice (it takes no hints);
   Word replacements, learned fixes, and vocabulary spellings still apply afterwards, as the Labs card says.
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled

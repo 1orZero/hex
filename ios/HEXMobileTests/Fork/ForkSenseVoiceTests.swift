@@ -52,6 +52,11 @@ final class ForkSenseVoiceTests: XCTestCase {
         XCTAssertEqual(ForkSenseVoiceEngine.reading(from: "<|nospeech|><|EMO_UNKNOWN|><|Event_UNK|><|withitn|>"), ForkSenseVoiceEngine.Reading(text: "", language: ""))
     }
 
+    func testAReadingOfOnlyPunctuationIsEmpty() {
+        XCTAssertEqual(ForkSenseVoiceEngine.reading(from: "<|en|><|NEUTRAL|><|Speech|><|withitn|>."), ForkSenseVoiceEngine.Reading(text: "", language: "en"))
+        XCTAssertEqual(ForkSenseVoiceEngine.reading(from: "<|zh|><|NEUTRAL|><|Speech|><|withitn|>3。"), ForkSenseVoiceEngine.Reading(text: "3。", language: "zh"))
+    }
+
     // MARK: - Where the audio is cut
 
     func testALongRecordingIsCutAtItsPause() throws {
