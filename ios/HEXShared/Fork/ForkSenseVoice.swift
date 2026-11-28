@@ -10,8 +10,8 @@ import OSLog
 /// the final text of dictations Apple's speech recognition would transcribe, in the app
 /// (`AppleSpeechTranscriber`) and in the keyboard (`KeyboardSpeech`). It tells Mandarin,
 /// Cantonese, and English apart itself, so Apple's three readings don't run. When it can't
-/// (too long, short of memory, the model not loaded yet, a load or read error, too little text),
-/// Apple's own path transcribes the same recording. The keyboard's live words come from SenseVoice too
+/// (too long, short of memory, the model not loaded yet, a load or read error, too little text)
+/// or hears English, Apple's own path transcribes the same recording. The keyboard's live words come from SenseVoice too
 /// (`ForkSenseVoiceLiveWords`).
 nonisolated enum ForkSenseVoice {
     static let enabledKey = "fork.senseVoice.enabled"
@@ -76,11 +76,14 @@ nonisolated enum ForkSenseVoice {
     /// From this length on, SenseVoice's text needs a letter or digit for each second of audio.
     static let sparseAfter: TimeInterval = 3
 
-    /// Why SenseVoice's text of `audio` seconds goes unused, or nil when it's used: none, or too
-    /// little for the recording, as when 4 s of Cantonese with English words came back as "tix.".
-    static func textReason(_ text: String, audio: TimeInterval) -> String? {
+    /// Why SenseVoice's text of `audio` seconds in `language` goes unused, or nil when it's used:
+    /// none; English, since short Cantonese with English words often reads as English gibberish
+    /// and Apple's three-language dictation writes English as well; or too little for the
+    /// recording, as when 4 s of Cantonese with English words came back as "tix.".
+    static func textReason(_ text: String, language: String, audio: TimeInterval) -> String? {
         let letters = text.filter { $0.isLetter || $0.isNumber }.count
         if letters == 0 { return "empty" }
+        if language == "en" { return "english" }
         if audio >= sparseAfter, Double(letters) < audio { return "sparse" }
         return nil
     }
@@ -90,7 +93,7 @@ nonisolated enum ForkSenseVoice {
     }
 
     /// The dictation's text from SenseVoice, or nil for the caller's own engine: SenseVoice
-    /// doesn't apply, isn't loaded yet, or failed or heard too little, logged with why.
+    /// doesn't apply, isn't loaded yet, failed, heard too little, or heard English, logged with why.
     static func transcribe(_ url: URL, dictationLanguage: String?) async -> String? {
         let enabled = isEnabled
         if let reason = skipReason(enabled: enabled, installed: isInstalled, language: dictationLanguage) {
@@ -114,7 +117,7 @@ nonisolated enum ForkSenseVoice {
             let engine = try await ForkSenseVoiceLoader.shared.engine()
             let reading = try await engine.readWhole(samples, dictationLanguage: dictationLanguage)
             let seconds = (ContinuousClock.now - started) / .seconds(1)
-            if let reason = textReason(reading.text, audio: length) {
+            if let reason = textReason(reading.text, language: reading.language, audio: length) {
                 note(Record(event: "fallback", detail: reason, language: reading.language, audio: length, seconds: seconds, memory: peak.megabytes))
                 return nil
             }

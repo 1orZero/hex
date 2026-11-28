@@ -219,13 +219,19 @@ final class ForkSenseVoiceTests: XCTestCase {
     }
 
     func testTooLittleTextForTheRecordingGoesToApplesPath() {
-        XCTAssertEqual(ForkSenseVoice.textReason("", audio: 2), "empty")
-        XCTAssertEqual(ForkSenseVoice.textReason("tix.", audio: 4), "sparse")
-        XCTAssertEqual(ForkSenseVoice.textReason("OK.", audio: 3), "sparse")
-        XCTAssertNil(ForkSenseVoice.textReason("好。", audio: 2.9), "a short recording keeps a word or two")
-        XCTAssertNil(ForkSenseVoice.textReason("abc", audio: 3))
-        XCTAssertNil(ForkSenseVoice.textReason("今天天氣很好。", audio: 4))
-        XCTAssertNil(ForkSenseVoice.textReason("3點10點", audio: 4), "digits count")
+        XCTAssertEqual(ForkSenseVoice.textReason("", language: "", audio: 2), "empty")
+        XCTAssertEqual(ForkSenseVoice.textReason("tix.", language: "yue", audio: 4), "sparse")
+        XCTAssertEqual(ForkSenseVoice.textReason("好。", language: "zh", audio: 3), "sparse")
+        XCTAssertNil(ForkSenseVoice.textReason("好。", language: "zh", audio: 2.9), "a short recording keeps a word or two")
+        XCTAssertNil(ForkSenseVoice.textReason("好的嗎", language: "yue", audio: 3))
+        XCTAssertNil(ForkSenseVoice.textReason("今天天氣很好。", language: "zh", audio: 4))
+        XCTAssertNil(ForkSenseVoice.textReason("3點10點", language: "zh", audio: 4), "digits count")
+    }
+
+    func testARecordingHeardAsEnglishGoesToApplesPath() {
+        XCTAssertEqual(ForkSenseVoice.textReason("Instled John package scene soon.", language: "en", audio: 4), "english")
+        XCTAssertNil(ForkSenseVoice.textReason("我要 check 一下 email。", language: "zh", audio: 3))
+        XCTAssertEqual(ForkSenseVoice.textReason(".", language: "en", audio: 1), "empty")
     }
 
     // MARK: - Helpers
