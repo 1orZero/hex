@@ -51,6 +51,7 @@ enum KeyboardSpeech {
         }
         let speech = AppleSpeechModule(language)
 
+        if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: language.identifier) { return (senseVoice, language) }
         if let threeLanguage = await ForkThreeLanguage.transcribe(url, language: language, vocabulary: hints, lingeringModels: false) {
             guard !threeLanguage.isEmpty else { throw Failure.empty }
             return (threeLanguage, language)

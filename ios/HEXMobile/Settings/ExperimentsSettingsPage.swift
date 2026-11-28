@@ -110,6 +110,8 @@ struct ExperimentsSettingsPage: View {
             )
             .disabled(!cleanupAvailability.isAvailable)
         }
+
+        ForkSenseVoiceSettingsCard()
     }
 
     @ViewBuilder

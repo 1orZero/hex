@@ -301,6 +301,7 @@ actor AppleSpeechTranscriber: LocalTranscribing {
             throw TranscriberError.unavailable
         }
 
+        if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { return senseVoice }
         if let threeLanguage = await ForkThreeLanguage.transcribe(audioURL, language: language, vocabulary: vocabulary, lingeringModels: true) {
             guard !threeLanguage.isEmpty else { throw TranscriberError.emptyTranscript }
             return threeLanguage

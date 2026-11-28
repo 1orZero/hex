@@ -544,6 +544,7 @@ final class KeyboardLocalDictation {
         }
         let jobID = UUID().uuidString
         ForkDroplineRecognition.prepare()
+        ForkSenseVoice.prewarm()
         let requestedAt = Date()
         let requestedTime = requestedAt.timeIntervalSince1970
         let preferences = DictationPipeline.Preferences.current(
