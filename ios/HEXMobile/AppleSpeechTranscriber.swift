@@ -275,7 +275,7 @@ actor AppleSpeechTranscriber: LocalTranscribing {
             )
 
             let analyzer = makeAnalyzer(module: speech)
-            try await analyzer.prepareToAnalyze(in: nil)
+            try await ForkSenseVoice.prepareToAnalyze(analyzer, language: language.identifier)
 
             isPrepared = true
             preparedModule = speech
@@ -301,7 +301,7 @@ actor AppleSpeechTranscriber: LocalTranscribing {
             throw TranscriberError.unavailable
         }
 
-        if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { return senseVoice }
+        if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { preparedModule = nil; preparedAnalyzer = nil; return senseVoice }
         if let threeLanguage = await ForkThreeLanguage.transcribe(audioURL, language: language, vocabulary: vocabulary, lingeringModels: true) {
             guard !threeLanguage.isEmpty else { throw TranscriberError.emptyTranscript }
             return threeLanguage

@@ -13,9 +13,9 @@ import OSLog
 /// Cantonese, and English apart itself, so Apple's three readings don't run. When it can't
 /// (too long, short of memory, the model not loaded yet, a load or read error, too little text)
 /// or hears English, Apple's own path transcribes the same recording. The app loads the model as a
-/// dictation starts (`prewarm`); the keyboard loads it as it opens, as it loads Parakeet
-/// (`ForkKeyboardSenseVoice`). The keyboard's live words come from SenseVoice too
-/// (`ForkSenseVoiceLiveWords`).
+/// dictation starts (`prewarm`) and where it would have loaded Apple's (`prepareToAnalyze`); the
+/// keyboard loads it as it opens, as it loads Parakeet (`ForkKeyboardSenseVoice`). The keyboard's
+/// live words come from SenseVoice too (`ForkSenseVoiceLiveWords`).
 nonisolated enum ForkSenseVoice {
     static let enabledKey = "fork.senseVoice.enabled"
     static let engineName = "SenseVoice-Small"

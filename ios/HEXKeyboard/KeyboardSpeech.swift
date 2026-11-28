@@ -34,6 +34,7 @@ enum KeyboardSpeech {
             throw SpeechModelNeedsHex.handOff(settings.effectiveDictationLanguage ?? "en-US", settings: settings)
         }
         log.write("speech locale=\(picked.identifier) module=\(picked.module.rawValue) available=\(SpeechTranscriber.isAvailable)")
+        if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: picked.identifier) { return (senseVoice, picked) }
         // The model the app uses, else the same language on `DictationTranscriber`. One the
         // keyboard can't get (released since Hex downloaded it, or a download that failed here)
         // is Hex's to download: the Hex key opens Hex until it installs.
@@ -51,7 +52,6 @@ enum KeyboardSpeech {
         }
         let speech = AppleSpeechModule(language)
 
-        if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: language.identifier) { return (senseVoice, language) }
         if let threeLanguage = await ForkThreeLanguage.transcribe(url, language: language, vocabulary: hints, lingeringModels: false) {
             guard !threeLanguage.isEmpty else { throw Failure.empty }
             return (threeLanguage, language)
