@@ -17,6 +17,6 @@ extension DictationController {
     /// Settings › Dictation › Keep mic warm, unless it would say Off where the keyboard
     /// dictates by itself: a duration in effect always shows, so it can be turned off.
     var showsKeepMicWarm: Bool {
-        warmDuration != .off || !keyboardBridge.keyboardDictatesItself()
+        warmDuration != .off || !keyboardBridge.keyboardDictatesItself() || ForkSenseVoice.isEnabled
     }
 }

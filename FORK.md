@@ -40,6 +40,7 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `handleMemoryWarning()`: `ForkKeyboardSenseVoice.shared.handleMemoryWarning()` after `KeyboardParakeet.shared.handleMemoryWarning()` (1 line) | A memory warning lets the keyboard's SenseVoice go, and none loads for 5 minutes. |
 | `ios/HEXKeyboard/KeyboardParakeet.swift` | `var holdsModel: Bool { loaded != nil || loadTask != nil }` after `private var lastNote = ""` (1 line) | SenseVoice doesn't load in a keyboard process that holds or is loading Parakeet, which stays loaded when its plan changes. |
 | `ios/HEXMobile/Settings/ExperimentsSettingsPage.swift` | `dictationSection`: `ForkSenseVoiceSettingsCard()` and a blank line after the Dictation card (2 lines) | Labs › SenseVoice（中文）: the switch, the model's download with its progress, and Remove model. |
+| `ios/HEXMobile/DictationController+WarmDefault.swift` | `showsKeepMicWarm`: ` || ForkSenseVoice.isEnabled` at the end of its expression (1 line) | While Labs › SenseVoice（中文） is on, Settings › Dictation › Keep mic warm always shows, where upstream hides it at Off because the keyboard dictates by itself, so a warm session can hand the keyboard's dictations to the app's SenseVoice. |
 
 ## Fork-only files
 
@@ -55,8 +56,8 @@ whoever resolves a tag merge knows what to keep.
   `ios/HEXMobileTests/Fork/ForkThreeLanguageEnglishWordsTests.swift`, `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`,
   and `ios/HEXMobileTests/Fork/qa-three-language-english.json`: three-language dictation.
 - `ios/HEXShared/Fork/ForkSenseVoice*.swift`, `ios/HEXKeyboard/Fork/ForkKeyboardSenseVoice.swift`,
-  `ios/HEXMobile/Fork/ForkSenseVoice*.swift`, and `ios/HEXMobileTests/Fork/ForkSenseVoice*Tests.swift`:
-  SenseVoice（中文）.
+  `ios/HEXMobile/Fork/ForkSenseVoice*.swift`, `ios/HEXMobileTests/Fork/ForkSenseVoice*Tests.swift`, and
+  `ios/HEXMobileTests/Fork/ForkKeepMicWarmTests.swift`: SenseVoice（中文）.
 
 ## Dropline private API
 
@@ -320,6 +321,21 @@ English apart itself, so three-language dictation's readings don't run unless it
   while the keyboard's process lives; only a memory warning lets it go (a read under way keeps it until it
   ends). Its dictations never load it: until it has loaded, they go to three-language dictation and Apple's
   speech recognition (`fallback not-loaded`).
+- Keep mic warm: while the lab is on, Settings › Dictation › Keep mic warm always shows
+  (`DictationController.showsKeepMicWarm`), with Off, 5m, 15m, and 1h. Upstream hides it at Off where the keyboard
+  dictates by itself (`KeyboardSelfDictation.dictatesItself`: iOS 26, the keyboard has its speech model and the
+  memory to start, and it hasn't opened Hex for a dictation in 7 days), which leaves a keyboard that can't hold
+  SenseVoice (a limit under 149 MB) no way to reach it. With the lab off the row behaves as upstream. Nothing else
+  about the warm session changes: picking a duration stores it in the App Group and starts the session at once;
+  while it is warm the keyboard's Dictate only sends start and stop, the app records, and SenseVoice reads the
+  dictation in the app (`process` `app` in the log, App in Recent dictations) when the app dictates with Apple
+  Speech and Dropline isn't selected. A dictation restarts the timer as it starts and as it finishes without an
+  error, and the timer doesn't run out while a dictation records or transcribes. When it runs out the session ends
+  and the keyboard's Dictate dictates in the keyboard again (Apple's speech recognition where SenseVoice can't load,
+  `fallback not-loaded`), without opening Hex; picking a duration again, Open Hex in a keyboard line, or the Warm
+  Hex Keyboard shortcut warms it again. A pick stays: `keyboardDictatesItself` only picks the default while nothing
+  is stored, and `reviewWarmDurationForKeyboardDictation` runs once, as Hex first launches with it on iOS 26, so a
+  duration picked after that launch stays.
 - Memory (`ForkSenseVoiceBudget`), in `KeyboardParakeetBudget`'s terms: SenseVoice keeps 60 MB of
   footprint once it has read (measured on a Mac: 28 MB from the load, which Core ML keeps even after the
   engine goes, and 20 MB of logits for the 128- and 256-frame buckets; 48–59 MB after 2 to 120 reads), so
