@@ -279,35 +279,37 @@ whole dictation and mixes English words into the Chinese ones. Apple has no lang
 
 ## SenseVoice（中文）
 
-Labs › SenseVoice（中文）, off by default: SenseVoice-Small (FluidAudio's `FluidInference/sensevoice-small-coreml`,
-fp16 encoder on the Neural Engine) writes Mandarin and Cantonese dictations, English words included, instead of
-Apple's speech recognition. It tells Mandarin, Cantonese, and English apart itself, so three-language dictation's
-readings don't run unless it hears English.
+Labs › SenseVoice（中文）, off by default: SenseVoice-Small (FluidAudio's
+`FluidInference/sensevoice-small-coreml`, fp16 encoder on the Neural Engine) writes Mandarin and Cantonese
+dictations, English words included, instead of Apple's speech recognition. It tells Mandarin, Cantonese, and
+English apart itself, so three-language dictation's readings don't run unless it hears English.
 
 - When: the switch is on, the model is downloaded, and the dictation language resolves to English, Mandarin,
   or Cantonese in any region (`ForkSenseVoice.skipReason`). Only dictations Apple's speech recognition
   would transcribe: Dropline and the keyboard's Parakeet come first, as before. Otherwise everything runs
   as without the lab.
-- Final text: the whole recording is read again once it stops, in pieces of at most 15 s cut at the
-  quietest 300 ms (`ForkSenseVoiceSegments.pieces`). Pieces SenseVoice heard in another language than most of
-  the audio are read again in that one. Recordings over 120 s (checked before decoding), a process short
-  of memory (`ForkSenseVoice.fits`), a model not loaded in this process yet, a load or read error, no text
+- Final text: the whole recording is read again once it stops, in pieces of at most 15 s cut at the quietest
+  300 ms (`ForkSenseVoiceSegments.pieces`). Pieces SenseVoice heard in another language than most of the
+  audio are read again in that one. Recordings over 120 s (checked before decoding), a process short of
+  memory (`ForkSenseVoice.fits`), a model not loaded in this process yet, a load or read error, no text
   (text without a letter or digit counts as none), a recording SenseVoice hears as English (short Cantonese
-  with English words often reads as English gibberish, and three-language dictation writes English as it does
-  without the lab), or under one letter or digit a second in a recording of 3 s or more
-  (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to three-language dictation, then
-  upstream's paths, on the same recording. A dictation never waits for the model: it starts loading as a
-  recording starts (unless Dropline is selected) and once the download finishes, and the first load of a new build compiles the encoder
-  for the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom vocabulary doesn't steer SenseVoice (it takes no hints);
-  Word replacements, learned fixes, and vocabulary spellings still apply afterwards, as the Labs card says.
+  with English words often reads as English gibberish, and three-language dictation writes English as it
+  does without the lab), or under one letter or digit a second in a recording of 3 s or more
+  (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to three-language dictation, then upstream's
+  paths, on the same recording. A dictation never waits for the model: it starts loading as a recording
+  starts and once the download finishes, unless Dropline is selected, and the first load of a new build
+  compiles the encoder for the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom
+  vocabulary doesn't steer SenseVoice (it takes no hints); Word replacements, learned fixes, and vocabulary
+  spellings still apply afterwards, as the Labs card says.
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled
   stretch is read; a tail of 8 s settles at a pause, and one of 13 s at its quietest point anyway, so a
   round's cost doesn't grow with the recording. A round due while the last one reads is skipped, so
-  SenseVoice reads one thing at a time. Only once the model has loaded in this keyboard (before that,
-  the keyboard's other live words run, three-language and then upstream's, logged as `live` `loading`), and where the keyboard has room for a 15 s read and Core ML lists a Neural Engine: on a Mac's CPU (as in
-  the simulator) a round took up to 1.05 s, against under 0.1 s on its Neural Engine. The first settled stretch's language is kept. A load or read
-  error ends the live words for that dictation; a later dictation in a keyboard whose load failed uses
-  the keyboard's other live words.
+  SenseVoice reads one thing at a time. Only once the model has loaded in this keyboard (before that, the
+  keyboard's other live words run, three-language and then upstream's, logged as `live` `loading`), and
+  where the keyboard has room for a 15 s read and Core ML lists a Neural Engine: on a Mac's CPU (as in the
+  simulator) a round took up to 1.05 s, against under 0.1 s on its Neural Engine. The first settled
+  stretch's language is kept. A load or read error ends the live words for that dictation; a later dictation
+  in a keyboard whose load failed uses the keyboard's other live words.
 - Spelling: Simplified output goes through Apple's ICU `Hans-Hant` transform (Taiwan forms), then a
   Cantonese reading takes Hong Kong forms (係, 裏, 着, 啓, 衞), and 松/面 become 鬆/麵 by context
   (`ForkSenseVoiceText`). No OpenCC.
@@ -318,13 +320,14 @@ readings don't run unless it hears English.
   model is stable.
 - Model: turning the switch on downloads the fp16 files (about 450 MB) into
   `SpeechModels/sensevoice-small-coreml` in the App Group, with progress; a failed or stalled download turns
-  the switch off and resumes next time; a finished one loads the model in the app. Remove model deletes the folder.
+  the switch off and resumes next time; a finished one loads the model in the app. Remove model deletes the
+  folder.
 - Log: `anomaly.hex.mobile` category `fork-sensevoice`, and the newest 50 records in the App Group's
   `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `loading`, `load-failed`,
-  `empty`, `english`, `sparse`, `error …`), `skipped`, `live` (rounds, skipped rounds, the longest round, or `loading`),
-  `loaded` and `load-failed` (the load's seconds), `downloaded`, and `download-failed`, with the process
-  and, where they apply, the detected language, audio and wall seconds, and peak footprint. Never what
-  was said.
+  `empty`, `english`, `sparse`, `error …`), `skipped`, `live` (rounds, skipped rounds, the longest round, or
+  `loading`), `loaded` and `load-failed` (the load's seconds), `downloaded`, and `download-failed`, with the
+  process and, where they apply, the detected language, audio and wall seconds, and peak footprint. Never
+  what was said.
 - Unverified on an iPhone: per-round time, the Neural Engine path, the keyboard's memory, and the first
   load's time were measured on a Mac and in the simulator only (DER-187).
 
