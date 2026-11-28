@@ -33,7 +33,7 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let three = await ForkThreeLanguageLiveWords.source(for: picked, sampleRate: rate), !self.stopped { self.attach(three); return }` after `guard let self, !self.stopped else { return }` in the lookup task (1 line) | While three-language dictation applies, the keyboard's live words come from `ForkThreeLanguageLiveWords` instead of one recogniser in the dictation language. |
 | `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { return senseVoice }` before the `if let threeLanguage` block (1 line) | While Labs › SenseVoice（中文） applies, SenseVoice-Small writes the app's Apple Speech dictation; nil (lab off, no model, another language, or a failure) falls through to three-language dictation and upstream's paths unchanged. |
 | `ios/HEXKeyboard/KeyboardSpeech.swift` | `transcribe(_:hints:)`: `if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: language.identifier) { return (senseVoice, language) }` before the `if let threeLanguage` block (1 line) | The same for the keyboard's own Apple Speech dictation. |
-| `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let senseVoice = ForkSenseVoiceLiveWords.source(language: picked?.identifier, sampleRate: rate) { self.attach(senseVoice); return }` before the three-language line (1 line; synchronous, so nothing can stop the capture between the `stopped` check and `attach`) | While SenseVoice writes the dictation, the keyboard's live words come from SenseVoice and no Apple recogniser starts. |
+| `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let senseVoice = ForkSenseVoiceLiveWords.source(language: picked?.identifier, sampleRate: rate) { self.attach(senseVoice); return }` before the three-language line (1 line; synchronous, so nothing can stop the capture between the `stopped` check and `attach`) | While SenseVoice writes the dictation and its model has loaded, the keyboard's live words come from SenseVoice and no Apple recogniser starts. |
 | `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkSenseVoice.prewarm()` after `ForkDroplineRecognition.prepare()` (1 line) | Loads SenseVoice as a recording starts, when it will read the dictation. |
 | `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `begin(in:microphone:pressedAt:armed:)`: `ForkSenseVoice.prewarm()` after `ForkDroplineRecognition.prepare()` (1 line) | The same as the keyboard starts recording. |
 | `ios/HEXMobile/Settings/ExperimentsSettingsPage.swift` | `dictationSection`: `ForkSenseVoiceSettingsCard()` and a blank line after the Dictation card (2 lines) | Labs › SenseVoice（中文）: the switch, the model's download with its progress, and Remove model. |
@@ -290,13 +290,18 @@ It tells Mandarin, Cantonese, and English apart itself, so three-language dictat
 - Final text: the whole recording is read again once it stops, in pieces of at most 15 s cut at the
   quietest 300 ms (`ForkSenseVoiceSegments.pieces`). Pieces SenseVoice heard in another language than most of
   the audio are read again in that one. Recordings over 120 s (checked before decoding), a process short
-  of memory (`ForkSenseVoice.fits`, checked before the model loads), a load or read error, or no text (only punctuation counts as none) fall back to three-language dictation, then
-  upstream's paths, on the same recording. Custom vocabulary doesn't steer SenseVoice (it takes no hints);
+  of memory (`ForkSenseVoice.fits`), a model not loaded in this process yet, a load or read error, no text
+  (only punctuation counts as none), or under one letter or digit a second in a recording of 3 s or more
+  (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to three-language dictation, then
+  upstream's paths, on the same recording. A dictation never waits for the model: it starts loading as a
+  recording starts and once the download finishes, and the first load of a new build compiles the encoder
+  for the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom vocabulary doesn't steer SenseVoice (it takes no hints);
   Word replacements, learned fixes, and vocabulary spellings still apply afterwards, as the Labs card says.
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled
   stretch is read; a tail of 8 s settles at a pause, and one of 13 s at its quietest point anyway, so a
   round's cost doesn't grow with the recording. A round due while the last one reads is skipped, so
-  SenseVoice reads one thing at a time. Only where the keyboard has room for a 15 s read and Core ML lists a Neural Engine: on a Mac's CPU (as in
+  SenseVoice reads one thing at a time. Only once the model has loaded in this keyboard (before that,
+  upstream's live words run, logged as `live` `loading`), and where the keyboard has room for a 15 s read and Core ML lists a Neural Engine: on a Mac's CPU (as in
   the simulator) a round took up to 1.05 s, against under 0.1 s on its Neural Engine. The first settled stretch's language is kept. A load or read
   error ends the live words for that dictation; a later dictation in a keyboard whose load failed uses
   upstream's live words.
@@ -310,14 +315,15 @@ It tells Mandarin, Cantonese, and English apart itself, so three-language dictat
   model is stable.
 - Model: turning the switch on downloads the fp16 files (about 450 MB) into
   `SpeechModels/sensevoice-small-coreml` in the App Group, with progress; a failed or stalled download turns
-  the switch off and resumes next time. Remove model deletes the folder.
+  the switch off and resumes next time; a finished one loads the model in the app. Remove model deletes the folder.
 - Log: `anomaly.hex.mobile` category `fork-sensevoice`, and the newest 50 records in the App Group's
-  `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `empty`, `error …`),
-  `skipped`, `live` (rounds, skipped rounds, the longest round), `downloaded`, and `download-failed`, with
-  the process and, where they apply, the detected language, audio and wall seconds, load time, and peak
-  footprint. Never what was said.
-- Unverified on an iPhone: per-round time, the Neural Engine path, and the keyboard's memory were measured on
-  a Mac and in the simulator only (DER-187).
+  `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `loading`, `load-failed`,
+  `empty`, `sparse`, `error …`), `skipped`, `live` (rounds, skipped rounds, the longest round, or `loading`),
+  `loaded` and `load-failed` (the load's seconds), `downloaded`, and `download-failed`, with the process
+  and, where they apply, the detected language, audio and wall seconds, and peak footprint. Never what
+  was said.
+- Unverified on an iPhone: per-round time, the Neural Engine path, the keyboard's memory, and the first
+  load's time were measured on a Mac and in the simulator only (DER-187).
 
 ## Merging an App Store tag
 

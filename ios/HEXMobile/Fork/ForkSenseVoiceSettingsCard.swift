@@ -69,7 +69,8 @@ struct ForkSenseVoiceSettingsCard: View {
 
 /// SenseVoice's model download, kept while Settings closes: FluidAudio's fp16 files into
 /// `ForkSenseVoice.directory` in the App Group, where the keyboard loads them too. A download
-/// that fails or stalls turns the lab off again, and its files resume the next time. A new
+/// that fails or stalls turns the lab off again, and its files resume the next time; one that
+/// finishes loads the model in the app (`ForkSenseVoice.prewarm`). A new
 /// download or a removal waits for a cancelled one to finish, and a cancelled one's progress and
 /// end no longer show (`generation`).
 @MainActor
@@ -102,6 +103,7 @@ final class ForkSenseVoiceDownload {
                     }
                 }
                 ForkSenseVoice.note(ForkSenseVoice.Record(event: "downloaded", detail: ForkSenseVoice.engineName, seconds: (ContinuousClock.now - started) / .seconds(1)))
+                ForkSenseVoice.prewarm()
             } catch is CancellationError {
             } catch {
                 let ns = error as NSError

@@ -210,6 +210,24 @@ final class ForkSenseVoiceTests: XCTestCase {
         XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 64 * 1_048_576))
     }
 
+    func testADictationGoesToApplesPathUntilTheModelHasLoaded() {
+        XCTAssertNil(ForkSenseVoice.fallbackReason(audio: 5, available: 0, model: .loaded))
+        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 0, model: .notLoaded), "loading")
+        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 0, model: .failed), "load-failed")
+        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 130, available: 0, model: .loaded), "too-long")
+        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 1_048_576, model: .loaded), "memory")
+    }
+
+    func testTooLittleTextForTheRecordingGoesToApplesPath() {
+        XCTAssertEqual(ForkSenseVoice.textReason("", audio: 2), "empty")
+        XCTAssertEqual(ForkSenseVoice.textReason("tix.", audio: 4), "sparse")
+        XCTAssertEqual(ForkSenseVoice.textReason("OK.", audio: 3), "sparse")
+        XCTAssertNil(ForkSenseVoice.textReason("好。", audio: 2.9), "a short recording keeps a word or two")
+        XCTAssertNil(ForkSenseVoice.textReason("abc", audio: 3))
+        XCTAssertNil(ForkSenseVoice.textReason("今天天氣很好。", audio: 4))
+        XCTAssertNil(ForkSenseVoice.textReason("3點10點", audio: 4), "digits count")
+    }
+
     // MARK: - Helpers
 
     /// A 440 Hz and 1.2 kHz tone at 16 kHz, silent for 0.6 s around each of `silentAround` seconds.

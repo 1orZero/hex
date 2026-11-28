@@ -7,21 +7,26 @@ import os
 /// while recording. Nil where SenseVoice won't write this dictation (`ForkSenseVoice.skipReason`),
 /// it failed to load earlier in this keyboard, the keyboard lacks room for a round, there's no
 /// Neural Engine (a round took up to 1 s on a Mac's CPU, as in the simulator, against 0.1 s on its
-/// Neural Engine), or the capture's rate can't be converted, and the keyboard's own live words run
-/// as before.
+/// Neural Engine), the model hasn't loaded in this keyboard yet (logged as `live` `loading`; it
+/// loads as the dictation starts), or the capture's rate can't be converted, and the keyboard's own
+/// live words run as before.
 @MainActor
 enum ForkSenseVoiceLiveWords {
     static func source(language: String?, sampleRate: Double) -> ForkSenseVoiceLiveTranscriber? {
         guard ForkSenseVoice.isEnabled,
               ForkSenseVoice.skipReason(enabled: true, installed: ForkSenseVoice.isInstalled, language: language) == nil,
-              !ForkSenseVoiceLoader.hasFailed,
+              ForkSenseVoiceLoader.state != .failed,
               ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory())),
               MLModel.availableComputeDevices.contains(where: { device in
                   if case .neuralEngine = device { return true }
                   return false
               }) else { return nil }
+        guard ForkSenseVoiceLoader.state == .loaded else {
+            Task.detached(priority: .utility) { ForkSenseVoice.note(ForkSenseVoice.Record(event: "live", detail: "loading")) }
+            return nil
+        }
         let source = ForkSenseVoiceLiveTranscriber(sampleRate: sampleRate, dictationLanguage: language) { round, tail in
-            let (engine, _) = try await ForkSenseVoiceLoader.shared.engine()
+            let engine = try await ForkSenseVoiceLoader.shared.engine()
             return try await ForkSenseVoiceLive.read(round, tail: tail, engine: engine)
         }
         return source.canRead ? source : nil

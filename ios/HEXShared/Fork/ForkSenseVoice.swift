@@ -10,8 +10,8 @@ import OSLog
 /// the final text of dictations Apple's speech recognition would transcribe, in the app
 /// (`AppleSpeechTranscriber`) and in the keyboard (`KeyboardSpeech`). It tells Mandarin,
 /// Cantonese, and English apart itself, so Apple's three readings don't run. When it can't
-/// (too long, short of memory, a load or read error, no text), Apple's own path transcribes the
-/// same recording. The keyboard's live words come from SenseVoice too
+/// (too long, short of memory, the model not loaded yet, a load or read error, too little text),
+/// Apple's own path transcribes the same recording. The keyboard's live words come from SenseVoice too
 /// (`ForkSenseVoiceLiveWords`).
 nonisolated enum ForkSenseVoice {
     static let enabledKey = "fork.senseVoice.enabled"
@@ -60,12 +60,37 @@ nonisolated enum ForkSenseVoice {
         return available >= logits + input + 24 * 1_048_576
     }
 
+    /// Why a dictation SenseVoice would read goes to the caller's engine, or nil when SenseVoice
+    /// reads it: too long, short of memory, or a model that hasn't loaded in this process yet (a
+    /// dictation never waits for it) or failed to.
+    static func fallbackReason(audio: TimeInterval, available: Int, model: ForkSenseVoiceLoader.State) -> String? {
+        guard audio <= longestAudio else { return "too-long" }
+        guard fits(audio: audio, available: available) else { return "memory" }
+        switch model {
+        case .loaded: return nil
+        case .notLoaded: return "loading"
+        case .failed: return "load-failed"
+        }
+    }
+
+    /// From this length on, SenseVoice's text needs a letter or digit for each second of audio.
+    static let sparseAfter: TimeInterval = 3
+
+    /// Why SenseVoice's text of `audio` seconds goes unused, or nil when it's used: none, or too
+    /// little for the recording, as when 4 s of Cantonese with English words came back as "tix.".
+    static func textReason(_ text: String, audio: TimeInterval) -> String? {
+        let letters = text.filter { $0.isLetter || $0.isNumber }.count
+        if letters == 0 { return "empty" }
+        if audio >= sparseAfter, Double(letters) < audio { return "sparse" }
+        return nil
+    }
+
     static var dictationLanguage: String? {
         LanguageSettings().effectiveDictationLanguage ?? Locale.preferredLanguages.first
     }
 
     /// The dictation's text from SenseVoice, or nil for the caller's own engine: SenseVoice
-    /// doesn't apply, or it failed or heard nothing, logged with why.
+    /// doesn't apply, isn't loaded yet, or failed or heard too little, logged with why.
     static func transcribe(_ url: URL, dictationLanguage: String?) async -> String? {
         let enabled = isEnabled
         if let reason = skipReason(enabled: enabled, installed: isInstalled, language: dictationLanguage) {
@@ -80,23 +105,20 @@ nonisolated enum ForkSenseVoice {
             let file = try AVAudioFile(forReading: url)
             let length = Double(file.length) / file.fileFormat.sampleRate
             audio = length
-            guard length <= longestAudio else {
-                note(Record(event: "fallback", detail: "too-long", audio: length))
-                return nil
-            }
-            guard fits(audio: length, available: Int(os_proc_available_memory())) else {
-                note(Record(event: "fallback", detail: "memory", audio: length, memory: peak.megabytes))
+            if let reason = fallbackReason(audio: length, available: Int(os_proc_available_memory()), model: ForkSenseVoiceLoader.state) {
+                if reason == "loading" { ForkSenseVoiceLoader.load() }
+                note(Record(event: "fallback", detail: reason, audio: length, memory: peak.megabytes))
                 return nil
             }
             let samples = try AudioConverter(sampleRate: Double(ForkSenseVoiceEngine.sampleRate)).resampleAudioFile(url)
-            let (engine, load) = try await ForkSenseVoiceLoader.shared.engine()
+            let engine = try await ForkSenseVoiceLoader.shared.engine()
             let reading = try await engine.readWhole(samples, dictationLanguage: dictationLanguage)
             let seconds = (ContinuousClock.now - started) / .seconds(1)
-            guard !reading.text.isEmpty else {
-                note(Record(event: "fallback", detail: "empty", language: reading.language, audio: audio, seconds: seconds, load: load, memory: peak.megabytes))
+            if let reason = textReason(reading.text, audio: length) {
+                note(Record(event: "fallback", detail: reason, language: reading.language, audio: length, seconds: seconds, memory: peak.megabytes))
                 return nil
             }
-            note(Record(event: "transcribed", detail: engineName, language: reading.language, audio: audio, seconds: seconds, load: load, memory: peak.megabytes))
+            note(Record(event: "transcribed", detail: engineName, language: reading.language, audio: length, seconds: seconds, memory: peak.megabytes))
             return reading.text
         } catch {
             let ns = error as NSError
@@ -105,18 +127,18 @@ nonisolated enum ForkSenseVoice {
         }
     }
 
-    /// Starts loading the model as a dictation starts, when SenseVoice would read it and the
-    /// process has room for its longest piece.
+    /// Starts loading the model as a dictation starts or the download finishes, when SenseVoice
+    /// would read the dictation and the process has room for its longest piece.
     static func prewarm() {
         guard isEnabled, skipReason(enabled: true, installed: isInstalled, language: dictationLanguage) == nil,
               fits(audio: ForkSenseVoiceSegments.longestPiece, available: Int(os_proc_available_memory())) else { return }
-        Task.detached(priority: .userInitiated) { _ = try? await ForkSenseVoiceLoader.shared.engine() }
+        ForkSenseVoiceLoader.load()
     }
 
     private static let log = Logger(subsystem: "anomaly.hex.mobile", category: "fork-sensevoice")
 
     static func note(_ record: Record) {
-        log.notice("sensevoice \(record.event, privacy: .public) \(record.detail, privacy: .public) language=\(record.language ?? "", privacy: .public) audio=\(record.audio ?? 0, privacy: .public) seconds=\(record.seconds ?? 0, privacy: .public) load=\(record.load ?? 0, privacy: .public) memory=\(record.memory ?? 0, privacy: .public)")
+        log.notice("sensevoice \(record.event, privacy: .public) \(record.detail, privacy: .public) language=\(record.language ?? "", privacy: .public) audio=\(record.audio ?? 0, privacy: .public) seconds=\(record.seconds ?? 0, privacy: .public) memory=\(record.memory ?? 0, privacy: .public)")
         Record.append(record)
     }
 
@@ -124,18 +146,18 @@ nonisolated enum ForkSenseVoice {
     /// `Library/fork-sensevoice.json` to read off the iPhone later. Never the transcript.
     struct Record: Codable, Equatable, Sendable {
         /// `transcribed`, `fallback`, `skipped`, `live` (one keyboard dictation's live words),
-        /// `downloaded`, or `download-failed`.
+        /// `loaded` or `load-failed` (this process's model load), `downloaded`, or `download-failed`.
         var event: String
-        /// The engine, why the dictation fell back or skipped SenseVoice, or what the download did.
+        /// The engine, why the dictation fell back or skipped SenseVoice, `loading` for live words
+        /// left to the keyboard's own while the model loads, or what the load or download did.
         var detail: String
         /// The language SenseVoice detected.
         var language: String?
         /// Seconds of audio.
         var audio: Double?
-        /// Seconds from the recording to the text, a load included; for `live`, the longest round.
+        /// Seconds from the recording to the text; for `live`, the longest round; for `loaded`,
+        /// `load-failed`, and `downloaded`, how long that took.
         var seconds: Double?
-        /// Seconds this dictation waited for the model to load, when it did.
-        var load: Double?
         /// The process's highest footprint while SenseVoice ran, in MB.
         var memory: Double?
         var at = Date()
@@ -143,13 +165,12 @@ nonisolated enum ForkSenseVoice {
 
         static let limit = 50
 
-        init(event: String, detail: String, language: String? = nil, audio: Double? = nil, seconds: Double? = nil, load: Double? = nil, memory: Double? = nil) {
+        init(event: String, detail: String, language: String? = nil, audio: Double? = nil, seconds: Double? = nil, memory: Double? = nil) {
             self.event = event
             self.detail = detail
             self.language = language
             self.audio = audio.map { ($0 * 100).rounded() / 100 }
             self.seconds = seconds.map { ($0 * 100).rounded() / 100 }
-            self.load = load.map { ($0 * 100).rounded() / 100 }
             self.memory = memory.map { $0.rounded() }
         }
 
@@ -207,37 +228,56 @@ nonisolated enum ForkSenseVoice {
     }
 }
 
-/// Loads SenseVoice once per process (the app, or the keyboard), on first use or when a
-/// dictation starts. A load that fails isn't tried again in that process.
+/// Loads SenseVoice once per process (the app, or the keyboard), when a dictation starts or the
+/// download finishes. Dictations don't wait for it (`ForkSenseVoice.fallbackReason`): the first
+/// load of a new build compiles the encoder for the Neural Engine, 93–101 s on a Mac, against
+/// 0.1–0.2 s for later loads. A load that fails isn't tried again in that process.
 actor ForkSenseVoiceLoader {
+    enum State: Sendable { case notLoaded, loaded, failed }
+
     static let shared = ForkSenseVoiceLoader()
 
     private var loaded: ForkSenseVoiceEngine?
     private var loading: Task<ForkSenseVoiceEngine, any Error>?
     private var failed: (any Error)?
 
-    /// Whether a load failed in this process, read without waiting for the loader.
-    nonisolated static var hasFailed: Bool { failedOnce.withLock { $0 } }
-    private static let failedOnce = OSAllocatedUnfairLock(initialState: false)
+    /// This process's load, read without waiting for the loader.
+    nonisolated static var state: State { current.withLock { $0 } }
+    private static let current = OSAllocatedUnfairLock(initialState: State.notLoaded)
 
-    /// The engine, and the seconds this call waited for it to load (nil when it was loaded).
-    func engine() async throws -> (ForkSenseVoiceEngine, TimeInterval?) {
-        if let loaded { return (loaded, nil) }
+    /// Starts loading in the background unless the model is loaded, loading, or failed to load.
+    nonisolated static func load() {
+        Task.detached(priority: .userInitiated) { _ = try? await shared.engine() }
+    }
+
+    /// The engine, loading it first if needed. The load is logged once, `loaded` or
+    /// `load-failed`, with its seconds.
+    func engine() async throws -> ForkSenseVoiceEngine {
+        if let loaded { return loaded }
         if let failed { throw failed }
-        let started = ContinuousClock.now
         let task = loading ?? Task.detached(priority: .userInitiated) {
-            try ForkSenseVoiceEngine(directory: ForkSenseVoice.directory)
+            let started = ContinuousClock.now
+            do {
+                let engine = try ForkSenseVoiceEngine(directory: ForkSenseVoice.directory)
+                ForkSenseVoice.note(ForkSenseVoice.Record(event: "loaded", detail: ForkSenseVoice.engineName, seconds: (ContinuousClock.now - started) / .seconds(1)))
+                return engine
+            } catch {
+                let ns = error as NSError
+                ForkSenseVoice.note(ForkSenseVoice.Record(event: "load-failed", detail: "\(ns.domain) \(ns.code)", seconds: (ContinuousClock.now - started) / .seconds(1)))
+                throw error
+            }
         }
         loading = task
         do {
             let engine = try await task.value
             loaded = engine
             loading = nil
-            return (engine, (ContinuousClock.now - started) / .seconds(1))
+            Self.current.withLock { $0 = .loaded }
+            return engine
         } catch {
             failed = error
             loading = nil
-            Self.failedOnce.withLock { $0 = true }
+            Self.current.withLock { $0 = .failed }
             throw error
         }
     }
