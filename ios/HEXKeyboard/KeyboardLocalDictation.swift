@@ -390,6 +390,7 @@ final class KeyboardLocalDictation {
             break
         }
         KeyboardParakeet.shared.handleMemoryWarning()
+        ForkKeyboardSenseVoice.shared.handleMemoryWarning()
         guard !isActive else { return }
         let current = capture
         capture = nil
@@ -544,7 +545,6 @@ final class KeyboardLocalDictation {
         }
         let jobID = UUID().uuidString
         ForkDroplineRecognition.prepare()
-        ForkSenseVoice.prewarm()
         let requestedAt = Date()
         let requestedTime = requestedAt.timeIntervalSince1970
         let preferences = DictationPipeline.Preferences.current(

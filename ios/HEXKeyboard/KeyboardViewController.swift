@@ -203,6 +203,7 @@ final class KeyboardViewController: UIInputViewController {
         // keyboard does, and iOS gives up on a keyboard slow to draw.
         let autoStart = DispatchWorkItem { [weak self] in
             self?.autoStartDictationIfPending()
+            if let self, self.isShown, self.hasFullAccess { ForkKeyboardSenseVoice.shared.warmUp(memoryWarned: self.memoryWarned) }
             // Settings › Dictation › Speech model in keyboard: last, and it loads off the main thread.
             // After a memory warning it loads nothing, and says so.
             if let self, self.isShown, self.hasFullAccess { KeyboardParakeet.shared.warmUp(memoryWarned: self.memoryWarned) }

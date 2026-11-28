@@ -50,6 +50,7 @@ final class KeyboardParakeet {
     private var isTranscribing = false
     private var releasesAfterTranscription = false
     private var lastNote = ""
+    var holdsModel: Bool { loaded != nil || loadTask != nil }
 
     /// A load past this is logged; it goes on, and Hex's row stops saying it's getting ready.
     static let loadPatience: TimeInterval = 180

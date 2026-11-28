@@ -34,8 +34,10 @@ whoever resolves a tag merge knows what to keep.
 | `ios/HEXMobile/AppleSpeechTranscriber.swift` | `transcribe(_:vocabulary:)`: `if let senseVoice = await ForkSenseVoice.transcribe(audioURL, dictationLanguage: language.identifier) { return senseVoice }` before the `if let threeLanguage` block (1 line) | While Labs › SenseVoice（中文） applies, SenseVoice-Small writes the app's Apple Speech dictation; nil (lab off, no model, another language, or a failure) falls through to three-language dictation and upstream's paths unchanged. |
 | `ios/HEXKeyboard/KeyboardSpeech.swift` | `transcribe(_:hints:)`: `if let senseVoice = await ForkSenseVoice.transcribe(url, dictationLanguage: language.identifier) { return (senseVoice, language) }` before the `if let threeLanguage` block (1 line) | The same for the keyboard's own Apple Speech dictation. |
 | `ios/HEXKeyboard/KeyboardLiveDictation.swift` | `resolve()`: `if let senseVoice = ForkSenseVoiceLiveWords.source(language: picked?.identifier, sampleRate: rate) { self.attach(senseVoice); return }` before the three-language line (1 line; synchronous, so nothing can stop the capture between the `stopped` check and `attach`) | While SenseVoice writes the dictation and its model has loaded, the keyboard's live words come from SenseVoice and no Apple recogniser starts. |
-| `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkSenseVoice.prewarm()` after `ForkDroplineRecognition.prepare()` (1 line) | Loads SenseVoice as a recording starts, when it will read the dictation. |
-| `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `begin(in:microphone:pressedAt:armed:)`: `ForkSenseVoice.prewarm()` after `ForkDroplineRecognition.prepare()` (1 line) | The same as the keyboard starts recording. |
+| `ios/HEXMobile/DictationController.swift` | `startRecording(...)`: `ForkSenseVoice.prewarm()` after `ForkDroplineRecognition.prepare()` (1 line) | Loads SenseVoice in the app as a recording starts, when it will read the dictation. |
+| `ios/HEXKeyboard/KeyboardViewController.swift` | `scheduleLaunchWork()`: `if let self, self.isShown, self.hasFullAccess { ForkKeyboardSenseVoice.shared.warmUp(memoryWarned: self.memoryWarned) }` after `self?.autoStartDictationIfPending()` in the `autoStart` work item, before Parakeet's `warmUp` (1 line) | The keyboard loads SenseVoice after its first frame and launch work, as it loads Parakeet, or lets it go where Parakeet takes the keyboard. |
+| `ios/HEXKeyboard/KeyboardLocalDictation.swift` | `handleMemoryWarning()`: `ForkKeyboardSenseVoice.shared.handleMemoryWarning()` after `KeyboardParakeet.shared.handleMemoryWarning()` (1 line) | A memory warning lets the keyboard's SenseVoice go, and none loads for 5 minutes. |
+| `ios/HEXKeyboard/KeyboardParakeet.swift` | `var holdsModel: Bool { loaded != nil || loadTask != nil }` after `private var lastNote = ""` (1 line) | SenseVoice doesn't load in a keyboard process that holds or is loading Parakeet, which stays loaded when its plan changes. |
 | `ios/HEXMobile/Settings/ExperimentsSettingsPage.swift` | `dictationSection`: `ForkSenseVoiceSettingsCard()` and a blank line after the Dictation card (2 lines) | Labs › SenseVoice（中文）: the switch, the model's download with its progress, and Remove model. |
 
 ## Fork-only files
@@ -51,8 +53,9 @@ whoever resolves a tag merge knows what to keep.
   `ios/HEXKeyboard/Fork/ForkThreeLanguageLiveWords.swift`, `ios/HEXMobileTests/Fork/ForkThreeLanguageTests.swift`,
   `ios/HEXMobileTests/Fork/ForkThreeLanguageEnglishWordsTests.swift`, `ios/HEXMobileTests/Fork/qa-three-language-lanes.json`,
   and `ios/HEXMobileTests/Fork/qa-three-language-english.json`: three-language dictation.
-- `ios/HEXShared/Fork/ForkSenseVoice*.swift`, `ios/HEXMobile/Fork/ForkSenseVoiceSettingsCard.swift`, and
-  `ios/HEXMobileTests/Fork/ForkSenseVoice*Tests.swift`: SenseVoice（中文）.
+- `ios/HEXShared/Fork/ForkSenseVoice*.swift`, `ios/HEXKeyboard/Fork/ForkKeyboardSenseVoice.swift`,
+  `ios/HEXMobile/Fork/ForkSenseVoiceSettingsCard.swift`, and `ios/HEXMobileTests/Fork/ForkSenseVoice*Tests.swift`:
+  SenseVoice（中文）.
 
 ## Dropline private API
 
@@ -291,29 +294,63 @@ English apart itself, so three-language dictation's readings don't run unless it
 - Final text: the whole recording is read again once it stops, in pieces of at most 15 s cut at the quietest
   300 ms (`ForkSenseVoiceSegments.pieces`). Pieces SenseVoice heard in another language than most of the
   audio are read again in that one. Recordings over 120 s (checked before decoding), a process without room
-  beside what a keyboard needs next (`ForkSenseVoice.fits`: unless the model is loaded, its 60 MB resident
-  footprint and a recording's 24 MB; the read; and 32 MB left for the next dictation to start), a model not
-  loaded in this process yet, a load or read error, no text (text without a letter or digit counts as none),
-  a recording SenseVoice hears as English (short Cantonese with English words often reads as English
-  gibberish, and three-language dictation writes English as it does without the lab), or under one letter or
-  digit a second in a recording of 3 s or more (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to
-  three-language dictation, then upstream's paths, on the same recording. A process left with less than 56
-  MB after a read, or after a dictation it had no room to read, lets the engine go (`released`; one still
-  loading isn't kept), which gives back its 20 MB of logits; Core ML keeps about 28 MB of the first load
-  either way. A dictation never waits for the model: it starts loading as a recording starts and once the
-  download finishes, unless Dropline is selected, and the first load of a new build compiles the encoder for
-  the Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom vocabulary doesn't steer
+  for the read (`ForkSenseVoiceBudget.allowsRead`, below), a model not loaded in this process, a load or
+  read error, no text (text without a letter or digit counts as none), a recording SenseVoice hears as
+  English (short Cantonese with English words often reads as English gibberish, and three-language dictation
+  writes English as it does without the lab), or under one letter or digit a second in a recording of 3 s or
+  more (`ForkSenseVoice.fallbackReason`, `textReason`) fall back to three-language dictation, then
+  upstream's paths, on the same recording. A dictation never waits for the model. The app loads it as a
+  recording starts and once the download finishes, unless Dropline is selected, and a dictation it couldn't
+  read yet starts the load too; it then stays loaded while the app runs, so Keep mic warm's dictations,
+  the keyboard's included, are read in the app. The first load of a new build compiles the encoder for the
+  Neural Engine, 93–101 s on a Mac against 0.1–0.2 s for later loads. Custom vocabulary doesn't steer
   SenseVoice (it takes no hints); Word replacements, learned fixes, and vocabulary spellings still apply
   afterwards, as the Labs card says.
+- In the keyboard (`ForkKeyboardSenseVoice`), as upstream runs Parakeet there (`KeyboardParakeet`): the
+  keyboard measures its limit (footprint plus `os_proc_available_memory`, which Parakeet's `warmUp` also
+  records as `experiments.keyboardParakeet.keyboardLimit`) each time it opens, and after its first frame
+  and launch work decides (`ForkSenseVoiceKeyboard.decide`): nothing while Dropline is selected (a model
+  already loaded stays for its fallback); let the model go where SenseVoice no longer reads the keyboard's
+  dictation, or where Parakeet's plan picks a model or the process holds one (never both models in one
+  keyboard); keep a loaded one; otherwise load it off the main thread where the limit is at least 149 MB,
+  92 MB is free, no memory warning came in the last 5 minutes (`KeyboardParakeet.reloadAfterWarning`), and
+  Core ML lists a Neural Engine. A load whose Neural Engine memory (iOS 27) didn't rise by 100 MB
+  (`KeyboardParakeet.neuralEngineEvidence`) is let go and set aside for that process. The model then stays
+  while the keyboard's process lives; only a memory warning lets it go (a read under way keeps it until it
+  ends). Its dictations never load it: until it has loaded, they go to three-language dictation and Apple's
+  speech recognition (`fallback not-loaded`).
+- Memory (`ForkSenseVoiceBudget`), in `KeyboardParakeetBudget`'s terms: SenseVoice keeps 60 MB of
+  footprint once it has read (measured on a Mac: 28 MB from the load, which Core ML keeps even after the
+  engine goes, and 20 MB of logits for the 128- and 256-frame buckets; 48–59 MB after 2 to 120 reads), so
+  the keyboard records at up to 91 − 42 + 60 = 109 MB with it (Parakeet's recording footprint with
+  Parakeet's load rise swapped for SenseVoice's), and needs a limit of 109 + 16 (Parakeet's transcription
+  rise, above SenseVoice's 13 MB of logits and 1 MB of input for a 15 s piece) + 24 (Parakeet's margin) =
+  149 MB. That leaves 40 MB above the recording, more than the 32 MB the keyboard's next dictation needs to
+  start (`KeyboardLocalDictation.startHeadroomNeeded`), the room "Not enough memory to dictate here"
+  checks. A load needs 60 + 32 = 92 MB free, so SenseVoice's whole footprint, logits included, still
+  leaves those 32 MB. A read needs what a Parakeet transcription needs, 24 MB and 0.5 MB a second of audio
+  (`KeyboardParakeetBudget.transcribeHeadroom`; FluidAudio's converter holds the recording for both):
+  up to 32 s of audio at the recording footprint of a 149 MB keyboard. The app passes these by far. Unmeasured on an iPhone: SenseVoice's footprint there, and whether
+  Parakeet's 42 MB is all of its share of the 91 MB.
+- Labs card: once the model is on the iPhone and the lab is on, a line under the switch says whether the
+  keyboard runs it, in Parakeet's Settings › Dictation words (`KeyboardParakeetStatus`) with SenseVoice's
+  numbers: "This iPhone's keyboard has 120 MB; the model needs 149 MB, so it uses Apple's speech
+  recognition.", or "This iPhone's keyboard has 177 MB; the model needs 149 MB." over what the keyboard
+  last said (`ForkSenseVoiceKeyboardStatus`, `fork.senseVoice.keyboardState*` in the App Group): Getting
+  ready, Ready in the keyboard, the free memory against 92 MB, after a memory warning, no Neural Engine, or
+  a load that failed. Where Parakeet takes the keyboard: "The keyboard uses Hex's speech model for this
+  language instead of SenseVoice." Before the keyboard has measured its limit: "Downloaded. The keyboard
+  gets it ready the next time it opens."
 - Live words (keyboard only; the app shows none): every 2 s of audio the recording after its last settled
   stretch is read; a tail of 8 s settles at a pause, and one of 13 s at its quietest point anyway, so a
   round's cost doesn't grow with the recording. A round due while the last one reads is skipped, so
   SenseVoice reads one thing at a time. Only once the model has loaded in this keyboard (before that, the
-  keyboard's other live words run, three-language and then upstream's, logged as `live` `loading`), and
+  keyboard's other live words run, three-language and then upstream's, logged as `live` `not-loaded`), and
   where the keyboard has room for a 15 s read and Core ML lists a Neural Engine: on a Mac's CPU (as in the
   simulator) a round took up to 1.05 s, against under 0.1 s on its Neural Engine. The first settled
-  stretch's language is kept. A load or read error ends the live words for that dictation; a later dictation
-  in a keyboard whose load failed uses the keyboard's other live words.
+  stretch's language is kept. A load or read error, or a memory warning that lets the model go, ends the
+  live words for that dictation; a later dictation in a keyboard whose load failed uses the keyboard's
+  other live words.
 - Spelling: Simplified output goes through Apple's ICU `Hans-Hant` transform (Taiwan forms), then a
   Cantonese reading takes Hong Kong forms (係, 裏, 着, 啓, 衞), and 松/面 become 鬆/麵 by context
   (`ForkSenseVoiceText`). No OpenCC.
@@ -323,15 +360,18 @@ English apart itself, so three-language dictation's readings don't run unless it
   on an iPhone), which made whole stretches read as "The." or nothing. The two agree within 2e-4 where the
   model is stable.
 - Model: turning the switch on downloads the fp16 files (about 450 MB) into
-  `SpeechModels/sensevoice-small-coreml` in the App Group, with progress; a failed or stalled download turns
+  `SpeechModels/sensevoice-small` in the App Group, with progress; a failed or stalled download turns
   the switch off and resumes next time; a finished one loads the model in the app. Remove model deletes the
   folder.
 - Log: `anomaly.hex.mobile` category `fork-sensevoice`, and the newest 50 records in the App Group's
-  `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `loading`, `load-failed`,
-  `empty`, `english`, `sparse`, `error …`), `skipped`, `live` (rounds, skipped rounds, the longest round, or
-  `loading`), `loaded` and `load-failed` (the load's seconds), `released` (what was left), `downloaded`, and
-  `download-failed`, with the process and, where they apply, the detected language, audio and wall seconds,
-  and peak footprint. Never what was said.
+  `Library/fork-sensevoice.json`: `transcribed`, `fallback` (`too-long`, `memory`, `loading` (the app),
+  `not-loaded` (the keyboard), `load-failed`, `empty`, `english`, `sparse`, `error …`), `skipped`, `live`
+  (rounds, skipped rounds, the longest round, or `not-loaded`), `loaded` and `load-failed` (the load's
+  seconds), `released` (`memory warning`, `parakeet`, `off`, or `not on the Neural Engine`), `keyboard`
+  (why the keyboard didn't load it as it opened, once in a row per reason: `too-small` with the limit,
+  `shortOfMemory` with what was free, `noNeuralEngine`), `downloaded`, and `download-failed`, with the
+  process and, where they apply, the detected language, audio and wall seconds, and peak footprint. Never
+  what was said.
 - Unverified on an iPhone: per-round time, the Neural Engine path, the keyboard's memory, and the first
   load's time were measured on a Mac and in the simulator only (DER-187).
 

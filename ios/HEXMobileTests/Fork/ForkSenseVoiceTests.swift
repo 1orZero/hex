@@ -204,38 +204,20 @@ final class ForkSenseVoiceTests: XCTestCase {
         }
     }
 
-    func testAReadNeedsRoomForItsLargestPieceAndTheRecording() {
-        XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 0, loaded: true))
-        XCTAssertFalse(ForkSenseVoice.fits(audio: 60, available: 40 * 1_048_576, loaded: true))
-        XCTAssertTrue(ForkSenseVoice.fits(audio: 60, available: 64 * 1_048_576, loaded: true))
-    }
-
-    /// A keyboard of 177 MB (an iPhone 17 Pro's) at 50 MB has 127 MB free: SenseVoice's 60 MB and
-    /// a recording's 24 MB still leave the 32 MB its next dictation needs to start. At 80 MB (a
-    /// keyboard that has dictated a while, or holds Parakeet) it doesn't load.
-    func testSenseVoiceLoadsOnlyWhereTheKeyboardKeepsRoomForItsNextDictation() {
-        let megabyte = 1_048_576
-        XCTAssertTrue(ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: 127 * megabyte, loaded: false))
-        XCTAssertFalse(ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: 97 * megabyte, loaded: false))
-        XCTAssertTrue(ForkSenseVoice.fits(audio: ForkSenseVoiceSegments.longestPiece, available: 0, loaded: false))
-        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 97 * megabyte, model: .notLoaded), "memory")
-        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 127 * megabyte, model: .notLoaded), "loading")
-        XCTAssertNil(ForkSenseVoice.fallbackReason(audio: 5, available: 64 * megabyte, model: .loaded))
-    }
-
-    func testAShortKeyboardLetsTheEngineGoAfterARead() {
-        let megabyte = 1_048_576
-        XCTAssertTrue(ForkSenseVoice.releases(available: 40 * megabyte))
-        XCTAssertFalse(ForkSenseVoice.releases(available: 64 * megabyte))
-        XCTAssertFalse(ForkSenseVoice.releases(available: 0), "no limit, as in the simulator and on a Mac")
-    }
-
+    /// The app starts loading on the first dictation it can't read yet; the keyboard loads only as
+    /// it opens (`ForkKeyboardSenseVoice`), so its dictation just goes to Apple's path.
     func testADictationGoesToApplesPathUntilTheModelHasLoaded() {
-        XCTAssertNil(ForkSenseVoice.fallbackReason(audio: 5, available: 0, model: .loaded))
-        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 0, model: .notLoaded), "loading")
-        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 0, model: .failed), "load-failed")
-        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 130, available: 0, model: .loaded), "too-long")
-        XCTAssertEqual(ForkSenseVoice.fallbackReason(audio: 5, available: 1_048_576, model: .loaded), "memory")
+        func reason(audio: TimeInterval = 5, footprint: Int = 0, available: Int = 0, _ model: ForkSenseVoiceLoader.State, loadsHere: Bool = true) -> String? {
+            ForkSenseVoice.fallbackReason(audio: audio, footprint: footprint, available: available, model: model, loadsHere: loadsHere)
+        }
+        let megabyte = 1_048_576
+        XCTAssertNil(reason(.loaded))
+        XCTAssertEqual(reason(.notLoaded), "loading")
+        XCTAssertEqual(reason(.notLoaded, loadsHere: false), "not-loaded")
+        XCTAssertEqual(reason(.failed), "load-failed")
+        XCTAssertEqual(reason(audio: 130, .loaded), "too-long")
+        XCTAssertEqual(reason(footprint: 176 * megabyte, available: megabyte, .loaded), "memory")
+        XCTAssertEqual(reason(footprint: 100 * megabyte, available: 77 * megabyte, .notLoaded), "memory", "the app's load needs 92 MB left too")
     }
 
     func testTooLittleTextForTheRecordingGoesToApplesPath() {
